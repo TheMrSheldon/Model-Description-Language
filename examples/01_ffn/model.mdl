@@ -1,0 +1,10 @@
+
+module Linear(indim: unsigned, outdim: unsigned, bias: bool) {
+    W: Tensor[outdim, indim]
+    b: Tensor[indim]
+
+    forward(x: Tensor[..., indim]) =>
+        bias?
+            no => x @ W.T
+            yes => x @ W.T + b
+}
