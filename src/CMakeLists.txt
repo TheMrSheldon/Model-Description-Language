@@ -11,6 +11,7 @@ target_sources(mdl
 		FILES
 			${CMAKE_CURRENT_LIST_DIR}/../include/mdl/computegraph.hpp
 	PRIVATE
+		mdl/compiler.cpp
 		mdl/computegraph.cpp
 		mdl/parser.cpp
 		mdl/parser/definitions.cpp
@@ -86,7 +87,7 @@ CPMAddPackage(
 	EXCLUDE_FROM_ALL YES
 )
 set_property(TARGET spdlog PROPERTY POSITION_INDEPENDENT_CODE ON)  # Is this needed?
-target_link_libraries(mdlc spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
+target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
 # CLI11
 CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)

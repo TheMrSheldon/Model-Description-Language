@@ -5,7 +5,9 @@
 #include <variant>
 
 #include <mdl/computegraph.hpp>
+#include <mdl/namespace.hpp>
 
+using mdl::Namespace;
 using mdl::Computegraph;
 
 // Not a reference because ANTLR wants to copy construct them :/
