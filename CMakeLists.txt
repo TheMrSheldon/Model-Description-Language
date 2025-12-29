@@ -74,3 +74,10 @@ message("Loaded CPM v${CURRENT_CPM_VERSION}")
 
 # Add Source code
 add_subdirectory(src)
+
+
+##########################################################################################
+# Examples
+##########################################################################################
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+add_subdirectory(examples)

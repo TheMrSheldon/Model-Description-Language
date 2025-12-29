@@ -12,6 +12,8 @@ using mdl::Computegraph;
 
 // Not a reference because ANTLR wants to copy construct them :/
 using ComputegraphRef = Computegraph*;
+using Node = Computegraph::Node;
+using Operation = Computegraph::Operation;
 
 extern Computegraph empty;
 

@@ -23,7 +23,7 @@ module TransformerEncoder(conf: TransformerConf) {
     ffnNorm: LayerNorm[conf.dims.model]
 
     bertGELU(x: Tensor[...]) =>
-        x * 0.5 * (1 + erf(x / sqrt(2)))
+        x * 0.5 * (1 + erf(x / sqrt(2)));
 
     sdpa(query: Tensor[..., conf.numAttnHeads * conf.dims.key], key: Tensor[..., conf.numAttnHeads * conf.dims.key], value: Tensor[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
@@ -35,7 +35,7 @@ module TransformerEncoder(conf: TransformerConf) {
     }
     
     mha(query: Tensor[..., conf.numAttnHeads * conf.dims.key], key: Tensor[..., conf.numAttnHeads * conf.dims.key], value: Tensor[..., conf.numAttnHeads * conf.dims.value]) =>
-        weightOut(sdpa(query, key, value))
+        weightOut(sdpa(query, key, value));
 
     forward(x: Tensor[..., conf.dims.model]) {
         auto attn = mhaNorm(mha(weightQuery(x), weightKey(x), weightValue(x)) + x);

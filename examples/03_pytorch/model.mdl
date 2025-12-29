@@ -1,0 +1,8 @@
+
+module Linear(indim: unsigned, outdim: unsigned, bias: bool) {
+    W: Tensor[outdim, indim]
+    b: Tensor[indim]
+
+    forward(x: Tensor[..., indim]) =>
+        x @ W + b;
+}

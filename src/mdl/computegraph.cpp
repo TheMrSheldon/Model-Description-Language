@@ -18,13 +18,12 @@ using Operation = Computegraph::Operation;
 
 size_t Computegraph::getNumNodes() const { return nodes.size(); }
 
-const Node& Computegraph::getNode(size_t idx) const { return nodes[idx]; }
+const Node& Computegraph::getNode(size_t idx) const { return *nodes[idx]; }
 
 Computegraph& Computegraph::addSubgraph() { return subgraphs.emplace_back(); }
 
-void Computegraph::setOutputNode() {
-	/** \todo implement **/
-	throw std::runtime_error{"Not implemented"};
+void Computegraph::setOutputNode(const Node* node) {
+	outputNode = node;
 }
 
 size_t Computegraph::getNumInputNodes() const {
@@ -35,7 +34,6 @@ const Node& Computegraph::getInputNode(size_t idx) const {
 	/** \todo implement **/
 	throw std::runtime_error{"Not implemented"};
 }
-const Node& Computegraph::getOutputNode() const {
-	/** \todo implement **/
-	throw std::runtime_error{"Not implemented"};
+const Node* Computegraph::getOutputNode() const {
+	return outputNode;
 }

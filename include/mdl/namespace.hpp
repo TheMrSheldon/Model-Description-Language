@@ -1,8 +1,10 @@
 #ifndef MDL_NAMESPACE_HPP
 #define MDL_NAMESPACE_HPP
 
+#include <any>
 #include <map>
 #include <string>
+#include <cassert>
 
 #include <iostream>
 
@@ -10,16 +12,19 @@ namespace mdl {
 
     class Namespace final {
     private:
+        std::map<std::string, std::any> objects;
         
     public:
         template<typename T>
-        void put(std::string_view name, T&& obj) {
-            std::cout << "Adding " << name << std::endl;
+        const T& put(std::string_view name, T&& obj) {
+            auto [it, inserted] = objects.emplace(std::string{name}, std::move(obj));
+            assert(inserted);
+            return std::any_cast<const T&>(it->second);
         }
 
         template<typename T>
         const T& get(std::string_view name) {
-            std::cout << "Fetching " << name << std::endl;
+            return std::any_cast<const T&>(objects[std::string{name}]);
         }
     };
 

@@ -4,7 +4,8 @@ module Linear(indim: unsigned, outdim: unsigned, bias: bool) {
     b: Tensor[indim]
 
     forward(x: Tensor[..., indim]) =>
-        bias?
+        x @ W + b
+        /*bias?
             no => x @ W.T
-            yes => x @ W.T + b
+            yes => x @ W.T + b*/;
 }

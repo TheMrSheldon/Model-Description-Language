@@ -33,15 +33,17 @@ module_def returns[Module value]
 
 param_list[ComputegraphRef graph, Namespace* ns]
               : ((param[$graph, $ns] COMMA)* param[$graph, $ns])?
+                { /**\todo implement**/ }
               ;
 
 param[ComputegraphRef graph, Namespace* ns]
               : IDENT COLON type[$graph, $ns]
-                { ns->put($IDENT.text, $graph->addInputNode()); }
+                { ns->put($IDENT.text, &$graph->addInputNode()); }
               ;
 
 type[ComputegraphRef graph, Namespace* ns]
               : type_specifier typearg_specifier[$graph, $ns]?
+                { /**\todo implement**/ }
               ;
 
 type_arg_list[ComputegraphRef graph, Namespace* ns]
@@ -70,17 +72,18 @@ module_entry[Module* module, Namespace* ns]
 vardecl[ComputegraphRef graph, Namespace* ns]
         returns[VarDesc value]
               : IDENT COLON type[$graph, $ns]
-                { $value = VarDesc{/*.value=*/$IDENT.text, /*.node=*/&$graph->addArgumentNode()}; }
+                { $value = VarDesc{/*.value=*/$IDENT.text, /*.node=*/ns->put($IDENT.text, &$graph->addArgumentNode())}; }
               | STRUCT LBRACE vardecl[$graph, $ns]* RBRACE IDENT
+                { /**\todo implement**/ }
               ;
 
 funcdef[ComputegraphRef context, Namespace* outer_ns]
         returns[FuncDesc value]
         locals[Namespace ns]
         @init{$value.graph = &context->addSubgraph(); $ns = {*$outer_ns};}
-              : IDENT LPAREN param_list[$context, &$ns] RPAREN EQGR expr[$value.graph, &$ns]
-                { $value.name = $IDENT.text; }
-              | IDENT LPAREN param_list[$context, &$ns] RPAREN LBRACE statement[$value.graph, &$ns]* RBRACE
+              : IDENT LPAREN param_list[$value.graph, &$ns] RPAREN EQGR expr[$value.graph, &$ns] SEMICOLON
+                { $value.name = $IDENT.text; $value.graph->setOutputNode($expr.node); }
+              | IDENT LPAREN param_list[$value.graph, &$ns] RPAREN LBRACE statement[$value.graph, &$ns]* RBRACE
                 { $value.name = $IDENT.text; }
               ;
 
@@ -111,33 +114,58 @@ keyvalue[ComputegraphRef graph, Namespace* ns]
               ;
 
 expr_primary[ComputegraphRef graph, Namespace* ns]
+    returns[const Node* node]
               : IDENT
+                { $node = ns->get<const Node*>($IDENT.text); }
               | constant
+                { $node = &$graph->addConstNode($constant.value); }
               | LPAREN expr[$graph, $ns] RPAREN
+                { $node = $expr.node; }
               ;
 
 expr_postfix[ComputegraphRef graph, Namespace* ns]
+    returns[const Node* node]
               : expr_primary[$graph, $ns] (DOT IDENT | LPAREN funcarglist[$graph, $ns] RPAREN | LBRACK einops[$graph, $ns] RBRACK)*
+                { $node = $expr_primary.node; /** \todo implement properly **/}
               ;
 
 expr_mult[ComputegraphRef graph, Namespace* ns]
-              : expr_postfix[$graph, $ns] ('*' expr_postfix[$graph, $ns] | SLASH expr_postfix[$graph, $ns] | '@' expr_postfix[$graph, $ns])*
+    returns[const Node* node]
+              : expr_postfix[$graph, $ns] '*' expr_mult[$graph, $ns]
+                { $node = &$graph->addOpNode(Operation::MULT, {$expr_postfix.node, $expr_mult.node}); }
+              | expr_postfix[$graph, $ns] SLASH expr_mult[$graph, $ns]
+                { $node = &$graph->addOpNode(Operation::DIV, {$expr_postfix.node, $expr_mult.node}); }
+              | expr_postfix[$graph, $ns] '@' expr_mult[$graph, $ns]
+                { $node = &$graph->addOpNode(Operation::MATMULT, {$expr_postfix.node, $expr_mult.node}); }
+              | expr_postfix[$graph, $ns]
+                { $node = $expr_postfix.node; }
               ;
 
 expr_add[ComputegraphRef graph, Namespace* ns]
-              : expr_mult[$graph, $ns] (PLUS expr_mult[$graph, $ns] | MINUS expr_mult[$graph, $ns])*
+    returns[const Node* node]
+              : expr_mult[$graph, $ns] PLUS expr_add[$graph, $ns]
+                { $node = &$graph->addOpNode(Operation::ADD, {$expr_mult.node, $expr_add.node}); }
+              | expr_mult[$graph, $ns] MINUS expr_add[$graph, $ns]
+                { $node = &$graph->addOpNode(Operation::SUB, {$expr_mult.node, $expr_add.node}); }
+              | expr_mult[$graph, $ns]
+                { $node = $expr_mult.node; }
               ;
 
 expr_switch[ComputegraphRef graph, Namespace* ns]
+    returns[const Node* node]
               : expr_add[$graph, $ns]
+                { $node = $expr_add.node; }
               | expr_add[$graph, $ns] QMARK switch_alternative[$graph, $ns]*
               ;
 
 expr[ComputegraphRef graph, Namespace* ns]
+    returns[const Node* node]
               : expr_switch[$graph, $ns]
+                { $node = $expr_switch.node; }
               ;
 
 switch_alternative[ComputegraphRef graph, Namespace* ns]
+    returns[const Node* node]
               : IDENT EQGR expr[$graph, $ns]
               ;
 

@@ -3,10 +3,10 @@
 
 #include <filesystem>
 
-namespace mdl {
-    class Computegraph;
+class Module;
 
-    void compileToFile(const Computegraph& graph, const std::filesystem::path& output);
+namespace mdl {
+    void compileToFile(const Module& module, const std::filesystem::path& output);
 }
 
 #endif
