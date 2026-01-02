@@ -1,8 +1,8 @@
 
-module Linear(indim: unsigned, outdim: unsigned, bias: bool) {
-    W: Tensor[outdim, indim]
-    b: Tensor[indim]
+module Linear() {
+    W: Tensor[3, 8]
+    b: Tensor[3]
 
-    forward(x: Tensor[..., indim]) =>
-        x @ W + b;
+    forward(x: Tensor[8]) =>
+        W@x + b;
 }

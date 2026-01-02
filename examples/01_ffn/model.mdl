@@ -1,10 +1,10 @@
 
-module Linear(indim: unsigned, outdim: unsigned, bias: bool) {
-    W: Tensor[outdim, indim]
-    b: Tensor[indim]
+module Linear(indim: uint, outdim: uint, bias: bool) {
+    W: float[3,8]/*[outdim, indim]*/
+    b: float[3]/*[outdim]*/
 
-    forward(x: Tensor[..., indim]) =>
-        x @ W + b
+    forward(x: int[8] /*float[..., indim]*/) =>
+        W @ x + b
         /*bias?
             no => x @ W.T
             yes => x @ W.T + b*/;

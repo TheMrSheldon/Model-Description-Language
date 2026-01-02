@@ -19,6 +19,7 @@ target_sources(mdl
 
 # The Model Compiler
 add_executable(mdlc)
+target_compile_features(mdlc PUBLIC cxx_std_23)
 
 target_sources(
     mdlc
@@ -28,7 +29,7 @@ target_sources(
 )
 
 target_link_libraries(mdlc mdl)
-target_compile_features(mdlc PUBLIC cxx_std_23)
+target_compile_features(mdl PUBLIC cxx_std_23)
 
 
 ##########################################################################################

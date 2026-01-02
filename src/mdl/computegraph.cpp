@@ -22,9 +22,7 @@ const Node& Computegraph::getNode(size_t idx) const { return *nodes[idx]; }
 
 Computegraph& Computegraph::addSubgraph() { return subgraphs.emplace_back(); }
 
-void Computegraph::setOutputNode(const Node* node) {
-	outputNode = node;
-}
+void Computegraph::setOutputNode(const Node* node) { outputNode = node; }
 
 size_t Computegraph::getNumInputNodes() const {
 	/** \todo implement **/
@@ -34,6 +32,4 @@ const Node& Computegraph::getInputNode(size_t idx) const {
 	/** \todo implement **/
 	throw std::runtime_error{"Not implemented"};
 }
-const Node* Computegraph::getOutputNode() const {
-	return outputNode;
-}
+const Node* Computegraph::getOutputNode() const { return outputNode; }

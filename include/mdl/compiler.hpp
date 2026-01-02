@@ -6,7 +6,7 @@
 class Module;
 
 namespace mdl {
-    void compileToFile(const Module& module, const std::filesystem::path& output);
+	void compileToFile(const Module& module, const std::filesystem::path& output);
 }
 
 #endif

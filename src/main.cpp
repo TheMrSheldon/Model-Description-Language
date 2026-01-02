@@ -1,7 +1,7 @@
 #include "mdl/logging.hpp"
 
-#include <mdl/parser.hpp>
 #include <mdl/compiler.hpp>
+#include <mdl/parser.hpp>
 
 #include <CLI/CLI.hpp>
 
@@ -43,10 +43,30 @@ struct CompileArgs {
 	bool generateHeaders;
 };
 
-template <class... Ts>
-struct overloaded : Ts... {
-	using Ts::operator()...;
-};
+static void print(const mdl::DataType& dtype, std::string prefix = "") {
+	std::visit(
+			mdl::overloaded{
+					[prefix](mdl::Primitive p) {
+						std::cout << prefix << "Primitive " << std::to_underlying(p) << std::endl;
+					},
+					[prefix](mdl::TensorType t) {
+						std::cout << prefix << "Tensor " << std::to_underlying(t.type) << '[';
+						for (auto p : t.shape) {
+							std::visit(
+									mdl::overloaded{
+											[](unsigned i) { std::cout << i << ','; },
+											[](mdl::Elipsis) { std::cout << "...,"; }
+									},
+									p
+							);
+						}
+						std::cout << ']' << std::endl;
+					},
+					[prefix](mdl::AggregateType a) { std::cout << prefix << "Struct" << std::endl; }
+			},
+			dtype
+	);
+}
 
 static void print(const Struct& s) { std::cout << "Struct " << s.name << std::endl; }
 
@@ -55,13 +75,22 @@ static void print(const Node* node, std::string prefix = "") {
 		std::cout << "Null" << std::endl;
 	else {
 		std::cout << prefix << std::to_underlying(node->operation) << std::endl;
-		std::visit(overloaded{
-			[prefix](const std::variant<double, int>& c){std::visit([prefix](auto x){ std::cout << prefix << ':' << x << std::endl;}, c);},
-			[prefix](const std::vector<const Node*>& nodes){
-				for (const auto& n : nodes)
-					print(n, prefix+" ");
-			}
-		}, node->value);
+		std::visit(
+				mdl::overloaded{
+						[prefix](const std::variant<double, int>& c) {
+							std::visit([prefix](auto x) { std::cout << prefix << ':' << x << std::endl; }, c);
+						},
+						[prefix](const std::vector<const Node*>& nodes) {
+							for (const auto& n : nodes)
+								print(n, prefix + " ");
+						},
+						[prefix, node](const std::string& str) {
+							std::cout << prefix << "Input/Arg: " << str << std::endl;
+							print(node->dtype, prefix + " ");
+						}
+				},
+				node->value
+		);
 	}
 }
 
@@ -92,11 +121,11 @@ static void runCompileCommand(const CompileArgs& args) {
 	/** \todo: handle multiple input files */
 	auto program = mdl::parser::parse(args.inputs[0]);
 	for (const auto& [key, value] : program.definitions) {
-		std::visit(overloaded{[](const Struct& s) { print(s); }, [](const Module& m) { print(m); }}, value);
+		std::visit(mdl::overloaded{[](const Struct& s) { print(s); }, [](const Module& m) { print(m); }}, value);
 	}
 
 	const Module& module = std::get<Module>(program.definitions["Linear"]); /** \todo from module **/
-	
+
 	mdl::compileToFile(module, output);
 }
 

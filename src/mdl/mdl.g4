@@ -38,21 +38,41 @@ param_list[ComputegraphRef graph, Namespace* ns]
 
 param[ComputegraphRef graph, Namespace* ns]
               : IDENT COLON type[$graph, $ns]
-                { ns->put($IDENT.text, &$graph->addInputNode()); }
+                { ns->put($IDENT.text, &$graph->addInputNode($IDENT.text, $type.dtype)); /* \todo For Modules this should not be an input node but an ArgumentNode */ }
               ;
 
 type[ComputegraphRef graph, Namespace* ns]
-              : type_specifier typearg_specifier[$graph, $ns]?
-                { /**\todo implement**/ }
+        returns[DataType dtype]
+              : type_specifier[$ns] typearg_specifier[$graph, $ns]
+                { $dtype = setTypeArgs($type_specifier.dtype, $typearg_specifier.specs).value(); /* \todo handle error */ }
+              | type_specifier[$ns]
+                { $dtype = $type_specifier.dtype; }
               ;
 
 type_arg_list[ComputegraphRef graph, Namespace* ns]
+    returns[std::vector<TypeArg> typeargs]
               : (args+=type_arg[$graph, $ns] (COMMA args+=type_arg[$graph, $ns])*)?
+                {
+                  for (const auto& a : $args)
+                    $typeargs.emplace_back(a->arg);
+                }
               ;
 
 type_arg[ComputegraphRef graph, Namespace* ns]
+    returns[TypeArg arg]
               : ELIPSIS
+                { $arg = mdl::Elipsis{}; }
               | expr[$graph, $ns]
+                {
+                  if ($expr.node->operation == Operation::Const) {
+                    $arg = $expr.node->constValue();
+                  } else if ($expr.node->operation == Operation::Argument) {
+                    $arg = $expr.node;
+                  } else {
+                    /** \todo write descriptive error message **/
+                    assert(false);
+                  }
+                }
               ;
 
 constant returns[std::variant<double, int> value]
@@ -72,7 +92,7 @@ module_entry[Module* module, Namespace* ns]
 vardecl[ComputegraphRef graph, Namespace* ns]
         returns[VarDesc value]
               : IDENT COLON type[$graph, $ns]
-                { $value = VarDesc{/*.value=*/$IDENT.text, /*.node=*/ns->put($IDENT.text, &$graph->addArgumentNode())}; }
+                { $value = VarDesc{/*.value=*/$IDENT.text, /*.node=*/ns->put($IDENT.text, &$graph->addArgumentNode($IDENT.text, $type.dtype))}; }
               | STRUCT LBRACE vardecl[$graph, $ns]* RBRACE IDENT
                 { /**\todo implement**/ }
               ;
@@ -169,16 +189,21 @@ switch_alternative[ComputegraphRef graph, Namespace* ns]
               : IDENT EQGR expr[$graph, $ns]
               ;
 
-type_specifier : IDENT
-               ;
+type_specifier[Namespace* ns]
+    returns[DataType dtype]
+              : IDENT
+                { $dtype = $ns->getType($IDENT.text); }
+              ;
 
 typearg_specifier[ComputegraphRef graph, Namespace* ns]
-                  : LBRACK type_arg_list[$graph, $ns] RBRACK
-                  ;
+    returns[std::vector<TypeArg> specs]
+              : LBRACK type_arg_list[$graph, $ns] RBRACK
+                { $specs = $type_arg_list.typeargs; }
+              ;
 
 declaration[ComputegraphRef graph, Namespace* ns]
-                  : (type_specifier typearg_specifier[$graph, $ns] | AUTO) IDENT EQ expr[$graph, $ns]
-                  ;
+              : (type[$graph, $ns] | AUTO) IDENT EQ expr[$graph, $ns]
+              ;
 
 statement[ComputegraphRef graph, Namespace* ns]
               : expr[$graph, $ns] SEMICOLON
