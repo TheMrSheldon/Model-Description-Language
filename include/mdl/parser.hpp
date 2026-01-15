@@ -7,7 +7,7 @@
 #include <iostream>
 
 namespace mdl::parser {
-	Program parse(std::istream& stream);
+	Program parse(std::istream& stream, std::string_view sourcename = "<stream>");
 	Program parse(const std::filesystem::path& file);
 } // namespace mdl::parser
 

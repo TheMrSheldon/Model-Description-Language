@@ -1,0 +1,71 @@
+/**
+ * @brief Mean
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] mean(x: float[..., N]) => __builtin_mean(x);
+
+/**
+ * @brief Sum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] sum(x: float[..., N]) => __builtin_sum(x);
+
+/**
+ * @brief Minimum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] min(x: float[..., N]) => __builtin_max(x);
+
+/**
+ * @brief Maximum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] max(x: float[..., N]) => __builtin_max(x);
+
+/**
+ * @brief Elementwise maximum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @param y 
+ * @return 
+ */
+float[...] max(x: float[...], y: float[...]) => __builtin_max(x, y);
+
+/**
+ * @brief Variance
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @param dof 
+ * @return 
+ */
+float[...] var(x: float[...], dof: uint = 1) => __builtin_var(x, dof);
+
+/**
+ * @brief (Gauss) Error Function
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] erf(x: float[...]) => __builtin_erf(x);

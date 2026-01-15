@@ -14,15 +14,23 @@ namespace mdl {
 
 	class Namespace final {
 	private:
+		/** @brief Builtin constants and functions. **/
+		static const std::map<std::string, std::any> builtins;
+		/** @brief Builtin datatypes. **/
+		static const std::map<std::string, DataType> builtinTypes;
+
+		const Namespace* parent;
 		std::map<std::string, std::any> objects;
 		std::map<std::string, DataType> types;
 
+		explicit Namespace(
+				const Namespace* parent, const std::map<std::string, std::any>& objects = {},
+				const std::map<std::string, DataType>& types = {}
+		)
+				: parent(parent), objects{objects}, types{types} {}
+
 	public:
-		Namespace()
-				: objects{}, types{{"int", Primitive::integer},
-								   {"uint", Primitive::uint},
-								   {"bool", Primitive::boolean},
-								   {"float", Primitive::floating}} {}
+		Namespace() {}
 
 		template <typename T>
 		const T& put(std::string_view name, T&& obj) {
@@ -32,11 +40,26 @@ namespace mdl {
 		}
 
 		template <typename T>
-		const T& get(std::string_view name) {
-			return std::any_cast<const T&>(objects[std::string{name}]);
+		const T& get(std::string_view name) const {
+			/** \todo handle misses **/
+			auto it = objects.find(std::string{name});
+			if (it != std::end(objects))
+				return std::any_cast<const T&>(it->second);
+			return parent->get<T>(name);
 		}
 
+		const DataType& putType(std::string_view name, DataType&& type) {
+			auto [it, inserted] = objects.emplace(std::string{name}, std::move(type));
+			assert(inserted);
+			return std::any_cast<const DataType&>(it->second);
+		}
 		const DataType getType(std::string_view name) { return types[std::string{name}]; }
+
+		static const Namespace& baseNamespace() {
+			static Namespace bns{nullptr, builtins, builtinTypes};
+			return bns;
+		}
+		Namespace createSubnamespace() const { return Namespace{this}; }
 	};
 
 } // namespace mdl

@@ -1,0 +1,4 @@
+Linear:
+  indim: 3
+  outdim: 8
+  bias: false

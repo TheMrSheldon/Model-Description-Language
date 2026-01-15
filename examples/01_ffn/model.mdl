@@ -1,10 +1,10 @@
 
-module Linear(indim: uint, outdim: uint, bias: bool) {
-    W: float[3,8]/*[outdim, indim]*/
+module Linear(indim: uint, outdim: uint, bias: bool, auto) {
+    W: float[outdim, indim]
     b: float[3]/*[outdim]*/
 
-    forward(x: int[8] /*float[..., indim]*/) =>
-        W @ x + b
+    forward(x: float[8] /*float[..., indim]*/ auto) =>
+        x @ W + b
         /*bias?
             no => x @ W.T
             yes => x @ W.T + b*/;

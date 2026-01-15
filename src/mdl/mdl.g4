@@ -16,17 +16,21 @@ program_body[Program* prog]
                 { $prog->definitions.try_emplace($module_def.value.name, std::move($module_def.value)); }
               | struct_def program_body[$prog]
                 { $prog->definitions.try_emplace($struct_def.value.name, std::move($struct_def.value)); }
+              // | funcdef[&$module->graph, $ns] /* create global compute graph */
+              //  { }*/
               | EOF
               ;
 
 struct_def returns[Struct value]
             locals[Namespace ns]
+            @init{$ns = Namespace::baseNamespace();}
               : STRUCT IDENT LBRACE vardecl[&empty, &$ns]* RBRACE
                 { $value.name = $IDENT.text; }
               ;
 
 module_def returns[Module value]
             locals[Namespace ns]
+            @init{$ns = Namespace::baseNamespace();}
               : MODULE IDENT LPAREN param_list[&$value.graph, &$ns] RPAREN LBRACE module_entry[&$value, &$ns]* RBRACE
                 { $value.name = $IDENT.text; }
               ;
@@ -100,7 +104,7 @@ vardecl[ComputegraphRef graph, Namespace* ns]
 funcdef[ComputegraphRef context, Namespace* outer_ns]
         returns[FuncDesc value]
         locals[Namespace ns]
-        @init{$value.graph = &context->addSubgraph(); $ns = {*$outer_ns};}
+        @init{$value.graph = &context->addSubgraph(); $ns = $outer_ns->createSubnamespace();}
               : IDENT LPAREN param_list[$value.graph, &$ns] RPAREN EQGR expr[$value.graph, &$ns] SEMICOLON
                 { $value.name = $IDENT.text; $value.graph->setOutputNode($expr.node); }
               | IDENT LPAREN param_list[$value.graph, &$ns] RPAREN LBRACE statement[$value.graph, &$ns]* RBRACE

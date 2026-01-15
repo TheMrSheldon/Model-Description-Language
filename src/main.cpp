@@ -1,72 +1,19 @@
-#include "mdl/logging.hpp"
+#include "commands/common.hpp"
 
 #include <mdl/compiler.hpp>
 #include <mdl/parser.hpp>
-
-#include <CLI/CLI.hpp>
+#include <mdl/utils/utils.hpp>
 
 #include <iostream>
 #include <optional>
 
-struct LoggerConf final {
-	bool quiet = false;
-	/**
-	 * @brief Sets the verbosity of the logger. Per default (verbosity=0) only critical, error and warnings are printed.
-	 * If verbosity is...
-	 *  - 1: info and above is printed
-	 *  - 2: debug and above is printed
-	 *  - 3+: trace and above is printed
-	 */
-	int verbosity = 0;
-
-	mdl::log::Verbosity getVerbosity() const noexcept {
-		if (quiet)
-			return mdl::log::Verbosity::Off;
-		auto verb = static_cast<int>(mdl::log::Verbosity::Warning) + verbosity;
-		verb = std::min(verb, static_cast<int>(mdl::log::Verbosity::Trace));
-		return static_cast<mdl::log::Verbosity>(verb);
-	}
-};
-
-void setupLoggerArgs(CLI::App& app, LoggerConf& conf) {
-	app.add_flag(
-			"-v,--verbose", conf.verbosity,
-			"Sets the logger's verbosity. Passing it multiple times increases verbosity."
-	);
-	app.add_flag("-q,--quiet", conf.quiet, "Supresses all outputs");
-}
-
 struct CompileArgs {
 	std::vector<std::filesystem::path> inputs;
 	std::optional<std::filesystem::path> output;
+	std::optional<std::filesystem::path> argvals;
 	LoggerConf logConf;
 	bool generateHeaders;
 };
-
-static void print(const mdl::DataType& dtype, std::string prefix = "") {
-	std::visit(
-			mdl::overloaded{
-					[prefix](mdl::Primitive p) {
-						std::cout << prefix << "Primitive " << std::to_underlying(p) << std::endl;
-					},
-					[prefix](mdl::TensorType t) {
-						std::cout << prefix << "Tensor " << std::to_underlying(t.type) << '[';
-						for (auto p : t.shape) {
-							std::visit(
-									mdl::overloaded{
-											[](unsigned i) { std::cout << i << ','; },
-											[](mdl::Elipsis) { std::cout << "...,"; }
-									},
-									p
-							);
-						}
-						std::cout << ']' << std::endl;
-					},
-					[prefix](mdl::AggregateType a) { std::cout << prefix << "Struct" << std::endl; }
-			},
-			dtype
-	);
-}
 
 static void print(const Struct& s) { std::cout << "Struct " << s.name << std::endl; }
 
@@ -85,8 +32,8 @@ static void print(const Node* node, std::string prefix = "") {
 								print(n, prefix + " ");
 						},
 						[prefix, node](const std::string& str) {
-							std::cout << prefix << "Input/Arg: " << str << std::endl;
-							print(node->dtype, prefix + " ");
+							std::cout << prefix << "Input/Arg: " << str << ": " << std::to_string(node->dtype)
+									  << std::endl;
 						}
 				},
 				node->value
@@ -117,7 +64,7 @@ static void print(const Module& m) {
 
 static void runCompileCommand(const CompileArgs& args) {
 	mdl::log::setVerbosity(args.logConf.getVerbosity());
-	std::filesystem::path output = args.output.value_or("a.o"); /** \todo should be a shared object? **/
+	std::filesystem::path output = args.output.value_or("a.o");
 	/** \todo: handle multiple input files */
 	auto program = mdl::parser::parse(args.inputs[0]);
 	for (const auto& [key, value] : program.definitions) {
@@ -136,6 +83,7 @@ int main(int argc, char* argv[]) {
 	setupLoggerArgs(app, args.logConf);
 	app.add_option("input", args.inputs, "The files to be compiled")->check(CLI::ExistingFile)->required();
 	app.add_option("-o,--out", args.output, "The output path.");
+	app.add_option("-a,--arg-vals", args.argvals, "Argument values.")->check(CLI::ExistingFile);
 	app.add_flag("--generate-headers", args.generateHeaders, "If set, a header file will be generated.");
 	app.callback([&args]() { runCompileCommand(args); });
 

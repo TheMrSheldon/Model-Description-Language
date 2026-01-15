@@ -1,8 +1,8 @@
 
 module Linear() {
-    W: Tensor[3, 8]
-    b: Tensor[3]
+    W: float[3, 8]
+    b: float[3]
 
-    forward(x: Tensor[8]) =>
+    forward(x: float[8]) =>
         W@x + b;
 }

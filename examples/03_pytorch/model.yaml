@@ -1,0 +1,4 @@
+# This file contains the instantiation of the model by providing the values for the model arguments (hyperparameters).
+Linear:
+  indim: 8
+  outdim: 3

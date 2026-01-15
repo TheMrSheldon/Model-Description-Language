@@ -13,8 +13,10 @@ target_sources(mdl
 	PRIVATE
 		mdl/compiler.cpp
 		mdl/computegraph.cpp
+		mdl/namespace.cpp
 		mdl/parser.cpp
 		mdl/parser/definitions.cpp
+		mdl/utils/utils.cpp
 )
 
 # The Model Compiler
@@ -30,6 +32,17 @@ target_sources(
 
 target_link_libraries(mdlc mdl)
 target_compile_features(mdl PUBLIC cxx_std_23)
+
+# The mdl-info command
+add_executable(mdl-info)
+target_sources(
+    mdl-info
+    PRIVATE
+        commands/mdl-info.cpp
+		mdl/logging.cpp
+)
+target_link_libraries(mdl-info mdl)
+
 
 
 ##########################################################################################
@@ -78,9 +91,7 @@ target_include_directories(mdl PUBLIC ${LIBA_INCLUDES}) # < I don't know why thi
 find_package(CUDAToolkit REQUIRED)
 target_link_libraries(mdl PRIVATE CUDA::nvrtc)
 
-#-------------------#
-# Compiler Command  #
-#-------------------#
+
 # spdlog for logging
 CPMAddPackage(
 	URI "gh:gabime/spdlog@1.15.3"
@@ -90,6 +101,21 @@ CPMAddPackage(
 set_property(TARGET spdlog PROPERTY POSITION_INDEPENDENT_CODE ON)  # Is this needed?
 target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
+
+#-------------------#
+# Compiler Command  #
+#-------------------#
 # CLI11
 CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)
 target_link_libraries(mdlc CLI11::CLI11)
+
+# termcolor
+CPMAddPackage(URI "gh:ikalnytskyi/termcolor@2.1.0" EXCLUDE_FROM_ALL YES)
+target_link_libraries(mdl PRIVATE termcolor::termcolor)
+
+#-------------------#
+# mdl-info Command  #
+#-------------------#
+# CLI11
+CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)
+target_link_libraries(mdl-info CLI11::CLI11)
