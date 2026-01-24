@@ -4,6 +4,7 @@
 #include <any>
 #include <cassert>
 #include <map>
+#include <optional>
 #include <string>
 
 #include <iostream>
@@ -53,7 +54,14 @@ namespace mdl {
 			assert(inserted);
 			return std::any_cast<const DataType&>(it->second);
 		}
-		const DataType getType(std::string_view name) { return types[std::string{name}]; }
+		const std::optional<DataType> getType(std::string_view name) const {
+			auto it = types.find(std::string{name});
+			if (it != std::end(types))
+				return it->second;
+			if (parent != nullptr)
+				return parent->getType(name);
+			return std::nullopt;
+		}
 
 		static const Namespace& baseNamespace() {
 			static Namespace bns{nullptr, builtins, builtinTypes};

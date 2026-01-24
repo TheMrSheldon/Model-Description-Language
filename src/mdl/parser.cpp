@@ -7,10 +7,13 @@
 #include <mdlParser.h>
 
 #include <cassert>
+#include <format>
 #include <fstream>
 
 class TranslatingVisitor : public antlr4::mdlBaseVisitor {
 private:
+	PrettyErrorListener& errorlistener;
+
 	std::stack<mdl::Computegraph*> graphstack;
 	std::stack<mdl::Namespace> nsstack;
 
@@ -26,6 +29,8 @@ private:
 	void popNamespace() { nsstack.pop(); }
 
 public:
+	TranslatingVisitor(PrettyErrorListener& errorlistener) : errorlistener(errorlistener) {}
+
 	virtual std::any visitProgram(mdlParser::ProgramContext* ctx) override {
 		assert(nsstack.empty());
 		nsstack.push(mdl::Namespace::baseNamespace());
@@ -52,8 +57,15 @@ public:
 			auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
 			auto [_, inserted] = s.type.members.insert_or_assign(name, dtype);
 			if (!inserted) {
-				/** \todo Proper warning that a member was redeclared **/
-				std::cout << "Member " << name << " was declared multiple times." << std::endl;
+				auto offendingToken = var->IDENT()->getSymbol();
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Warning, offendingToken, offendingToken->getLine(),
+						offendingToken->getCharPositionInLine(),
+						std::format(
+								"Member {} was declared multiple times in {}. I will ignore the second declaration.",
+								var->IDENT()->getText(), s.name
+						)
+				);
 			}
 			s.type.members[name] = dtype;
 		}
@@ -92,14 +104,37 @@ public:
 
 	virtual std::any visitTypeSpec(mdlParser::TypeSpecContext* ctx) override {
 		auto dtype = currentNamespace().getType(ctx->typename_->getText());
-		if (ctx->type_arg().size() != 0) {
-			std::vector<TypeArg> args;
-			for (auto arg : ctx->type_arg()) {
-				args.emplace_back(std::any_cast<TypeArg>(arg->accept(this)));
+		if (!dtype.has_value()) {
+			errorlistener.semanticError(
+					PrettyErrorListener::ErrorLevel::Error, ctx->typename_, ctx->typename_->getLine(),
+					ctx->typename_->getCharPositionInLine(),
+					std::format("{} does not name a type", ctx->typename_->getText())
+			);
+			return mdl::DataType{Primitive::integer}; /** Use integer for error types or define a new one? **/
+		} else {
+			if (ctx->type_arg().size() != 0) {
+				std::vector<TypeArg> args;
+				for (auto arg : ctx->type_arg()) {
+					args.emplace_back(std::any_cast<TypeArg>(arg->accept(this)));
+				}
+				auto ta = setTypeArgs(dtype.value(), args);
+				if (!ta.has_value()) {
+					auto firsttok = ctx->type_arg().front()->start;
+					auto lasttok = ctx->type_arg().back()->stop;
+					errorlistener.semanticError(
+							PrettyErrorListener::ErrorLevel::Error,
+							{{.linenr = ctx->typename_->getLine(),
+							  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+							  .beginMark = firsttok->getCharPositionInLine(),
+							  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex()}},
+							ctx->typename_->getLine(), firsttok->getCharPositionInLine(), ta.error()
+					);
+					return dtype.value(); /** Or return some "error" datatype here? */
+				}
+				return ta.value();
 			}
-			return setTypeArgs(dtype, args).value();
+			return dtype.value();
 		}
-		return dtype;
 	}
 
 	virtual std::any visitAnonType(mdlParser::AnonTypeContext* ctx) override {
@@ -222,10 +257,10 @@ Program mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
 	antlr4::mdlLexer lexer(&input);
 	antlr4::CommonTokenStream tokens(&lexer);
 	antlr4::mdlParser parser(&tokens);
-	TranslatingVisitor visitor;
 	parser.removeErrorListeners();
 	PrettyErrorListener errorlistener(std::string{sourcename});
 	parser.addErrorListener(&errorlistener);
+	TranslatingVisitor visitor{errorlistener};
 	return std::move(*std::any_cast<std::shared_ptr<Program>>(parser.program()->accept(&visitor)));
 }
 Program mdl::parser::parse(const std::filesystem::path& file) {
