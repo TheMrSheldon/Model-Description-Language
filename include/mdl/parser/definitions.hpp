@@ -22,7 +22,7 @@ using ComputegraphRef = Computegraph*;
 using Node = Computegraph::Node;
 using Operation = Computegraph::Operation;
 
-using TypeArg = std::variant<mdl::Elipsis, Node::ConstValue, const Node* /** Nodes must be Arguments **/>;
+using TypeArg = std::variant<mdl::Elipsis, mdl::Computegraph::Value, const Node* /** Nodes must be Arguments **/>;
 
 extern Computegraph empty;
 
@@ -52,6 +52,7 @@ struct Module {
 
 struct Struct {
 	std::string name;
+	AggregateType type;
 };
 
 inline std::expected<mdl::DataType, std::string>
@@ -63,7 +64,7 @@ setTypeArgs(mdl::DataType dtype, const std::vector<TypeArg>& typeargs) {
 			auto val = std::visit(
 					mdl::overloaded{
 							[](mdl::Elipsis) -> RT { return mdl::Elipsis{}; },
-							[](const mdl::Computegraph::Node::ConstValue& value) -> RT {
+							[](const mdl::Computegraph::Value& value) -> RT {
 								if (auto val = std::get_if<int>(&value)) {
 									return static_cast<unsigned>(*val);
 								} else {

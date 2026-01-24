@@ -25,28 +25,7 @@ namespace mdl {
 			DIV,
 			MATMULT
 		};
-		struct Node {
-			using ConstValue = std::variant<double, int>;
-			using Value = std::variant<std::vector<const Node*>, ConstValue, std::string>;
-			Operation operation;
-			Value value;
-			DataType dtype;
-
-			const std::vector<const Node*>& inputs() const {
-				assert(operation != Operation::Const);
-				return std::get<std::vector<const Node*>>(value);
-			}
-
-			const std::string& name() const {
-				assert(operation == Operation::Input || operation == Operation::Argument);
-				return std::get<std::string>(value);
-			}
-
-			const ConstValue& constValue() const {
-				assert(operation == Operation::Const);
-				return std::get<ConstValue>(value);
-			}
-		};
+		struct Node;
 		using Value = std::variant<int, double>;
 
 	private:
@@ -58,56 +37,19 @@ namespace mdl {
 		Computegraph& operator=(const Computegraph& other) = delete;
 
 	public:
-		Computegraph() : nodes{}, subgraphs{}, outputNode{nullptr} {}
-		Computegraph(Computegraph&& other)
-				: nodes(std::move(other.nodes)), subgraphs{std::move(other.subgraphs)}, outputNode{other.outputNode} {}
-		~Computegraph() = default;
+		Computegraph();
+		Computegraph(Computegraph&& other);
+		~Computegraph();
 
-		Computegraph& operator=(Computegraph&& other) {
-			nodes = std::move(other.nodes);
-			subgraphs = std::move(other.subgraphs);
-			outputNode = std::move(other.outputNode);
-			return *this;
-		}
+		Computegraph& operator=(Computegraph&& other);
 
-		const Node& addArgumentNode(std::string_view name, DataType dtype) {
-			return *nodes.emplace_back(
-					std::make_unique<Node>(
-							Node{.operation = Operation::Argument, .value = std::string{name}, .dtype = dtype}
-					)
-			);
-		}
+		const Node& addArgumentNode(std::string_view name, DataType dtype);
 
-		const Node& addInputNode(std::string_view name, DataType dtype) {
-			return *nodes.emplace_back(
-					std::make_unique<Node>(
-							Node{.operation = Operation::Input, .value = std::string{name}, .dtype = dtype}
-					)
-			);
-		}
+		const Node& addInputNode(std::string_view name, DataType dtype);
 
-		const Node& addConstNode(std::variant<double, int> value) {
-			return *nodes.emplace_back(
-					std::make_unique<Node>(Node{.operation = Operation::Const, .value = {std::move(value)}})
-			);
-		}
+		const Node& addConstNode(Value value);
 
-		const Node& addOpNode(Operation operation, std::vector<const Node*>&& inputs) noexcept {
-			assert(operation != Operation::Const);
-			// TODO: if all inputs are const, evaluate and add const node instead of opnode.
-			/*auto allconst = std::all_of(inputs.begin(), inputs.end(), [](const Node* n) {
-				return n->operation == Operation::Const;
-			});*/
-			/*if (allconst) {
-				return nodes.emplace_back(
-						Node{.operation = Operation::Const, .value = getOp(operation)(std::move(inputs))}
-				);
-			} else {*/
-			return *nodes.emplace_back(
-					std::make_unique<Node>(Node{.operation = operation, .value = {std::move(inputs)}})
-			);
-			//}
-		}
+		const Node& addOpNode(Operation operation, std::vector<const Node*>&& inputs) noexcept;
 
 		Computegraph& addSubgraph();
 
@@ -121,6 +63,11 @@ namespace mdl {
 		const Node& getNode(size_t idx) const;
 	};
 
+	const std::string& getName(const Computegraph::Node& node);
+	Computegraph::Operation getOperation(const Computegraph::Node& node);
+	DataType getDataType(const Computegraph::Node& node);
+	Computegraph::Value getConst(const Computegraph::Node& node);
+	const std::vector<const mdl::Computegraph::Node*>& getInputs(const Computegraph::Node& node);
 } // namespace mdl
 
 #endif

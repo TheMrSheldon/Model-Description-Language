@@ -97,43 +97,43 @@ static tvm::te::Tensor toPlaceholder(const std::string& name, mdl::DataType dtyp
 static const std::map<mdl::Computegraph::Operation, TranslateFn> operations = {
 		{mdl::Computegraph::Operation::Argument,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 auto arg = toPlaceholder(value.name(), value.dtype);
+			 auto arg = toPlaceholder(mdl::getName(value), mdl::getDataType(value));
 			 outargs.emplace_back(arg);
 			 return arg;
 		 }},
 		{mdl::Computegraph::Operation::Input,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 auto arg = toPlaceholder(value.name(), value.dtype);
+			 auto arg = toPlaceholder(mdl::getName(value), mdl::getDataType(value));
 			 outargs.emplace_back(arg);
 			 return arg;
 		 }},
 		/** \todo add mdl::Computegraph::Operation::Const */
 		{mdl::Computegraph::Operation::ADD,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 const auto& args = value.inputs();
+			 const auto& args = mdl::getInputs(value);
 			 assert(args.size() == 2);
 			 return tvm::topi::add(translate(outargs, *args[0]), translate(outargs, *args[1]));
 		 }},
 		{mdl::Computegraph::Operation::SUB,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 const auto& args = value.inputs();
+			 const auto& args = mdl::getInputs(value);
 			 assert(args.size() == 2);
 			 return tvm::topi::subtract(translate(outargs, *args[0]), translate(outargs, *args[1]));
 		 }},
 		{mdl::Computegraph::Operation::MULT,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 const auto& args = value.inputs();
+			 const auto& args = mdl::getInputs(value);
 			 assert(args.size() == 2);
 			 return tvm::topi::multiply(translate(outargs, *args[0]), translate(outargs, *args[1]));
 		 }},
 		{mdl::Computegraph::Operation::DIV,
 		 [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 const auto& args = value.inputs();
+			 const auto& args = mdl::getInputs(value);
 			 assert(args.size() == 2);
 			 return tvm::topi::divide(translate(outargs, *args[0]), translate(outargs, *args[1]));
 		 }},
 		{mdl::Computegraph::Operation::MATMULT, [](Arguments& outargs, const mdl::Computegraph::Node& value) {
-			 const auto& args = value.inputs();
+			 const auto& args = mdl::getInputs(value);
 			 assert(args.size() == 2);
 			 auto left = translate(outargs, *args[0]);
 			 auto right = translate(outargs, *args[1]);
@@ -145,16 +145,17 @@ static const std::map<mdl::Computegraph::Operation, TranslateFn> operations = {
 };
 
 static tvm::te::Tensor translate(Arguments& args, const mdl::Computegraph::Node& node) {
-	auto it = operations.find(node.operation);
+	auto it = operations.find(mdl::getOperation(node));
 	assert(it != operations.end());
 	return it->second(args, node);
 }
 
 static tvm::BaseFunc translateFunc(const FuncDesc& func) {
 	std::string arguments;
-	auto r = func.arguments |
-			 std::views::transform([](VarDesc d) { return std::to_string(d.node->dtype) + ": " + d.name; }) |
-			 std::views::join_with(std::string_view{", "});
+	auto r =
+			func.arguments |
+			std::views::transform([](VarDesc d) { return std::to_string(mdl::getDataType(*d.node)) + ": " + d.name; }) |
+			std::views::join_with(std::string_view{", "});
 	std::ranges::copy(std::begin(r), std::end(r), std::back_inserter(arguments));
 	auto logger = mdl::log::getLogger("compiler");
 	logger->info("Translating {}({})", func.name, arguments);

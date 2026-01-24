@@ -21,23 +21,21 @@ static void print(const Node* node, std::string prefix = "") {
 	if (node == nullptr)
 		std::cout << "Null" << std::endl;
 	else {
-		std::cout << prefix << std::to_underlying(node->operation) << std::endl;
-		std::visit(
-				mdl::overloaded{
-						[prefix](const std::variant<double, int>& c) {
-							std::visit([prefix](auto x) { std::cout << prefix << ':' << x << std::endl; }, c);
-						},
-						[prefix](const std::vector<const Node*>& nodes) {
-							for (const auto& n : nodes)
-								print(n, prefix + " ");
-						},
-						[prefix, node](const std::string& str) {
-							std::cout << prefix << "Input/Arg: " << str << ": " << std::to_string(node->dtype)
-									  << std::endl;
-						}
-				},
-				node->value
-		);
+		std::cout << prefix << std::to_underlying(mdl::getOperation(*node)) << std::endl;
+		switch (mdl::getOperation(*node)) {
+		case Operation::Input:
+		case Operation::Argument:
+			std::cout << prefix << "Input/Arg: " << mdl::getName(*node) << ": "
+					  << std::to_string(mdl::getDataType(*node)) << std::endl;
+			break;
+		case Operation::Const:
+			std::visit([prefix](auto x) { std::cout << prefix << ':' << x << std::endl; }, mdl::getConst(*node));
+			break;
+		default:
+			for (const auto& n : mdl::getInputs(*node))
+				print(n, prefix + " ");
+			break;
+		}
 	}
 }
 

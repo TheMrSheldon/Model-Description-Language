@@ -53,12 +53,12 @@ module Linear(indim: uint, outdim: uint, bias: bool = false) {
 }
 
 struct TransformerConf {
-    struct {
+    dims: struct {
         model: unsigned
         key: unsigned
         value: unsigned
         inner: unsigned
-    } dims
+    }
     numEncoders: unsigned
     numAttnHeads: unsigned
 }
