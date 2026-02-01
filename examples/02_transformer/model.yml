@@ -1,0 +1,9 @@
+TransformerEncoder:
+  conf:
+    dims:
+      model: 768
+      key: 64
+      value: 64
+      inner: 3072
+    numEncoders: 12
+    numAttnHeads: 12

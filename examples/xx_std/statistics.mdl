@@ -26,7 +26,7 @@ float[...] sum(x: float[..., N]) => __builtin_sum(x);
  * @param x 
  * @return 
  */
-float[...] min(x: float[..., N]) => __builtin_max(x);
+float[...] min(x: float[..., N]) => __builtin_min(x);
 
 /**
  * @brief Maximum

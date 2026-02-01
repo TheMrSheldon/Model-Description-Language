@@ -1,3 +1,47 @@
+// TODO: implement imports
+// import std;
+
+/**
+ * @brief Computes the elementwise \p x -th power of e.
+ * @details \f[(x_i)_{1\leq i \leq n} \mapsto (e^{x_i})_{1\leq i \leq n}.\f]
+ * @ingroup Arithmetic
+ * 
+ * @param x
+ * @return the \p x -th power of e for  each component of \p x .
+ */
+float[...] exp(x: float[...]) => __builtin_exp(x);
+
+/**
+ * @brief Sum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+template<N: uint>
+float[...] sum(x: float[..., N]) => __builtin_sum(x);
+
+/**
+ * @brief Maximum
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] max(x: float[..., N]) => __builtin_max(x);
+
+/**
+ * @brief (Gauss) Error Function
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] erf(x: float[...]) => __builtin_erf(x);
+
 /**
  * @brief Computes the softmax function of the input vector.
  * @details Let \f(x \in \mathbb R^n\f) be a vector, the softmax is defined as
@@ -27,7 +71,7 @@ float[...] relu(x: float[...]) => max(x, 0);
 /**
  * @brief Implements layer normalization as proposed by \cite layernorm.
  */
-module LayerNorm(dim: uint) {
+module LayerNorm[dim: uint] {
     beta: float[dim]
     gamma: float[dim]
 
@@ -42,7 +86,7 @@ module LayerNorm(dim: uint) {
  * @brief Applies a learnable linear transformation with optional bias.
  * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
  */
-module Linear(indim: uint, outdim: uint, bias: bool = false) {
+module Linear[indim: uint, outdim: uint, bias: bool = false] {
     W: float[outdim, indim]
     b: float[outdim]
 
@@ -54,16 +98,16 @@ module Linear(indim: uint, outdim: uint, bias: bool = false) {
 
 struct TransformerConf {
     dims: struct {
-        model: unsigned
-        key: unsigned
-        value: unsigned
-        inner: unsigned
+        model: uint
+        key: uint
+        value: uint
+        inner: uint
     }
-    numEncoders: unsigned
-    numAttnHeads: unsigned
+    numEncoders: uint
+    numAttnHeads: uint
 }
 
-module TransformerEncoder(conf: TransformerConf) {
+module TransformerEncoder[conf: TransformerConf] {
     // Multi-Head Attention
     weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
     weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
@@ -75,10 +119,10 @@ module TransformerEncoder(conf: TransformerConf) {
     weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
     ffnNorm: LayerNorm[conf.dims.model]
 
-    bertGELU(x: float[...]) =>
+    float[...] bertGELU(x: float[...]) =>
         x * 0.5 * (1 + erf(x / sqrt(2)));
 
-    sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
+    float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto facv = value[... (h d) -> h ... d | h=conf.numAttnHeads];
@@ -87,10 +131,10 @@ module TransformerEncoder(conf: TransformerConf) {
         return tmp[h ... d -> ... (h d)];
     }
     
-    mha(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) =>
+    float[..., conf.dims.model] mha(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) =>
         weightOut(sdpa(query, key, value));
 
-    forward(x: float[..., conf.dims.model]) {
+    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
         auto attn = mhaNorm(mha(weightQuery(x), weightKey(x), weightValue(x)) + x);
         auto intermed = bertGELU(weightIntermed(attn));
         return ffnNorm(weightIntermedOut(intermed) + attn);

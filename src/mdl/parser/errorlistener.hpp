@@ -10,8 +10,35 @@
 
 using namespace antlr4;
 
+// #include <windows.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+/**
+ * @brief Get the width of the terminal in characters
+ * 
+ * @return Width of the terminal in characters
+ */
+static int getTerminalWidth() {
+#ifdef _WIN32
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	if (GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), &csbi))
+		return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+	return 80;
+#else
+	winsize w{};
+	if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+		return w.ws_col;
+	return 80;
+#endif
+}
+
 class PrettyErrorListener : public BaseErrorListener {
 private:
+	bool errorOccured;
+	std::string file;
+
+public:
 	struct ContextLine {
 		size_t linenr;
 		std::string line;
@@ -19,12 +46,14 @@ private:
 		size_t markWidth;
 	};
 
-public:
+	/**
+	 * @brief Represents the severity level of an error encountered during parsing.
+	 */
 	enum class ErrorLevel { Error, Warning };
 
-	PrettyErrorListener(const std::string& filename) : file(filename) {}
+	PrettyErrorListener(const std::string& filename) : errorOccured(false), file(filename) {}
 
-	std::string getline(antlr4::CharStream& stream, int offset, size_t startOffset) {
+	static std::string getline(antlr4::CharStream& stream, int offset, size_t startOffset) {
 		auto findLinefeed = [&stream](size_t offset, int dir) {
 			while (stream.getText(antlr4::misc::Interval{offset, offset}) != "\n")
 				offset += dir;
@@ -60,7 +89,8 @@ public:
 	}
 
 	void semanticError(
-			ErrorLevel level, Token* offendingSymbol, size_t line, size_t charPositionInLine, const std::string& msg
+			ErrorLevel level, Token* offendingSymbol, size_t line, size_t charPositionInLine, const std::string& msg,
+			const std::string& hint = ""
 	) {
 		auto linestr = getline(*offendingSymbol->getInputStream(), 0, offendingSymbol->getStartIndex());
 		semanticError(
@@ -71,55 +101,24 @@ public:
 						.beginMark = offendingSymbol->getCharPositionInLine(),
 						.markWidth = offendingSymbol->getText().size()
 				}},
-				line, charPositionInLine, msg
+				line, charPositionInLine, msg, hint
 		);
 	}
 
 	void semanticError(
 			ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
-			const std::string& msg
+			const std::string& msg, const std::string& hint = ""
 	) {
-		printError(level, context, offendingLine, offendingCol, msg);
+		printError(level, context, offendingLine, offendingCol, msg, hint);
 	}
 
-private:
-	std::string file;
+	constexpr bool anyErrorOccured() const { return errorOccured; }
 
+private:
 	void printError(
 			ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
 			const std::string& msg, const std::string& hint = ""
-	) {
-		switch (level) {
-		case ErrorLevel::Error:
-			std::cerr << termcolor::bold << termcolor::red << "error: " << termcolor::reset;
-			break;
-		case ErrorLevel::Warning:
-			std::cerr << termcolor::bold << termcolor::yellow << "warning: " << termcolor::reset;
-			break;
-		}
-		std::cerr << msg << "\n";
-		std::cerr << "~~> " << termcolor::bold << file << ":" << offendingLine << ":" << (offendingCol + 1) << ": "
-				  << termcolor::reset << std::endl;
-
-		for (auto& ctxt : context) {
-			std::cerr << termcolor::bright_grey << " " << ctxt.linenr << " | " << termcolor::reset << ctxt.line << "\n";
-
-			if (ctxt.markWidth != 0) {
-				// caret line
-				for (size_t i = 0; i < ctxt.beginMark + std::to_string(ctxt.linenr).size() + 4; ++i)
-					std::cerr << (ctxt.line[i] == '\t' ? '\t' : ' ');
-
-				std::cerr << termcolor::red;
-				for (size_t i = 0; i < ctxt.markWidth; ++i)
-					std::cerr << "^";
-				std::cerr << termcolor::reset << "\n";
-			}
-		}
-
-		if (!hint.empty()) {
-			std::cerr << termcolor::blue << "hint: " << termcolor::reset << hint << std::endl;
-		}
-	}
+	);
 };
 
 #endif

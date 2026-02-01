@@ -1,5 +1,7 @@
 #include <mdl/computegraph.hpp>
 
+#include <mdl/utils/overload.hpp>
+
 #include <functional>
 #include <vector>
 
@@ -15,6 +17,7 @@ struct Computegraph::Node {
 	Operation operation;
 	NValue value;
 	mdl::DataType dtype;
+	bool isConsteval;
 
 	const std::vector<const Node*>& inputs() const {
 		assert(operation != Operation::Const);
@@ -31,12 +34,6 @@ struct Computegraph::Node {
 		return std::get<Value>(value);
 	}
 };
-
-/*static const std::function<Value(std::vector<Node>)> operations[]{
-		[static_cast<size_t>(Operation::Const)] = [](std::vector<Node>) { assert(false); }, //
-		[static_cast<size_t>(Operation::ADD)] = [](std::vector<Node> in) {},				//
-		[static_cast<size_t>(Operation::SUB)] = [](std::vector<Node> in) {},
-};*/
 
 Computegraph::Computegraph() : nodes{}, subgraphs{}, outputNode{nullptr} {}
 Computegraph::Computegraph(Computegraph&& other)
@@ -56,37 +53,54 @@ const Node& Computegraph::getNode(size_t idx) const { return *nodes[idx]; }
 
 Computegraph& Computegraph::addSubgraph() { return subgraphs.emplace_back(); }
 
+const Node& Computegraph::addErrorNode() {
+	return *nodes.emplace_back(
+			std::make_unique<Node>(Node{
+					.operation = Operation::Const, .value = 0, .dtype = DataType{Primitive::error}, .isConsteval = true
+			})
+	);
+}
+
 const Node& Computegraph::addArgumentNode(std::string_view name, DataType dtype) {
 	return *nodes.emplace_back(
-			std::make_unique<Node>(Node{.operation = Operation::Argument, .value = std::string{name}, .dtype = dtype})
+			std::make_unique<Node>(Node{
+					.operation = Operation::Argument, .value = std::string{name}, .dtype = dtype, .isConsteval = true
+			})
 	);
 }
 
 const Node& Computegraph::addInputNode(std::string_view name, DataType dtype) {
 	return *nodes.emplace_back(
-			std::make_unique<Node>(Node{.operation = Operation::Input, .value = std::string{name}, .dtype = dtype})
+			std::make_unique<Node>(Node{
+					.operation = Operation::Input, .value = std::string{name}, .dtype = dtype, .isConsteval = false
+			})
 	);
 }
 
 const Node& Computegraph::addConstNode(Value value) {
+	auto dtype = std::visit(
+			mdl::overloaded{
+					[](int) { return DataType{Primitive::integer}; },
+					[](double) { return DataType{Primitive::floating}; }
+			},
+			value
+	);
 	return *nodes.emplace_back(
-			std::make_unique<Node>(Node{.operation = Operation::Const, .value = {std::move(value)}})
+			std::make_unique<Node>(Node{
+					.operation = Operation::Const, .value = {std::move(value)}, .dtype = dtype, .isConsteval = true
+			})
 	);
 }
 
 const Node& Computegraph::addOpNode(Operation operation, std::vector<const Node*>&& inputs) noexcept {
-	assert(operation != Operation::Const);
-	// TODO: if all inputs are const, evaluate and add const node instead of opnode.
-	/*auto allconst = std::all_of(inputs.begin(), inputs.end(), [](const Node* n) {
-				return n->operation == Operation::Const;
-			});*/
-	/*if (allconst) {
-				return nodes.emplace_back(
-						Node{.operation = Operation::Const, .value = getOp(operation)(std::move(inputs))}
-				);
-			} else {*/
-	return *nodes.emplace_back(std::make_unique<Node>(Node{.operation = operation, .value = {std::move(inputs)}}));
-	//}
+	assert(operation != Operation::Const && operation != Operation::Input && operation != Operation::Argument);
+	/** \todo infer datatype **/
+	const bool isConsteval = std::all_of(inputs.begin(), inputs.end(), [](auto i) { return i->isConsteval; });
+	return *nodes.emplace_back(
+			std::make_unique<Node>(
+					Node{.operation = operation, .value = {std::move(inputs)}, .isConsteval = isConsteval}
+			)
+	);
 }
 
 void Computegraph::setOutputNode(const Node* node) { outputNode = node; }
@@ -108,3 +122,5 @@ mdl::Computegraph::Value mdl::getConst(const Computegraph::Node& node) { return 
 const std::vector<const mdl::Computegraph::Node*>& mdl::getInputs(const Computegraph::Node& node) {
 	return node.inputs();
 }
+
+bool mdl::isCompiletimeEvalable(const Computegraph::Node& node) { return node.isConsteval; }

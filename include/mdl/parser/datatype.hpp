@@ -9,7 +9,13 @@
 namespace mdl {
 	struct Elipsis {};
 
-	enum class Primitive { floating, integer, uint, boolean };
+	enum class Primitive {
+		error /**< used to mark invalid nodes in the computegraph (e.g., due to semantic errors) **/,
+		floating,
+		integer,
+		uint,
+		boolean
+	};
 
 	struct TensorType final {
 		using Shape = std::vector<std::variant<unsigned, Elipsis>>;

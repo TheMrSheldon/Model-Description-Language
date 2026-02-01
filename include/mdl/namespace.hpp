@@ -41,12 +41,12 @@ namespace mdl {
 		}
 
 		template <typename T>
-		const T& get(std::string_view name) const {
+		std::optional<std::reference_wrapper<const T>> get(std::string_view name) const {
 			/** \todo handle misses **/
 			auto it = objects.find(std::string{name});
 			if (it != std::end(objects))
 				return std::any_cast<const T&>(it->second);
-			return parent->get<T>(name);
+			return (parent != nullptr) ? parent->get<T>(name) : std::nullopt;
 		}
 
 		const DataType& putType(std::string_view name, DataType&& type) {

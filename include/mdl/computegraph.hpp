@@ -43,6 +43,14 @@ namespace mdl {
 
 		Computegraph& operator=(Computegraph&& other);
 
+		/**
+		 * @brief Adds an invalid node that signifies an uncompilable part of the computegraph.
+		 * @details For example, if the expression `a + b` is compiled, where `a` is a valid variable but `b` is not, then `b` is represented by an error node.
+		 * 
+		 * @return A reference to the error node.
+		 */
+		const Node& addErrorNode();
+
 		const Node& addArgumentNode(std::string_view name, DataType dtype);
 
 		const Node& addInputNode(std::string_view name, DataType dtype);
@@ -68,6 +76,14 @@ namespace mdl {
 	DataType getDataType(const Computegraph::Node& node);
 	Computegraph::Value getConst(const Computegraph::Node& node);
 	const std::vector<const mdl::Computegraph::Node*>& getInputs(const Computegraph::Node& node);
+	/**
+	 * @brief Returns true iff the expression represented by \p node can be evaluate at compile time.
+	 * @details An expression can be evaluated at compile time if it consists only of arithmetic expressions, constants and arguments.
+	 * 
+	 * @param node 
+	 * @return true iff the expression represented by \p node can be evaluate at compile time.
+	 */
+	bool isCompiletimeEvalable(const Computegraph::Node& node);
 } // namespace mdl
 
 #endif

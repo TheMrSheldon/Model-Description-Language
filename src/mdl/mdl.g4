@@ -9,7 +9,7 @@ struct_def
       ;
 
 module_def
-      : 'module' IDENT '(' (param (',' param)*)? ')' '{' (vardecl | funcdef)* '}'
+      : 'module' IDENT '[' (param (',' param)*)? ']' '{' (vardecl | funcdef)* '}'
       ;
 
 param
@@ -36,8 +36,12 @@ vardecl
       ;
 
 funcdef
-      : type IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
-      | type IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
+      : templatespec? type IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
+      | templatespec? type IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
+      ;
+
+templatespec
+      : 'template' '<' vardecl* '>'
       ;
 
 einops
@@ -87,7 +91,7 @@ statement
 FLOAT: '-'?[0-9]*'.'[0-9]+ | INTEGER'e'INTEGER;
 INTEGER: '-'?[0-9]+;
 
-IDENT: [a-zA-Z]+;
+IDENT: [_a-zA-Z]+;
 
 BLOCKCOMMENT : '/*' .*? '*/' -> channel(HIDDEN);
 LINECOMMENT : '//' ~[\r\n]* -> channel(HIDDEN);

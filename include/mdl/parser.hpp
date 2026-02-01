@@ -5,10 +5,11 @@
 
 #include <filesystem>
 #include <iostream>
+#include <optional>
 
 namespace mdl::parser {
-	Program parse(std::istream& stream, std::string_view sourcename = "<stream>");
-	Program parse(const std::filesystem::path& file);
+	std::optional<Program> parse(std::istream& stream, std::string_view sourcename = "<stream>");
+	std::optional<Program> parse(const std::filesystem::path& file);
 } // namespace mdl::parser
 
 #endif

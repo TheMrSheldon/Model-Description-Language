@@ -11,11 +11,13 @@ target_sources(mdl
 		FILES
 			${CMAKE_CURRENT_LIST_DIR}/../include/mdl/computegraph.hpp
 	PRIVATE
+		mdl/argvals.cpp
 		mdl/compiler.cpp
 		mdl/computegraph.cpp
 		mdl/namespace.cpp
 		mdl/parser.cpp
 		mdl/parser/definitions.cpp
+		mdl/parser/errorlistener.cpp
 		mdl/utils/utils.cpp
 )
 
@@ -101,6 +103,9 @@ CPMAddPackage(
 set_property(TARGET spdlog PROPERTY POSITION_INDEPENDENT_CODE ON)  # Is this needed?
 target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
+# yaml-cpp
+CPMAddPackage(URI "gh:jbeder/yaml-cpp#0.8.0" EXCLUDE_FROM_ALL YES)
+target_link_libraries(mdl PRIVATE yaml-cpp::yaml-cpp)
 
 #-------------------#
 # Compiler Command  #

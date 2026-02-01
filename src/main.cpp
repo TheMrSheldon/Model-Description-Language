@@ -1,4 +1,5 @@
 #include "commands/common.hpp"
+#include "mdl/argvals.hpp"
 
 #include <mdl/compiler.hpp>
 #include <mdl/parser.hpp>
@@ -9,6 +10,7 @@
 
 struct CompileArgs {
 	std::vector<std::filesystem::path> inputs;
+	std::vector<std::filesystem::path> importdirs;
 	std::optional<std::filesystem::path> output;
 	std::optional<std::filesystem::path> argvals;
 	LoggerConf logConf;
@@ -62,9 +64,15 @@ static void print(const Module& m) {
 
 static void runCompileCommand(const CompileArgs& args) {
 	mdl::log::setVerbosity(args.logConf.getVerbosity());
+
+	auto argvals = args.argvals.transform(mdl::ArgVals::fromYAML);
+
 	std::filesystem::path output = args.output.value_or("a.o");
 	/** \todo: handle multiple input files */
-	auto program = mdl::parser::parse(args.inputs[0]);
+	auto result = mdl::parser::parse(args.inputs[0]);
+	if (!result.has_value())
+		exit(1);
+	auto& program = result.value();
 	for (const auto& [key, value] : program.definitions) {
 		std::visit(mdl::overloaded{[](const Struct& s) { print(s); }, [](const Module& m) { print(m); }}, value);
 	}
@@ -81,7 +89,10 @@ int main(int argc, char* argv[]) {
 	setupLoggerArgs(app, args.logConf);
 	app.add_option("input", args.inputs, "The files to be compiled")->check(CLI::ExistingFile)->required();
 	app.add_option("-o,--out", args.output, "The output path.");
+	app.add_option("-i,--import-dir", args.importdirs, "Search paths to search through for import statements.")
+			->check(CLI::ExistingDirectory);
 	app.add_option("-a,--arg-vals", args.argvals, "Argument values.")->check(CLI::ExistingFile);
+	/** \todo possible alternative name: --generate-bindings=<type>; with possible values: cpp, python, ... */
 	app.add_flag("--generate-headers", args.generateHeaders, "If set, a header file will be generated.");
 	app.callback([&args]() { runCompileCommand(args); });
 

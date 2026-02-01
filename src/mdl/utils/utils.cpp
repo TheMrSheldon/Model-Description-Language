@@ -27,6 +27,7 @@ namespace std {
 
 std::string std::to_string(const Primitive& prim) {
 	static std::string_view names[]{
+			[std::to_underlying(Primitive::error)] = "<error>",
 			[std::to_underlying(Primitive::floating)] = "float",
 			[std::to_underlying(Primitive::integer)] = "int",
 			[std::to_underlying(Primitive::uint)] = "uint",

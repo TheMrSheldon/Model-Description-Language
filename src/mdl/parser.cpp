@@ -51,11 +51,12 @@ public:
 		return std::make_shared<Program>(std::move(program));
 	}
 
-	virtual std::any visitStruct_def(mdlParser::Struct_defContext* ctx) override {
-		Struct s{.name = ctx->IDENT()->getText()};
-		for (auto& var : ctx->vardecl()) {
+	void updateTypeWithVarDecl(
+			AggregateType& type, const std::string& tname, std::vector<antlr4::mdlParser::VardeclContext*> vars
+	) {
+		for (auto& var : vars) {
 			auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
-			auto [_, inserted] = s.type.members.insert_or_assign(name, dtype);
+			auto [_, inserted] = type.members.insert_or_assign(name, dtype);
 			if (!inserted) {
 				auto offendingToken = var->IDENT()->getSymbol();
 				errorlistener.semanticError(
@@ -63,12 +64,16 @@ public:
 						offendingToken->getCharPositionInLine(),
 						std::format(
 								"Member {} was declared multiple times in {}. I will ignore the second declaration.",
-								var->IDENT()->getText(), s.name
+								var->IDENT()->getText(), tname
 						)
 				);
 			}
-			s.type.members[name] = dtype;
 		}
+	}
+
+	virtual std::any visitStruct_def(mdlParser::Struct_defContext* ctx) override {
+		Struct s{.name = ctx->IDENT()->getText()};
+		updateTypeWithVarDecl(s.type, s.name, ctx->vardecl());
 		return s;
 	}
 
@@ -97,7 +102,17 @@ public:
 
 	virtual std::any visitParam(mdlParser::ParamContext* ctx) override {
 		if (ctx->default_ != nullptr) {
-			throw std::runtime_error("Default Values have not yet been implemented");
+			auto firsttok = ctx->default_->start;
+			auto lasttok = ctx->default_->stop;
+			errorlistener.semanticError(
+					PrettyErrorListener::ErrorLevel::Error,
+					{{.linenr = firsttok->getLine(),
+					  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+					  .beginMark = firsttok->getCharPositionInLine(),
+					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+					firsttok->getLine(), firsttok->getCharPositionInLine(),
+					"Default values have not yet been implemented"
+			);
 		}
 		return std::make_pair(ctx->IDENT()->getText(), std::any_cast<mdl::DataType>(ctx->type()->accept(this)));
 	}
@@ -126,7 +141,7 @@ public:
 							{{.linenr = ctx->typename_->getLine(),
 							  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
 							  .beginMark = firsttok->getCharPositionInLine(),
-							  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex()}},
+							  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 							ctx->typename_->getLine(), firsttok->getCharPositionInLine(), ta.error()
 					);
 					return dtype.value(); /** Or return some "error" datatype here? */
@@ -138,7 +153,9 @@ public:
 	}
 
 	virtual std::any visitAnonType(mdlParser::AnonTypeContext* ctx) override {
-		throw std::runtime_error("Not implemented");
+		auto type = AggregateType{};
+		updateTypeWithVarDecl(type, "anonymous type", ctx->vardecl());
+		return DataType{type};
 	}
 
 	virtual std::any visitType_arg(mdlParser::Type_argContext* ctx) override {
@@ -147,15 +164,23 @@ public:
 		} else if (ctx->expr() != nullptr) {
 			auto tmp = ctx->expr()->accept(this);
 			const auto& node = *std::any_cast<const Node*>(tmp);
-			switch (mdl::getOperation(node)) {
-			case Operation::Const:
+			if (!mdl::isCompiletimeEvalable(node)) {
+				auto firsttok = ctx->expr()->start;
+				auto lasttok = ctx->expr()->stop;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error,
+						{{.linenr = firsttok->getLine(),
+						  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+						  .beginMark = firsttok->getCharPositionInLine(),
+						  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+						firsttok->getLine(), firsttok->getCharPositionInLine(),
+						"Parameters must be compile time constant"
+				);
+				return TypeArg{&node}; /** return this node anyway for now **/
+			} else if (mdl::getOperation(node) == mdl::Computegraph::Operation::Const) {
 				return TypeArg{mdl::getConst(node)};
-			case Operation::Argument:
+			} else {
 				return TypeArg{&node};
-			default:
-				/** \todo write descriptive error message **/
-				assert(false);
-				break;
 			}
 		} else {
 			assert(false); // this case should not exist
@@ -179,6 +204,7 @@ public:
 		FuncDesc f{.name = ctx->IDENT()->getText(), .graph = &graph().addSubgraph()};
 		pushGraph(f.graph);
 		pushNamespace();
+		/** \todo: visit template spec **/
 		for (auto& param : ctx->param()) {
 			auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
 			currentNamespace().put(name, &graph().addInputNode(name, dtype));
@@ -196,7 +222,17 @@ public:
 	}
 
 	virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
-		return currentNamespace().get<const Node*>(ctx->IDENT()->getText());
+		auto value = currentNamespace().get<const Node*>(ctx->IDENT()->getText());
+		if (!value.has_value()) {
+			auto offendingSymbol = ctx->IDENT()->getSymbol();
+			errorlistener.semanticError(
+					PrettyErrorListener::ErrorLevel::Error, offendingSymbol, offendingSymbol->getLine(),
+					offendingSymbol->getCharPositionInLine(),
+					std::format("Variable {} not defined", ctx->IDENT()->getText())
+			);
+			return &graph().addErrorNode();
+		}
+		return value.value().get();
 	}
 	virtual std::any visitConstantExpression(mdlParser::ConstantExpressionContext* ctx) override {
 		return &graph().addConstNode(std::any_cast<mdl::Computegraph::Value>(ctx->constant()->accept(this)));
@@ -206,15 +242,46 @@ public:
 	}
 
 	virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
-		throw std::runtime_error("Not implemented");
+		auto firsttok = ctx->start;
+		auto lasttok = ctx->stop;
+		errorlistener.semanticError(
+				PrettyErrorListener::ErrorLevel::Error,
+				{{.linenr = firsttok->getLine(),
+				  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+				  .beginMark = firsttok->getCharPositionInLine(),
+				  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+				firsttok->getLine(), firsttok->getCharPositionInLine(),
+				"Member access expressions are not yet implemented"
+		);
+		return &graph().addErrorNode();
 	}
 
 	virtual std::any visitEinopsExpression(mdlParser::EinopsExpressionContext* ctx) override {
-		throw std::runtime_error("Not implemented");
+		auto firsttok = ctx->start;
+		auto lasttok = ctx->stop;
+		errorlistener.semanticError(
+				PrettyErrorListener::ErrorLevel::Error,
+				{{.linenr = firsttok->getLine(),
+				  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+				  .beginMark = firsttok->getCharPositionInLine(),
+				  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+				firsttok->getLine(), firsttok->getCharPositionInLine(), "Einops expressions are not yet implemented"
+		);
+		return &graph().addErrorNode();
 	}
 
 	virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
-		throw std::runtime_error("Not implemented");
+		auto firsttok = ctx->start;
+		auto lasttok = ctx->stop;
+		errorlistener.semanticError(
+				PrettyErrorListener::ErrorLevel::Error,
+				{{.linenr = firsttok->getLine(),
+				  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+				  .beginMark = firsttok->getCharPositionInLine(),
+				  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+				firsttok->getLine(), firsttok->getCharPositionInLine(), "Method calls are not yet implemented"
+		);
+		return &graph().addErrorNode();
 	}
 
 	virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
@@ -230,7 +297,17 @@ public:
 	}
 
 	virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {
-		throw std::runtime_error("Not implemented");
+		auto firsttok = ctx->start;
+		auto lasttok = ctx->stop;
+		errorlistener.semanticError(
+				PrettyErrorListener::ErrorLevel::Error,
+				{{.linenr = firsttok->getLine(),
+				  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+				  .beginMark = firsttok->getCharPositionInLine(),
+				  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+				firsttok->getLine(), firsttok->getCharPositionInLine(), "Switch expressions are not yet implemented"
+		);
+		return &graph().addErrorNode();
 	}
 
 	virtual std::any visitExpressionStatement(mdlParser::ExpressionStatementContext* ctx) override {
@@ -252,7 +329,7 @@ public:
 	}
 };
 
-Program mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
+std::optional<Program> mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
 	antlr4::ANTLRInputStream input{stream};
 	antlr4::mdlLexer lexer(&input);
 	antlr4::CommonTokenStream tokens(&lexer);
@@ -261,9 +338,12 @@ Program mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
 	PrettyErrorListener errorlistener(std::string{sourcename});
 	parser.addErrorListener(&errorlistener);
 	TranslatingVisitor visitor{errorlistener};
-	return std::move(*std::any_cast<std::shared_ptr<Program>>(parser.program()->accept(&visitor)));
+	auto programptr = std::any_cast<std::shared_ptr<Program>>(parser.program()->accept(&visitor));
+	if (errorlistener.anyErrorOccured())
+		return std::nullopt;
+	return std::make_optional<Program>(std::move(*programptr));
 }
-Program mdl::parser::parse(const std::filesystem::path& file) {
+std::optional<Program> mdl::parser::parse(const std::filesystem::path& file) {
 	std::ifstream stream{file.c_str()};
 	return parse(stream, std::filesystem::absolute(file).c_str());
 }
