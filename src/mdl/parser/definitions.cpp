@@ -1,14 +1,14 @@
 #include <mdl/parser/definitions.hpp>
 
-Computegraph empty{};
+mdl::Computegraph empty{};
 
 #include <type_traits>
 
-static_assert(std::is_move_constructible_v<Program>);
-static_assert(std::is_move_constructible_v<Computegraph>);
-static_assert(std::is_move_constructible_v<Module>);
-static_assert(std::is_move_constructible_v<Struct>);
-static_assert(std::is_move_assignable_v<Program>);
-static_assert(std::is_move_assignable_v<Computegraph>);
-static_assert(std::is_move_assignable_v<Module>);
-static_assert(std::is_move_assignable_v<Struct>);
+static_assert(std::is_move_constructible_v<mdl::Program>);
+static_assert(std::is_move_constructible_v<mdl::Computegraph>);
+static_assert(std::is_move_constructible_v<mdl::Module>);
+static_assert(std::is_move_constructible_v<mdl::Struct>);
+static_assert(std::is_move_assignable_v<mdl::Program>);
+static_assert(std::is_move_assignable_v<mdl::Computegraph>);
+static_assert(std::is_move_assignable_v<mdl::Module>);
+static_assert(std::is_move_assignable_v<mdl::Struct>);

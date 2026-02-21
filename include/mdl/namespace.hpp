@@ -50,7 +50,7 @@ namespace mdl {
 		}
 
 		const DataType& putType(std::string_view name, DataType&& type) {
-			auto [it, inserted] = objects.emplace(std::string{name}, std::move(type));
+			auto [it, inserted] = types.emplace(std::string{name}, std::move(type));
 			assert(inserted);
 			return std::any_cast<const DataType&>(it->second);
 		}

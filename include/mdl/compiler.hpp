@@ -3,10 +3,10 @@
 
 #include <filesystem>
 
-class Module;
-
 namespace mdl {
+	struct Module;
+
 	void compileToFile(const Module& module, const std::filesystem::path& output);
-}
+} // namespace mdl
 
 #endif

@@ -7,6 +7,9 @@
 #include <vector>
 
 namespace mdl {
+	struct Node;
+	struct Module;
+
 	struct Elipsis {};
 
 	enum class Primitive {
@@ -18,12 +21,12 @@ namespace mdl {
 	};
 
 	struct TensorType final {
-		using Shape = std::vector<std::variant<unsigned, Elipsis>>;
+		using Shape = std::vector<std::variant<unsigned, Elipsis, const Node*>>;
 		Primitive type;
 		Shape shape;
 	};
 
-	using DataType = std::variant<Primitive, TensorType, struct AggregateType>;
+	using DataType = std::variant<Primitive, TensorType, struct AggregateType, std::reference_wrapper<const Module>>;
 
 	struct AggregateType final {
 		std::map<std::string, DataType> members;

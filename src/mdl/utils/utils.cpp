@@ -23,6 +23,9 @@ namespace std {
 
 namespace std {
 	std::string to_string(const Elipsis&) { return "..."; }
+	std::string to_string(const mdl::Node* node) {
+		return node ? "<Node>" : "<Null>"; /** \todo possibly improve conversion by writing the expression **/
+	}
 } // namespace std
 
 std::string std::to_string(const Primitive& prim) {

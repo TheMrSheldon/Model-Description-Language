@@ -12,6 +12,14 @@
 			"cudaVersion": "12.5",
 			"cudnnVersion": "automatic"
 		}
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"CS128.cs128-clang-tidy",
+				"mike-lischke.vscode-antlr4"
+			]
+		}
 	}
 
 	// Features to add to the dev container. More info: https://containers.dev/features.

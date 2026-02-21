@@ -1,0 +1,37 @@
+name: Run C++ Tests, Linters, and Format Checks
+
+on:
+ push:
+
+jobs:
+  linters:
+    name: Run C++ Linters
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Compiler and Cpp Tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-tidy: "19.1.0"
+          cmake: true
+          setup-cpp: false
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Configure CMake
+        run: cmake -B ./build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Run Clang-Tidy
+        working-directory: ${{github.workspace}}
+        run: clang-tidy-19 -p ./build/compile_commands.json $(find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$')
+  format-checks:
+    name: Check C++ code format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Compiler and Cpp Tools
+        uses: aminya/setup-cpp@v1
+        with:
+          clang-format: "19.1.0"
+          setup-cpp: false
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Check Codestyle
+        working-directory: ${{github.workspace}}
+        run: find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$' | xargs clang-format-19 --dry-run --Werror --Wno-error=unknown

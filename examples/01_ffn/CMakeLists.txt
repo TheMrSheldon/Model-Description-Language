@@ -2,7 +2,7 @@ enable_language(MDL)
 
 add_executable(01_ffn
     main.cpp
-    model.mdl
+    model.dlm
 )
 
 target_mdl_argvals(01_ffn ${CMAKE_CURRENT_LIST_DIR}/model.yml)

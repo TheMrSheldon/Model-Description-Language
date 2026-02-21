@@ -13,6 +13,14 @@
 
 namespace mdl {
 
+	struct Node;
+	struct Computegraph;
+
+	struct Object final {
+		DataType dtype;
+	};
+
+	/** \todo replace operators with function calls **/
 	class Computegraph final {
 	public:
 		enum class Operation {
@@ -25,8 +33,8 @@ namespace mdl {
 			DIV,
 			MATMULT
 		};
-		struct Node;
-		using Value = std::variant<int, double>;
+		using Node = mdl::Node;
+		struct Value : public std::variant<int, double /*, std::map<std::string, Value>*/> {};
 
 	private:
 		std::vector<std::unique_ptr<Node>> nodes;

@@ -1,7 +1,38 @@
 #include "./errorlistener.hpp"
 
+#include <termcolor/termcolor.hpp>
+
 #include <cassert>
 #include <format>
+#include <iostream>
+#include <sstream>
+
+/**
+ * @brief Get the width of the terminal in characters
+ * 
+ * @return Width of the terminal in characters
+ */
+static int getTerminalWidth();
+#ifdef _WIN32
+#include <windows.h>
+
+static int getTerminalWidth() {
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	if (GetConsoleScreenBufferInfo(GetStdHandle(STD_ERROR_HANDLE), &csbi))
+		return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+	return 80;
+}
+#else
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+static int getTerminalWidth() {
+	winsize w{};
+	if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+		return w.ws_col;
+	return 80;
+}
+#endif
 
 /**
  * @brief Wrapper class for pretty printing error levels.
@@ -117,8 +148,9 @@ static std::ostream& operator<<(std::ostream& os, const PrettyErrorListener::Con
 			caretPos -= 1;
 
 		size_t numCarets = std::min(ctxt.markWidth, usableWidth - caretPos);
-		std::cerr << std::string(gutterWidth + caretPos, ' ') << termcolor::red << std::string(numCarets, '^')
-				  << termcolor::reset << "\n";
+		std::cerr << termcolor::bright_grey << std::string(gutterWidth - 2, ' ') << "| " << termcolor::reset
+				  << std::string(caretPos, ' ') << termcolor::red << std::string(numCarets, '^') << termcolor::reset
+				  << "\n";
 	}
 	return os;
 }
@@ -128,11 +160,21 @@ void PrettyErrorListener::printError(
 		const std::string& msg, const std::string& hint
 ) {
 	if (level == ErrorLevel::Error)
-		errorOccured = true;
+		numErrors++;
+	else if (level == ErrorLevel::Warning)
+		numWarnings++;
 	std::cerr << FmtLevel{level} << msg << "\n";
 	std::cerr << FmtFilepos{file, offendingLine, offendingCol + 1} << std::endl;
 	for (auto& ctxt : context)
 		std::cerr << ctxt;
 	if (!hint.empty())
 		std::cerr << FmtHint{hint} << std::endl;
+}
+
+void PrettyErrorListener::printSummary() const {
+	std::cerr << "Encountered ";
+	if (numErrors > 0)
+		std::cerr << termcolor::red << numErrors << " error(s)" << termcolor::reset << std::endl;
+	if (numWarnings > 0)
+		std::cerr << termcolor::yellow << numWarnings << " warning(s)" << termcolor::reset << std::endl;
 }

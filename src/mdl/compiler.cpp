@@ -57,6 +57,11 @@ static tvm::runtime::DataType toUnderlyingTVMType(mdl::DataType dtype) {
 					[](const mdl::AggregateType&) {
 						assert(false); /** \todo implement **/
 						return tvm::runtime::DataType{};
+					},
+					[](const std::reference_wrapper<const mdl::Module>&) {
+						assert(false);
+						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
+						return tvm::runtime::DataType{};
 					}
 			},
 			dtype
@@ -71,18 +76,34 @@ static tvm::ffi::Array<tvm::PrimExpr> getShape(mdl::DataType dtype) {
 						tvm::ffi::Array<tvm::PrimExpr> shape;
 						for (const auto i : ttype.shape) {
 							// assert(std::holds_alternative<unsigned>(i)); /** \todo support otherwise **/
-							if (std::holds_alternative<mdl::Elipsis>(i)) {
-								shape.emplace_back(tvm::te::var("B"));
-							} else {
-								shape.emplace_back(
-										tvm::PrimExpr{static_cast<int32_t>(std::get<unsigned>(i))}
-								); // May overflow since primexpr uses int32_t
-							}
+							auto expr = std::visit(
+									mdl::overloaded{
+											[](mdl::Elipsis) { return tvm::PrimExpr{tvm::te::var("B")}; },
+											[](unsigned u) {
+												return tvm::PrimExpr{
+														static_cast<int32_t>(u)
+												}; /* May overflow since primexpr uses int32_t */
+											},
+											[](const mdl::Computegraph::Node* node) {
+												assert(mdl::isCompiletimeEvalable(*node));
+												assert(false);
+												/** \todo compute node value and return it as a constant PrimExpr **/
+												return tvm::PrimExpr{};
+											}
+									},
+									i
+							);
+							shape.emplace_back(expr);
 						}
 						return shape;
 					},
 					[](const mdl::AggregateType&) {
 						assert(false); /** \todo implement **/
+						return tvm::ffi::Array<tvm::PrimExpr>{};
+					},
+					[](const std::reference_wrapper<const mdl::Module>&) {
+						assert(false);
+						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
 						return tvm::ffi::Array<tvm::PrimExpr>{};
 					}
 			},
@@ -150,12 +171,12 @@ static tvm::te::Tensor translate(Arguments& args, const mdl::Computegraph::Node&
 	return it->second(args, node);
 }
 
-static tvm::BaseFunc translateFunc(const FuncDesc& func) {
+static tvm::BaseFunc translateFunc(const mdl::FuncDesc& func) {
 	std::string arguments;
-	auto r =
-			func.arguments |
-			std::views::transform([](VarDesc d) { return std::to_string(mdl::getDataType(*d.node)) + ": " + d.name; }) |
-			std::views::join_with(std::string_view{", "});
+	auto r = func.arguments | std::views::transform([](mdl::VarDesc d) {
+				 return std::to_string(mdl::getDataType(*d.node)) + ": " + d.name;
+			 }) |
+			 std::views::join_with(std::string_view{", "});
 	std::ranges::copy(std::begin(r), std::end(r), std::back_inserter(arguments));
 	auto logger = mdl::log::getLogger("compiler");
 	logger->info("Translating {}({})", func.name, arguments);
@@ -171,7 +192,7 @@ static tvm::BaseFunc translateFunc(const FuncDesc& func) {
 	);
 }
 
-void mdl::compileToFile(const Module& module, const std::filesystem::path& output) {
+void mdl::compileToFile(const mdl::Module& module, const std::filesystem::path& output) {
 	// Problems: tvm::tir::transform::MakePackedAPI() in the pipeline makes the callingconv packed; CUDA build does not like this
 	tvm::ffi::Map<tvm::GlobalVar, tvm::BaseFunc> funcs;
 	for (auto func : module.functions)

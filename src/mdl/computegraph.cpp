@@ -9,10 +9,10 @@
 
 using mdl::Computegraph;
 using Value = Computegraph::Value;
-using Node = Computegraph::Node;
+using mdl::Node;
 using Operation = Computegraph::Operation;
 
-struct Computegraph::Node {
+struct mdl::Node {
 	using NValue = std::variant<std::vector<const Node*>, Value, std::string>;
 	Operation operation;
 	NValue value;
@@ -55,9 +55,12 @@ Computegraph& Computegraph::addSubgraph() { return subgraphs.emplace_back(); }
 
 const Node& Computegraph::addErrorNode() {
 	return *nodes.emplace_back(
-			std::make_unique<Node>(Node{
-					.operation = Operation::Const, .value = 0, .dtype = DataType{Primitive::error}, .isConsteval = true
-			})
+			std::make_unique<Node>(
+					Node{.operation = Operation::Const,
+						 .value = Value{},
+						 .dtype = DataType{Primitive::error},
+						 .isConsteval = true}
+			)
 	);
 }
 

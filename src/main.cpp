@@ -17,20 +17,20 @@ struct CompileArgs {
 	bool generateHeaders;
 };
 
-static void print(const Struct& s) { std::cout << "Struct " << s.name << std::endl; }
+static void print(const mdl::Struct& s) { std::cout << "Struct " << s.name << std::endl; }
 
-static void print(const Node* node, std::string prefix = "") {
+static void print(const mdl::Node* node, std::string prefix = "") {
 	if (node == nullptr)
 		std::cout << "Null" << std::endl;
 	else {
 		std::cout << prefix << std::to_underlying(mdl::getOperation(*node)) << std::endl;
 		switch (mdl::getOperation(*node)) {
-		case Operation::Input:
-		case Operation::Argument:
+		case mdl::Operation::Input:
+		case mdl::Operation::Argument:
 			std::cout << prefix << "Input/Arg: " << mdl::getName(*node) << ": "
 					  << std::to_string(mdl::getDataType(*node)) << std::endl;
 			break;
-		case Operation::Const:
+		case mdl::Operation::Const:
 			std::visit([prefix](auto x) { std::cout << prefix << ':' << x << std::endl; }, mdl::getConst(*node));
 			break;
 		default:
@@ -41,7 +41,7 @@ static void print(const Node* node, std::string prefix = "") {
 	}
 }
 
-static void print(const Module& m) {
+static void print(const mdl::Module& m) {
 	std::cout << "== Module " << m.name << " ==" << std::endl;
 	std::cout << "Arguments:" << std::endl;
 	for (const auto& a : m.arguments) {
@@ -74,10 +74,12 @@ static void runCompileCommand(const CompileArgs& args) {
 		exit(1);
 	auto& program = result.value();
 	for (const auto& [key, value] : program.definitions) {
-		std::visit(mdl::overloaded{[](const Struct& s) { print(s); }, [](const Module& m) { print(m); }}, value);
+		std::visit(
+				mdl::overloaded{[](const mdl::Struct& s) { print(s); }, [](const mdl::Module& m) { print(m); }}, value
+		);
 	}
 
-	const Module& module = std::get<Module>(program.definitions["Linear"]); /** \todo from module **/
+	const mdl::Module& module = std::get<mdl::Module>(program.definitions["Linear"]); /** \todo from module **/
 
 	mdl::compileToFile(module, output);
 }

@@ -1,0 +1,45 @@
+name: Publish Release
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+      - 'v*.*.*-*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v6
+    - name: Install Compiler and Cpp Tools
+      uses: aminya/setup-cpp@v1
+      with:
+        cmake: true
+        ninja: true
+    - name: Fetch Tags
+      continue-on-error: true
+      run: |
+        git config --global safe.directory '*'
+        git fetch --prune --unshallow --tags
+      working-directory: ${{github.workspace}}
+    - name: Configure CMake
+      run: cmake -B ./build
+    - name: Build
+      run: cmake --build ./build --config Release --target mdlc
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Release ${{ github.ref_name }}
+        files: |
+          *.so
+          *.dylib
+          *.dll
+        fail_on_unmatched_files: true
+        draft: false
+        # Prerelease if the tag contains a hyphen (e.g., v1.0.0-beta)
+        prerelease: ${{ contains(github.ref_name, '-') }}
+        generate_release_notes: true

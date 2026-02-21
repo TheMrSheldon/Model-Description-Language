@@ -30,6 +30,7 @@ float[...] sum(x: float[..., N]) => __builtin_sum(x);
  * @param x 
  * @return 
  */
+template<N: uint>
 float[...] max(x: float[..., N]) => __builtin_max(x);
 
 /**
@@ -75,6 +76,7 @@ module LayerNorm[dim: uint] {
     beta: float[dim]
     gamma: float[dim]
 
+    template<N: uint>
     float[..., dim, N] forward(x: float[..., dim, N]) {
         auto numerator = mean(input)[... -> ... 1];
         auto denominator = rsqrt(var(x[... a b -> ... b a]) + 1e-5);
