@@ -1,5 +1,7 @@
 #include <mdl/utils/utils.hpp>
 
+#include <mdl/computegraphv2/node.hpp>
+
 #include <algorithm>
 #include <ranges>
 #include <utility>
@@ -7,7 +9,7 @@
 using mdl::AggregateType;
 using mdl::DataType;
 using mdl::Elipsis;
-using mdl::Primitive;
+using mdl::PrimitiveType;
 using mdl::TensorType;
 
 using namespace std::literals;
@@ -28,21 +30,22 @@ namespace std {
 	}
 } // namespace std
 
-std::string std::to_string(const Primitive& prim) {
+std::string std::to_string(const PrimitiveType& prim) {
 	static std::string_view names[]{
-			[std::to_underlying(Primitive::error)] = "<error>",
-			[std::to_underlying(Primitive::floating)] = "float",
-			[std::to_underlying(Primitive::integer)] = "int",
-			[std::to_underlying(Primitive::uint)] = "uint",
-			[std::to_underlying(Primitive::boolean)] = "bool"
+			[std::to_underlying(PrimitiveType::error)] = "<error>",
+			[std::to_underlying(PrimitiveType::floating)] = "float",
+			[std::to_underlying(PrimitiveType::integer)] = "int",
+			[std::to_underlying(PrimitiveType::uint)] = "uint",
+			[std::to_underlying(PrimitiveType::boolean)] = "bool"
 	};
 	return std::string{names[std::to_underlying(prim)]};
 }
 std::string std::to_string(const AggregateType& agg) { return "Aggregate Type"; /** \todo implement **/ }
 std::string std::to_string(const TensorType& tensortype) {
 	std::string args;
-	auto r = tensortype.shape |
-			 std::views::transform([](auto x) { return std::visit([](auto x) { return std::to_string(x); }, x); }) |
+	auto r = tensortype.shape | std::views::transform([](const auto& x) {
+				 return std::visit([](const auto& x) { return std::to_string(x); }, x);
+			 }) |
 			 std::views::join_with(", "sv);
 	std::ranges::copy(std::begin(r), std::end(r), std::back_inserter(args));
 	return std::to_string(tensortype.type) + "[" + args + "]";

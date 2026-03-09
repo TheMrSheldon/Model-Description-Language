@@ -9,14 +9,12 @@ target_sources(mdl
 			${CMAKE_CURRENT_LIST_DIR}/../include
 			${CMAKE_CURRENT_BINARY_DIR}/
 		FILES
-			${CMAKE_CURRENT_LIST_DIR}/../include/mdl/computegraph.hpp
 	PRIVATE
 		mdl/argvals.cpp
-		mdl/compiler.cpp
-		mdl/computegraph.cpp
+		mdl/backends/tvm/tvm.cpp
+		mdl/computegraphv2/node.cpp
 		mdl/namespace.cpp
 		mdl/parser.cpp
-		mdl/parser/definitions.cpp
 		mdl/parser/errorlistener.cpp
 		mdl/utils/utils.cpp
 )

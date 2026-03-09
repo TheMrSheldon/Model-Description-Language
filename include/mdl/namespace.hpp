@@ -9,7 +9,7 @@
 
 #include <iostream>
 
-#include "parser/datatype.hpp"
+#include "computegraphv2/datatype.hpp"
 
 namespace mdl {
 
@@ -62,6 +62,8 @@ namespace mdl {
 				return parent->getType(name);
 			return std::nullopt;
 		}
+
+		static const Namespace emptyNamespace() { return Namespace{}; }
 
 		static const Namespace& baseNamespace() {
 			static Namespace bns{nullptr, builtins, builtinTypes};

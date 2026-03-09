@@ -2,6 +2,8 @@
 
 #include "./parser/errorlistener.hpp"
 
+#include <mdl/namespace.hpp>
+
 #include <mdlBaseVisitor.h>
 #include <mdlLexer.h>
 #include <mdlParser.h>
@@ -34,22 +36,24 @@ namespace mdl {
 
 		virtual std::any visitProgram(mdlParser::ProgramContext* ctx) override {
 			assert(nsstack.empty());
+			CompilationUnit program;
+			pushGraph(&program.graph);
 			nsstack.push(mdl::Namespace::baseNamespace());
-			Program program;
 			// Parse Structs first (no matter where they are in the file)
 			// Does this make sense? Only if Structs can not have instances of modules as members.
 			for (auto&& def : ctx->struct_def()) {
-				auto s = std::any_cast<Struct>(def->accept(this));
-				program.definitions.try_emplace(s.name, std::move(s));
+				auto [name, s] = std::any_cast<std::pair<std::string, AggregateType>>(def->accept(this));
+				program.definitions.try_emplace(name, std::move(s));
 			}
 			// Parse Modules second (no matter where they are in the file)
 			for (auto&& def : ctx->module_def()) {
-				auto m = std::any_cast<std::shared_ptr<Module>>(def->accept(this));
-				program.definitions.try_emplace(m->name, std::move(*m));
+				auto [name, m] = std::any_cast<std::pair<std::string, ModuleType>>(def->accept(this));
+				program.definitions.try_emplace(name, std::move(m));
 			}
 			nsstack.pop();
+			popGraph();
 			assert(nsstack.empty());
-			return std::make_shared<Program>(std::move(program));
+			return std::make_shared<CompilationUnit>(std::move(program));
 		}
 
 		void updateTypeWithVarDecl(
@@ -74,34 +78,39 @@ namespace mdl {
 		}
 
 		virtual std::any visitStruct_def(mdlParser::Struct_defContext* ctx) override {
-			Struct s{.name = ctx->IDENT()->getText()};
-			updateTypeWithVarDecl(s.type, s.name, ctx->vardecl());
-			currentNamespace().putType(s.name, DataType{s.type});
-			return s;
+			AggregateType s;
+			auto name = ctx->IDENT()->getText();
+			updateTypeWithVarDecl(s, name, ctx->vardecl());
+			currentNamespace().putType(name, DataType{s});
+			return std::make_pair(name, s);
 		}
 
 		virtual std::any visitModule_def(mdlParser::Module_defContext* ctx) override {
-			Module m{.name = ctx->IDENT()->getText()};
-			pushGraph(&m.graph);
+			ModuleType m;
+			auto name = ctx->IDENT()->getText();
 			pushNamespace();
 			/** \todo add params and vars to namespace */
 			for (auto& param : ctx->param()) {
 				const auto [name, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				auto& node = currentNamespace().put(name, &graph().addArgumentNode(name, dtype));
-				m.arguments.emplace_back(VarDesc{.name = name, .node = node});
+				auto& node = *currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
+				m.typeargs.emplace_back(name, std::get<HyperparameterNode>(node));
 			}
 			for (auto& var : ctx->vardecl()) {
 				const auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				auto& node = currentNamespace().put(name, &graph().addInputNode(name, dtype));
-				m.variables.emplace_back(VarDesc{.name = name, .node = node});
+				auto& node = *currentNamespace().put(name, &graph().addParameterNode(dtype));
+				m.variables.emplace_back(name, std::get<ParameterNode>(node));
 			}
 			for (auto& func : ctx->funcdef()) {
-				m.functions.emplace_back(std::any_cast<FuncDesc>(func->accept(this)));
+				auto decl = std::any_cast<FunctionDecl>(func->accept(this));
+				auto name = decl.name;
+				auto [_, inserted] = m.functions.insert_or_assign(std::move(name), std::move(decl));
+				if (!inserted) {
+					/** \todo output a helpful warning message that this definition shadows another member, which is undefined behavior **/
+				}
 			}
 			popNamespace();
-			popGraph();
-			currentNamespace().putType(m.name, DataType{std::cref(m)});
-			return std::make_shared<Module>(std::move(m));
+			currentNamespace().putType(name, DataType{m});
+			return std::make_pair(name, m);
 		}
 
 		virtual std::any visitParam(mdlParser::ParamContext* ctx) override {
@@ -129,7 +138,7 @@ namespace mdl {
 						ctx->typename_->getCharPositionInLine(),
 						std::format("{} does not name a type", ctx->typename_->getText())
 				);
-				return mdl::DataType{Primitive::integer}; /** Use integer for error types or define a new one? **/
+				return mdl::DataType{mdl::PrimitiveType::error};
 			} else {
 				if (ctx->type_arg().size() != 0) {
 					std::vector<TypeArg> args;
@@ -183,8 +192,8 @@ namespace mdl {
 							"Parameters must be compile time constant"
 					);
 					return TypeArg{&node}; /** return this node anyway for now **/
-				} else if (mdl::getOperation(node) == mdl::Computegraph::Operation::Const) {
-					return TypeArg{mdl::getConst(node)};
+				} else if (auto n = std::get_if<ConstNode>(&node)) {
+					return TypeArg{n->value};
 				} else {
 					return TypeArg{&node};
 				}
@@ -196,9 +205,9 @@ namespace mdl {
 
 		virtual std::any visitConstant(mdlParser::ConstantContext* ctx) override {
 			if (ctx->INTEGER() != nullptr)
-				return mdl::Computegraph::Value{std::atoi(ctx->INTEGER()->getText().c_str())};
+				return mdl::Atomic{std::atoi(ctx->INTEGER()->getText().c_str())};
 			if (ctx->FLOAT() != nullptr)
-				return mdl::Computegraph::Value{std::atof(ctx->FLOAT()->getText().c_str())};
+				return mdl::Atomic{std::atof(ctx->FLOAT()->getText().c_str())};
 			assert(false); // Invalid case
 		}
 
@@ -207,29 +216,29 @@ namespace mdl {
 		}
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
-			FuncDesc f{.name = ctx->IDENT()->getText(), .graph = &graph().addSubgraph()};
-			pushGraph(f.graph);
+			const Node* output;
 			pushNamespace();
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
-					currentNamespace().put(name, &graph().addArgumentNode(name, dtype));
+					currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
+					/** \todo register template in FunctionDecl */
 				}
 			}
 			for (auto& param : ctx->param()) {
 				auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
-				currentNamespace().put(name, &graph().addInputNode(name, dtype));
+				currentNamespace().put(name, &graph().addParameterNode(dtype));
+				/** \todo register parameter in FunctionDecl */
 			}
 			if (ctx->expr() != nullptr) {
-				auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
-				graph().setOutputNode(node);
+				output = std::any_cast<const Node*>(ctx->expr()->accept(this));
 			} else {
 				for (auto stmt : ctx->statement())
 					stmt->accept(this);
+				/** \todo track output statement **/
 			}
 			popNamespace();
-			popGraph();
-			return f;
+			return FunctionDecl{.name = ctx->IDENT()->getText(), .output = *output};
 		}
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
@@ -246,7 +255,7 @@ namespace mdl {
 			return value.value().get();
 		}
 		virtual std::any visitConstantExpression(mdlParser::ConstantExpressionContext* ctx) override {
-			return &graph().addConstNode(std::any_cast<mdl::Computegraph::Value>(ctx->constant()->accept(this)));
+			return &graph().addConstNode(std::any_cast<mdl::Atomic>(ctx->constant()->accept(this)));
 		}
 		virtual std::any visitParenExpression(mdlParser::ParenExpressionContext* ctx) override {
 			return ctx->expr()->accept(this);
@@ -298,15 +307,16 @@ namespace mdl {
 		}
 
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
-			static const std::map<std::string, mdl::Computegraph::Operation> toOp{
-					{"+", mdl::Computegraph::Operation::ADD},	  {"-", mdl::Computegraph::Operation::SUB},
-					{"*", mdl::Computegraph::Operation::MULT},	  {"/", mdl::Computegraph::Operation::DIV},
-					{"@", mdl::Computegraph::Operation::MATMULT},
+			/** \todo Access the operator from the datatype */
+			static const std::map<std::string, mdl::builtins::FunctionIDs> toOp{
+					{"+", mdl::builtins::FunctionIDs::TENSOR_ADD},	{"-", mdl::builtins::FunctionIDs::TENSOR_SUB},
+					{"*", mdl::builtins::FunctionIDs::TENSOR_PROD}, {"/", mdl::builtins::FunctionIDs::TENSOR_DIV},
+					{"@", mdl::builtins::FunctionIDs::TENSOR_DOT},
 			};
 			const auto op = toOp.at(ctx->bop->getText());
 			const auto* left = std::any_cast<const Node*>(ctx->left->accept(this));
 			const auto* right = std::any_cast<const Node*>(ctx->right->accept(this));
-			return &graph().addOpNode(op, {left, right});
+			return &graph().addInvocationNode(op, {left, right});
 		}
 
 		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {
@@ -348,7 +358,7 @@ namespace mdl {
 	};
 } // namespace mdl
 
-std::optional<mdl::Program> mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
+std::optional<mdl::CompilationUnit> mdl::parser::parse(std::istream& stream, std::string_view sourcename) {
 	antlr4::ANTLRInputStream input{stream};
 	antlr4::mdlLexer lexer(&input);
 	antlr4::CommonTokenStream tokens(&lexer);
@@ -357,13 +367,13 @@ std::optional<mdl::Program> mdl::parser::parse(std::istream& stream, std::string
 	PrettyErrorListener errorlistener(std::string{sourcename});
 	parser.addErrorListener(&errorlistener);
 	TranslatingVisitor visitor{errorlistener};
-	auto programptr = std::any_cast<std::shared_ptr<Program>>(parser.program()->accept(&visitor));
+	auto programptr = std::any_cast<std::shared_ptr<CompilationUnit>>(parser.program()->accept(&visitor));
 	errorlistener.printSummary();
 	if (errorlistener.getNumErrors() > 0)
 		return std::nullopt;
-	return std::make_optional<Program>(std::move(*programptr));
+	return std::make_optional<CompilationUnit>(std::move(*programptr));
 }
-std::optional<mdl::Program> mdl::parser::parse(const std::filesystem::path& file) {
+std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::path& file) {
 	std::ifstream stream{file.c_str()};
 	return parse(stream, std::filesystem::absolute(file).c_str());
 }

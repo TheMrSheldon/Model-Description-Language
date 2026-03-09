@@ -17,13 +17,13 @@ struct CompileArgs {
 	bool generateHeaders;
 };
 
-static void print(const mdl::Struct& s) { std::cout << "Struct " << s.name << std::endl; }
+static void print(std::string_view name, const mdl::AggregateType& s) { std::cout << "Struct " << name << std::endl; }
 
 static void print(const mdl::Node* node, std::string prefix = "") {
 	if (node == nullptr)
 		std::cout << "Null" << std::endl;
 	else {
-		std::cout << prefix << std::to_underlying(mdl::getOperation(*node)) << std::endl;
+		/*std::cout << prefix << std::to_underlying(mdl::getOperation(*node)) << std::endl;
 		switch (mdl::getOperation(*node)) {
 		case mdl::Operation::Input:
 		case mdl::Operation::Argument:
@@ -37,27 +37,32 @@ static void print(const mdl::Node* node, std::string prefix = "") {
 			for (const auto& n : mdl::getInputs(*node))
 				print(n, prefix + " ");
 			break;
-		}
+		}*/
+		/** \todo **/
+		std::cout << "TODO" << std::endl;
 	}
 }
 
-static void print(const mdl::Module& m) {
-	std::cout << "== Module " << m.name << " ==" << std::endl;
+static void print(std::string_view name, const mdl::ModuleType& m) {
+	std::cout << "== Module " << name << " ==" << std::endl;
 	std::cout << "Arguments:" << std::endl;
-	for (const auto& a : m.arguments) {
-		std::cout << a.name << std::endl;
+	for (const auto& [name, a] : m.typeargs) {
+		std::cout << name << std::endl;
 	}
 	std::cout << "Variables:" << std::endl;
-	for (const auto& v : m.variables) {
-		std::cout << v.name << std::endl;
+	for (const auto& [name, v] : m.variables) {
+		std::cout << name << std::endl;
 	}
 	std::cout << "Functions:" << std::endl;
-	for (const auto& f : m.functions) {
-		std::cout << f.name << std::endl;
-		for (const auto& arg : f.arguments)
-			std::cout << arg.name << std::endl;
-		std::cout << "Num Nodes: " << f.graph->getNumNodes() << std::endl;
-		print(f.graph->getOutputNode());
+	for (const auto& [name, f] : m.functions) {
+		std::cout << name << std::endl;
+		std::cout << "Template parameters" << std::endl;
+		for (const auto& [argname, arg] : f.templateParameters)
+			std::cout << argname << std::endl;
+		std::cout << "Parameters" << std::endl;
+		for (const auto& [argname, arg] : f.parameters)
+			std::cout << argname << std::endl;
+		print(&f.output.get());
 	}
 	std::cout << "=============" << std::endl;
 }
@@ -75,9 +80,14 @@ static void runCompileCommand(const CompileArgs& args) {
 	auto& program = result.value();
 	for (const auto& [key, value] : program.definitions) {
 		std::visit(
-				mdl::overloaded{[](const mdl::Struct& s) { print(s); }, [](const mdl::Module& m) { print(m); }}, value
+				mdl::overloaded{
+						[&](const mdl::AggregateType& s) { print(key, s); },
+						[&](const mdl::ModuleType& m) { print(key, m); }
+				},
+				value
 		);
 	}
+	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
 	const mdl::Module& module = std::get<mdl::Module>(program.definitions["Linear"]); /** \todo from module **/
 
