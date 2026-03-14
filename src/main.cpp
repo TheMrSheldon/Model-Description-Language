@@ -82,16 +82,15 @@ static void runCompileCommand(const CompileArgs& args) {
 		std::visit(
 				mdl::overloaded{
 						[&](const mdl::AggregateType& s) { print(key, s); },
-						[&](const mdl::ModuleType& m) { print(key, m); }
+						[&](const mdl::ModuleType& m) { print(key, m); },
+						[&](const mdl::FunctionDecl& f) { std::cout << "Function: " << f.name << std::endl; }
 				},
 				value
 		);
 	}
 	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
-	const mdl::Module& module = std::get<mdl::Module>(program.definitions["Linear"]); /** \todo from module **/
-
-	mdl::compileToFile(module, output);
+	mdl::compileToFile(program, output);
 }
 
 int main(int argc, char* argv[]) {

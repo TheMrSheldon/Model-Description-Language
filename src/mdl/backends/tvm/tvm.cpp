@@ -50,8 +50,8 @@ static tvm::runtime::DataType toUnderlyingTVMType(mdl::DataType dtype) {
 						assert(false); /** \todo implement **/
 						return tvm::runtime::DataType{};
 					},
-					[](const std::reference_wrapper<const mdl::ModuleType>&) {
-						assert(false);
+					[](const mdl::BoundModuleType&) {
+						std::abort();
 						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
 						return tvm::runtime::DataType{};
 					}
@@ -93,8 +93,8 @@ static tvm::ffi::Array<tvm::PrimExpr> getShape(mdl::DataType dtype) {
 						assert(false); /** \todo implement **/
 						return tvm::ffi::Array<tvm::PrimExpr>{};
 					},
-					[](const std::reference_wrapper<const mdl::ModuleType>&) {
-						assert(false);
+					[](const mdl::BoundModuleType&) {
+						std::abort();
 						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
 						return tvm::ffi::Array<tvm::PrimExpr>{};
 					}
@@ -107,19 +107,53 @@ static tvm::te::Tensor toPlaceholder(const std::string& name, mdl::DataType dtyp
 	return tvm::te::placeholder(getShape(dtype), toUnderlyingTVMType(dtype), name);
 }
 
-static tvm::te::Tensor translate(Arguments& args, const mdl::ConstNode& node);
-static tvm::te::Tensor translate(Arguments& args, const mdl::InvocationNode& node);
-static tvm::te::Tensor translate(Arguments& args, const mdl::ErrorNode& node);
+static tvm::te::Tensor translate(Arguments& args, const mdl::Node& node);
+
+static tvm::te::Tensor translate(Arguments& args, const mdl::ConstNode& node) {
+	auto dtype = node.datatype();
+	assert(std::holds_alternative<mdl::PrimitiveType>(dtype)); /** ConstNode values are always scalars **/
+	auto tvmtype = toUnderlyingTVMType(dtype);
+
+	tvm::PrimExpr constExpr = std::visit(
+			mdl::overloaded{
+					[&](int v) -> tvm::PrimExpr {
+						return tvm::cast(tvmtype, tvm::IntImm(tvm::DataType::Int(32), static_cast<int64_t>(v)));
+					},
+					[&](double v) -> tvm::PrimExpr {
+						return tvm::cast(tvmtype, tvm::FloatImm(tvm::DataType::Float(64), v));
+					}
+			},
+			node.value
+	);
+
+	return tvm::te::compute({1}, [constExpr](tvm::ffi::Array<tvm::tir::Var>) { return constExpr; }, "const");
+}
+static tvm::te::Tensor translate(Arguments& args, const mdl::InvocationNode& node) {
+	std::vector<tvm::te::Tensor> translatedArgs;
+	for (const auto& argRef : node.arguments)
+		translatedArgs.push_back(translate(args, argRef.get()));
+
+	auto& fn = mdl::backend::tvm::functions[std::to_underlying(node.id)];
+	assert(fn != nullptr); /** builtin not yet implemented for this backend **/
+	return fn(translatedArgs);
+}
+static tvm::te::Tensor translate(Arguments& args, const mdl::ErrorNode& node) {
+	/** \todo output that this is an internal error; compilation cannot be run when there are error nodes present **/
+	std::abort();
+}
 static tvm::te::Tensor translate(Arguments& args, const mdl::ParameterNode& node) {
 	auto arg = toPlaceholder(mdl::getName(node), mdl::getDataType(node));
 	args.emplace_back(arg);
 	return arg;
 }
-static tvm::te::Tensor translate(Arguments& args, const mdl::HyperparameterNode& node);
+static tvm::te::Tensor translate(Arguments& args, const mdl::HyperparameterNode& node) {
+	/** \todo implement **/
+	std::abort();
+}
 
 static tvm::te::Tensor translate(Arguments& args, const mdl::Node& node) {
 	/** \todo store the tensor in a cache since the same node could be translated multiple times and should evaluate to the same tensor-node **/
-	return std::visit([&](auto n) { return translate(args, n); }, node);
+	return std::visit([&](const auto& n) { return translate(args, n); }, node);
 }
 
 static ::tvm::BaseFunc translateFunc(const mdl::FunctionDecl& func) {

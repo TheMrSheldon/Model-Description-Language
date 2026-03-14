@@ -4,43 +4,29 @@
 #include "./builtins.hpp"
 #include "./datatype.hpp"
 #include "./node_decl.hpp"
-#include "./object.hpp"
 
 namespace mdl {
-
-	namespace details {
-		struct BaseNode {
-		private:
-			DataType type;
-			bool constevalable;
-
-		protected:
-			BaseNode() = default;
-
-		public:
-			/**
-			 * @brief Get the data type of this node.
-			 */
-			const DataType& datatype() const { return type; }
-
-			/**
-			 * @brief Whether this node can be evaluated at compile time.
-			 */
-			bool isConsteval() const { return constevalable; }
-		};
-	} // namespace details
-
 	/**
      * @brief "Const nodes" represent constant values in the compute graph. They consist of a data type and an atomic value.
      * @see Atomic
      */
 	struct ConstNode {
-		mdl::ObjectRef value;
+		mdl::Atomic value;
 
 		/**
 		 * @brief Get the data type of this node.
 		 */
-		const DataType& datatype() const { return value.type; }
+		const DataType& datatype() const {
+			static DataType inttype = PrimitiveType::integer;
+			static DataType floattype = PrimitiveType::floating;
+			return std::visit(
+					mdl::overloaded{
+							[&](const int&) -> const DataType& { return inttype; },
+							[&](const double&) -> const DataType& { return floattype; }
+					},
+					value
+			);
+		}
 
 		/**
 		 * @brief Whether this node can be evaluated at compile time.
@@ -52,9 +38,21 @@ namespace mdl {
      * @brief "Invocation nodes" represent function calls in the compute graph. They consist of a function reference and a list of argument nodes.
      * @details Member functions and operators are represented as invocation nodes with a function reference to the corresponding function and the object on which the member function is called as the first argument.
      */
-	struct InvocationNode : details::BaseNode {
+	struct InvocationNode {
+		DataType type;
+		bool constevalable;
 		mdl::builtins::FunctionIDs id;
-		std::vector<std::reference_wrapper<Node>> arguments;
+		std::vector<std::reference_wrapper<const Node>> arguments;
+
+		/**
+		 * @brief Get the data type of this node.
+		 */
+		const DataType& datatype() const { return type; }
+
+		/**
+		 * @brief Whether this node can be evaluated at compile time.
+		 */
+		bool isConsteval() const { return constevalable; }
 	};
 	/**
      * @brief "Error nodes" represent invalid nodes in the compute graph (e.g., due to semantic errors).
@@ -77,14 +75,38 @@ namespace mdl {
 	/**
      * @brief "Parameter nodes" represent member variables.
      */
-	struct ParameterNode : details::BaseNode {
+	struct ParameterNode {
+		DataType type;
+		bool constevalable;
 		std::string name;
+
+		/**
+		 * @brief Get the data type of this node.
+		 */
+		const DataType& datatype() const { return type; }
+
+		/**
+		 * @brief Whether this node can be evaluated at compile time.
+		 */
+		bool isConsteval() const { return constevalable; }
 	};
 	/**
      * @brief "Hyperparameter nodes" repreesent "template parameters", i.e., compile-time constant variables (e.g., module arguments and function template arguments).
      */
-	struct HyperparameterNode : details::BaseNode {
+	struct HyperparameterNode {
+		DataType type;
+		bool constevalable;
 		std::string name;
+
+		/**
+		 * @brief Get the data type of this node.
+		 */
+		const DataType& datatype() const { return type; }
+
+		/**
+		 * @brief Whether this node can be evaluated at compile time.
+		 */
+		bool isConsteval() const { return constevalable; }
 	};
 
 	const mdl::DataType& getDataType(const mdl::ConstNode& node);

@@ -5,6 +5,7 @@
 #include "node_decl.hpp"
 
 #include <expected>
+#include <format>
 #include <map>
 #include <string>
 #include <vector>
@@ -28,13 +29,19 @@ namespace mdl {
 
 	struct FunctionDecl;
 	struct ModuleType final {
-		std::vector<std::pair<std::string, std::reference_wrapper<HyperparameterNode>>> typeargs;
-		std::vector<std::pair<std::string, std::reference_wrapper<ParameterNode>>> variables;
+		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> typeargs;
+		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> variables;
 		std::map<std::string, FunctionDecl> functions;
 	};
 
+	struct BoundModuleType final {
+		std::reference_wrapper<const ModuleType> definition;
+		// Named bindings: must match definition.typeargs length (when fully bound)
+		std::vector<std::pair<std::string, Atomic>> hyperparamValues;
+	};
+
 	/** \todo handle member functions? **/
-	using DataType = std::variant<PrimitiveType, TensorType, struct AggregateType, std::reference_wrapper<ModuleType>>;
+	using DataType = std::variant<PrimitiveType, TensorType, struct AggregateType, BoundModuleType>;
 
 	struct AggregateType final {
 		std::map<std::string, DataType> members;
@@ -42,35 +49,17 @@ namespace mdl {
 
 	using TypeArg = std::variant<Elipsis, Atomic, const Node*>; /** \todo define TypeArgs */
 
-	// inline std::expected<DataType, std::string> setTypeArgs(DataType dtype, const std::vector<TypeArg>& typeargs) {
-	// 	if (auto primitive = std::get_if<PrimitiveType>(&dtype)) {
-	// 		TensorType::Shape shape;
-	// 		for (auto& arg : typeargs) {
-	// 			using RT = std::expected<TensorType::Shape::value_type, std::string>;
-	// 			auto val = std::visit(
-	// 					overloaded{
-	// 							[](Elipsis) -> RT { return Elipsis{}; },
-	// 							[](const Atomic& value) -> RT {
-	// 								if (auto val = std::get_if<int>(&value)) {
-	// 									return static_cast<unsigned>(*val);
-	// 								} else {
-	// 									return std::unexpected("Invalid type"); /** \todo more descriptive message **/
-	// 								}
-	// 							},
-	// 							[](const Node* node) -> RT { return node; }
-	// 					},
-	// 					arg
-	// 			);
-	// 			if (val.has_value())
-	// 				shape.emplace_back(*val);
-	// 			else
-	// 				return std::unexpected(val.error());
-	// 		}
-	// 		return TensorType{.type = *primitive, .shape = std::move(shape)};
-	// 	} else {
-	// 		return std::unexpected("Type arguments for non-primitive types not yet implemented");
-	// 	}
-	// }
+	std::expected<DataType, std::string> setTypeArgs(const PrimitiveType& prim, const std::vector<TypeArg>& typeargs);
+
+	std::expected<DataType, std::string> setTypeArgs(const TensorType& tensor, const std::vector<TypeArg>& typeargs);
+
+	std::expected<DataType, std::string> setTypeArgs(const AggregateType& agg, const std::vector<TypeArg>& typeargs);
+
+	std::expected<DataType, std::string> setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typeargs);
+
+	std::expected<DataType, std::string> setTypeArgs(const DataType& dtype, const std::vector<TypeArg>& typeargs);
+
+	FunctionDecl& getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes);
 } // namespace mdl
 
 #endif

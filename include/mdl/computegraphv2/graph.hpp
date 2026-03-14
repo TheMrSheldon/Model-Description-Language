@@ -3,8 +3,8 @@
 
 #include "./builtins.hpp"
 #include "./node.hpp"
-#include "./object.hpp"
 
+#include <list>
 #include <string>
 #include <vector>
 
@@ -32,32 +32,40 @@ namespace mdl {
 		Computegraph(Computegraph&&);
 		Computegraph& operator=(Computegraph&&);
 
-		Node& addConstNode(ObjectRef&& value);
+		const Node& addConstNode(Atomic&& value);
 
-		Node& addConstNode(Atomic&& value);
-
-		Node& addInvocationNode(
-				FunctionDecl&& func, std::vector<std::reference_wrapper<Node>>&& arguments,
-				std::vector<std::reference_wrapper<const Node>>&& templateArguments
+		const Node& addInvocationNode(
+				const FunctionDecl& func, std::vector<std::reference_wrapper<const Node>>&& arguments,
+				std::vector<std::reference_wrapper<const Node>>&& templateArguments = {}
 		);
 
-		Node& addInvocationNode(
+		const Node& addInvocationNode(
 				builtins::FunctionIDs func, DataType dtype, std::vector<std::reference_wrapper<const Node>>&& arguments
 		);
 
 		/**
 		 * @brief Adds an invalid node that signifies an uncompilable part of the computegraph.
-		 * @details For example, if the expression `a + b` is compiled, where `a` is a valid variable but `b` is not, then `b` is represented by an error node.
+		 * @details For example, if the expression `a + b` is compiled, where `a` is a valid variable but `b` is not,
+		 * then `b` is represented by an error node.
 		 * 
 		 * @return A reference to the error node.
 		 */
-		Node& addErrorNode();
+		const Node& addErrorNode();
 
-		Node& addParameterNode(DataType dtype /** \todo parameters **/);
+		const Node& addParameterNode(DataType dtype /** \todo parameters **/);
 
-		Node& addHyperparameterNode(DataType dtype /** \todo parameters **/);
+		const Node& addHyperparameterNode(DataType dtype /** \todo parameters **/);
 
 		size_t getNumNodes();
+
+	private:
+		/**
+		 * @brief Stores all nodes in this compute graph.
+		 * @details std::list is used to guarantee reference stability: adding new nodes must never invalidate existing
+		 * Node references or reference_wrappers held by InvocationNode arguments, FunctionDecl parameters, or any other
+		 * part of the graph. std::vector would silently dangle those references on reallocation.
+		 */
+		std::list<Node> nodes;
 	};
 } // namespace mdl
 

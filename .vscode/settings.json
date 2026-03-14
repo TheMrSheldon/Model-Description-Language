@@ -1,4 +1,7 @@
 {
     "C_Cpp.autoAddFileAssociations": false,
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "editor.rulers": [
+        120
+    ]
 }

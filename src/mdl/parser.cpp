@@ -93,12 +93,12 @@ namespace mdl {
 			for (auto& param : ctx->param()) {
 				const auto [name, dtype] = std::any_cast<ModuleParam>(param->accept(this));
 				auto& node = *currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
-				m.typeargs.emplace_back(name, std::get<HyperparameterNode>(node));
+				m.typeargs.emplace_back(name, std::cref(std::get<HyperparameterNode>(node)));
 			}
 			for (auto& var : ctx->vardecl()) {
 				const auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
 				auto& node = *currentNamespace().put(name, &graph().addParameterNode(dtype));
-				m.variables.emplace_back(name, std::get<ParameterNode>(node));
+				m.variables.emplace_back(name, std::cref(std::get<ParameterNode>(node)));
 			}
 			for (auto& func : ctx->funcdef()) {
 				auto decl = std::any_cast<FunctionDecl>(func->accept(this));
@@ -109,7 +109,7 @@ namespace mdl {
 				}
 			}
 			popNamespace();
-			currentNamespace().putType(name, DataType{m});
+			currentNamespace().putType(name, DataType{BoundModuleType{.definition = m}});
 			return std::make_pair(name, m);
 		}
 
@@ -216,7 +216,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
-			const Node* output;
+			const Node* output = nullptr;
 			pushNamespace();
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
@@ -233,10 +233,19 @@ namespace mdl {
 			if (ctx->expr() != nullptr) {
 				output = std::any_cast<const Node*>(ctx->expr()->accept(this));
 			} else {
-				for (auto stmt : ctx->statement())
-					stmt->accept(this);
+				for (auto stmt : ctx->statement()) {
+					auto result = stmt->accept(this);
+					if (result.type() == typeid(const Node*)) {
+						/** \todo create a descriptive error message; the function has two return statements. **/
+						assert(output == nullptr);
+						// The statement is a return statement; the others return nullopt
+						output = std::any_cast<const Node*>(result);
+					}
+				}
 				/** \todo track output statement **/
 			}
+			/** \todo create a descriptive error message; the function did not have a return statement. **/
+			assert(output != nullptr);
 			popNamespace();
 			return FunctionDecl{.name = ctx->IDENT()->getText(), .output = *output};
 		}
@@ -307,16 +316,12 @@ namespace mdl {
 		}
 
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
-			/** \todo Access the operator from the datatype */
-			static const std::map<std::string, mdl::builtins::FunctionIDs> toOp{
-					{"+", mdl::builtins::FunctionIDs::TENSOR_ADD},	{"-", mdl::builtins::FunctionIDs::TENSOR_SUB},
-					{"*", mdl::builtins::FunctionIDs::TENSOR_PROD}, {"/", mdl::builtins::FunctionIDs::TENSOR_DIV},
-					{"@", mdl::builtins::FunctionIDs::TENSOR_DOT},
-			};
-			const auto op = toOp.at(ctx->bop->getText());
 			const auto* left = std::any_cast<const Node*>(ctx->left->accept(this));
 			const auto* right = std::any_cast<const Node*>(ctx->right->accept(this));
-			return &graph().addInvocationNode(op, {left, right});
+			auto& decl = getMember(
+					mdl::getDataType(*left), std::format("operator{}", ctx->bop->getText()), {mdl::getDataType(*right)}
+			);
+			return &graph().addInvocationNode(decl, {std::cref(*left), std::cref(*right)});
 		}
 
 		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {
@@ -351,9 +356,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitReturnStatement(mdlParser::ReturnStatementContext* ctx) override {
-			auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
-			graph().setOutputNode(node);
-			return std::nullopt;
+			return ctx->expr()->accept(this); // Datatype: const Node*
 		}
 	};
 } // namespace mdl

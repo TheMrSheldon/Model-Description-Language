@@ -4,9 +4,9 @@
 #include <filesystem>
 
 namespace mdl {
-	struct Module;
+	struct CompilationUnit;
 
-	void compileToFile(const Module& module, const std::filesystem::path& output);
+	void compileToFile(const CompilationUnit& unit, const std::filesystem::path& output);
 } // namespace mdl
 
 #endif

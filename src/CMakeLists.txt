@@ -12,7 +12,10 @@ target_sources(mdl
 	PRIVATE
 		mdl/argvals.cpp
 		mdl/backends/tvm/tvm.cpp
-		mdl/computegraphv2/node.cpp
+		mdl/compiler.cpp
+		mdl/computegraph/datatype.cpp
+		mdl/computegraph/graph.cpp
+		mdl/computegraph/node.cpp
 		mdl/namespace.cpp
 		mdl/parser.cpp
 		mdl/parser/errorlistener.cpp
