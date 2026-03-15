@@ -1,4 +1,5 @@
 #include <mdl/computegraphv2/datatype.hpp>
+#include <mdl/computegraphv2/object.hpp>
 
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
@@ -111,4 +112,15 @@ mdl::getMember(const FunctionDecl& decl, std::string_view name, const std::vecto
 	if (name == "operator()")
 		return std::cref(decl);
 	return std::nullopt;
+}
+
+std::optional<std::reference_wrapper<const FunctionDecl>>
+mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataType>& argtypes) {
+	return std::visit(
+			overloaded{
+					[&](const Node* node) { return getMember(getDataType(*node), name, argtypes); },
+					[&](const FunctionDecl& decl) { return getMember(decl, name, argtypes); }
+			},
+			obj
+	);
 }

@@ -67,7 +67,28 @@ float[...] softmax(x: float[...]) {
  * @param x 
  * @return 
  */
-float[...] relu(x: float[...]) => max(x, 0);
+// float[...] relu(x: float[...]) => max(x, 0);
+
+/**
+ * @brief Computes the reciprocal square root for each element in \p x.
+ * @details \f[(x_i)_{1\leq i \leq n} \mapsto \left(\frac{1}{\sqrt{x_i}}\right)_{1\leq i \leq n}.\f]
+ * @ingroup Arithmetic
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] rsqrt(x: float[...]) => __builtin_rsqrt(x);
+
+/**
+ * @brief Variance
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @param dof 
+ * @return 
+ */
+float[...] var(x: float[...], dof: uint = 1) => __builtin_var(x, dof);
 
 /**
  * @brief Implements layer normalization as proposed by \cite layernorm.

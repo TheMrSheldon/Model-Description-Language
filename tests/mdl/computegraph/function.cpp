@@ -31,8 +31,7 @@ static FunctionDecl makeDecl(Computegraph& graph) {
 	const Node& paramZ = graph.addParameterNode(PrimitiveType::integer);
 	// output: TENSOR_ADD(x, y)  [z is intentionally unused in the output]
 	const Node& output = graph.addInvocationNode(
-			builtins::FunctionIDs::TENSOR_ADD, DataType{PrimitiveType::integer},
-			{std::cref(paramX), std::cref(paramY)}
+			builtins::FunctionIDs::TENSOR_ADD, DataType{PrimitiveType::integer}, {std::cref(paramX), std::cref(paramY)}
 	);
 
 	return FunctionDecl{
@@ -151,7 +150,7 @@ TEST_CASE("bind assigns correct DataType to new parameters from placeholder posi
 	REQUIRE(result.parameters.size() == 2);
 	// DataType's variant members lack operator==; extract PrimitiveType directly.
 	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) == PrimitiveType::floating); // _1 ← y
-	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) == PrimitiveType::integer);  // _2 ← z
+	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) == PrimitiveType::integer);	 // _2 ← z
 }
 
 TEST_CASE("bind preserves parameter names from placeholder positions", "[bind]") {
@@ -179,8 +178,10 @@ TEST_CASE("bind with swapped placeholders reorders parameter types", "[bind]") {
 	FunctionDecl result = mdl::bind(graph, decl, bound, std::placeholders::_2, std::placeholders::_1);
 
 	REQUIRE(result.parameters.size() == 2);
-	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) == PrimitiveType::integer);  // _1 ← z:int
-	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) == PrimitiveType::floating); // _2 ← y:float
+	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) ==
+		  PrimitiveType::integer); // _1 ← z:int
+	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) ==
+		  PrimitiveType::floating); // _2 ← y:float
 }
 
 TEST_CASE("bind with swapped placeholders reorders parameter names", "[bind]") {
@@ -211,7 +212,7 @@ TEST_CASE("bind wires bound node into invocation at correct position", "[bind]")
 	// Inlining TENSOR_ADD(x, y) with x=boundA, y=newParamY, z=boundC:
 	// → new InvocationNode(TENSOR_ADD, [boundA, newParamY])
 	const auto& inv = std::get<InvocationNode>(result.output.get());
-	REQUIRE(inv.arguments.size() == 2); // TENSOR_ADD arity
+	REQUIRE(inv.arguments.size() == 2);		   // TENSOR_ADD arity
 	CHECK(&inv.arguments[0].get() == &boundA); // x operand ← boundA
 }
 
@@ -244,9 +245,7 @@ TEST_CASE("bind adds exactly (num_placeholders + 1) nodes to the graph", "[bind]
 	const Node& bound = graph.addConstNode(Atomic{0}); // +1 before bind
 	size_t nodesBeforeBind = graph.getNumNodes();
 
-	FunctionDecl result = mdl::bind(
-			graph, decl, bound, std::placeholders::_1, std::placeholders::_2
-	);
+	FunctionDecl result = mdl::bind(graph, decl, bound, std::placeholders::_1, std::placeholders::_2);
 	// bind adds: 2 new ParameterNodes (for _1 and _2) + 1 new InvocationNode (inlined output)
 	CHECK(graph.getNumNodes() == nodesBeforeBind + 3);
 	(void)result;

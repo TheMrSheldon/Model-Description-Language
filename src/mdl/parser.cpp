@@ -3,6 +3,7 @@
 #include "./parser/errorlistener.hpp"
 
 #include <mdl/computegraphv2/function.hpp>
+#include <mdl/computegraphv2/object.hpp>
 #include <mdl/namespace.hpp>
 
 #include <mdlBaseVisitor.h>
@@ -32,6 +33,27 @@ namespace mdl {
 		void pushNamespace() { nsstack.push(nsstack.top().createSubnamespace()); }
 		void popNamespace() { nsstack.pop(); }
 
+		// Convert any expression result (const Node* or Object) to Object.
+		Object asObject(std::any value) {
+			if (auto* node = std::any_cast<const Node*>(&value))
+				return Object{*node};
+			if (auto* obj = std::any_cast<Object>(&value))
+				return *obj;
+			assert(false);
+		}
+
+		// Extract const Node* from an expression result, emitting an error if it is a function.
+		const Node* asNode(std::any value, antlr4::Token* tok) {
+			auto obj = asObject(std::move(value));
+			if (auto* node = std::get_if<const Node*>(&obj))
+				return *node;
+			errorlistener.semanticError(
+					PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+					"Expected a value, got a function"
+			);
+			return &graph().addErrorNode();
+		}
+
 	public:
 		TranslatingVisitor(PrettyErrorListener& errorlistener) : errorlistener(errorlistener) {}
 
@@ -46,7 +68,12 @@ namespace mdl {
 				auto [name, s] = std::any_cast<std::pair<std::string, AggregateType>>(def->accept(this));
 				program.definitions.try_emplace(name, std::move(s));
 			}
-			// Parse Modules second (no matter where they are in the file)
+			// Parse func definitions
+			for (auto&& def : ctx->funcdef()) {
+				auto [name, f] = std::any_cast<std::pair<std::string, FunctionDecl>>(def->accept(this));
+				program.definitions.try_emplace(name, std::move(f));
+			}
+			// Parse Modules third (no matter where they are in the file)
 			for (auto&& def : ctx->module_def()) {
 				auto [name, m] = std::any_cast<std::pair<std::string, ModuleType>>(def->accept(this));
 				program.definitions.try_emplace(name, std::move(m));
@@ -93,17 +120,19 @@ namespace mdl {
 			/** \todo add params and vars to namespace */
 			for (auto& param : ctx->param()) {
 				const auto [name, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				auto& node = *currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
-				m.typeargs.emplace_back(name, std::cref(std::get<HyperparameterNode>(node)));
+				const Node& rawNode = graph().addHyperparameterNode(dtype);
+				currentNamespace().put(name, Object{&rawNode});
+				m.typeargs.emplace_back(name, std::cref(std::get<HyperparameterNode>(rawNode)));
 			}
 			for (auto& var : ctx->vardecl()) {
 				const auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				auto& node = *currentNamespace().put(name, &graph().addParameterNode(dtype));
-				m.variables.emplace_back(name, std::cref(std::get<ParameterNode>(node)));
+				const Node& rawNode = graph().addParameterNode(dtype);
+				currentNamespace().put(name, Object{&rawNode});
+				m.variables.emplace_back(name, std::cref(std::get<ParameterNode>(rawNode)));
 			}
 			for (auto& func : ctx->funcdef()) {
-				auto decl = std::any_cast<FunctionDecl>(func->accept(this));
-				auto name = decl.name;
+				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
+				// currentNamespace().put(name, Object{decl});
 				auto [_, inserted] = m.functions.insert_or_assign(std::move(name), std::move(decl));
 				if (!inserted) {
 					/** \todo output a helpful warning message that this definition shadows another member, which is undefined behavior **/
@@ -178,8 +207,7 @@ namespace mdl {
 			if (ctx->elipsis != nullptr) {
 				return TypeArg{mdl::Elipsis{}};
 			} else if (ctx->expr() != nullptr) {
-				auto tmp = ctx->expr()->accept(this);
-				const auto& node = *std::any_cast<const Node*>(tmp);
+				const auto& node = *asNode(ctx->expr()->accept(this), ctx->expr()->start);
 				if (!mdl::isCompiletimeEvalable(node)) {
 					auto firsttok = ctx->expr()->start;
 					auto lasttok = ctx->expr()->stop;
@@ -218,51 +246,60 @@ namespace mdl {
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
 			const Node* output = nullptr;
+			std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> tparams;
+			std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> params;
 			pushNamespace();
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
-					currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
-					/** \todo register template in FunctionDecl */
+					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype)});
+					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
 			}
 			for (auto& param : ctx->param()) {
 				auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
-				currentNamespace().put(name, &graph().addParameterNode(dtype));
-				/** \todo register parameter in FunctionDecl */
+				auto& p = currentNamespace().put(name, Object{&graph().addParameterNode(dtype)});
+				params.emplace_back(name, std::get<mdl::ParameterNode>(*std::get<const mdl::Node*>(p)));
 			}
 			if (ctx->expr() != nullptr) {
-				output = std::any_cast<const Node*>(ctx->expr()->accept(this));
+				output = asNode(ctx->expr()->accept(this), ctx->expr()->start);
 			} else {
 				for (auto stmt : ctx->statement()) {
 					auto result = stmt->accept(this);
-					if (result.type() == typeid(const Node*)) {
+					if (result.type() == typeid(const Node*) || result.type() == typeid(Object)) {
 						/** \todo create a descriptive error message; the function has two return statements. **/
 						assert(output == nullptr);
 						// The statement is a return statement; the others return nullopt
-						output = std::any_cast<const Node*>(result);
+						output = asNode(std::move(result), stmt->start);
 					}
 				}
-				/** \todo track output statement **/
+				assert(output != nullptr);
 			}
 			/** \todo create a descriptive error message; the function did not have a return statement. **/
 			assert(output != nullptr);
 			popNamespace();
-			return FunctionDecl{.name = ctx->IDENT()->getText(), .output = *output};
+			auto& obj = currentNamespace().put<mdl::Object>(
+					ctx->IDENT()->getText(), FunctionDecl{
+													 .name = ctx->IDENT()->getText(),
+													 .templateParameters = std::move(tparams),
+													 .parameters = std::move(params),
+													 .output = *output
+											 }
+			);
+			return std::make_pair(ctx->IDENT()->getText(), std::get<FunctionDecl>(obj));
 		}
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
-			auto value = currentNamespace().get<const Node*>(ctx->IDENT()->getText());
+			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
 			if (!value.has_value()) {
-				auto offendingSymbol = ctx->IDENT()->getSymbol();
+				auto* sym = ctx->IDENT()->getSymbol();
 				errorlistener.semanticError(
-						PrettyErrorListener::ErrorLevel::Error, offendingSymbol, offendingSymbol->getLine(),
-						offendingSymbol->getCharPositionInLine(),
+						PrettyErrorListener::ErrorLevel::Error, sym, sym->getLine(), sym->getCharPositionInLine(),
 						std::format("Variable {} not defined", ctx->IDENT()->getText())
 				);
 				return &graph().addErrorNode();
 			}
-			return value.value().get();
+			return value.value().get(); // Returns Object as std::any
 		}
 		virtual std::any visitConstantExpression(mdlParser::ConstantExpressionContext* ctx) override {
 			return &graph().addConstNode(std::any_cast<mdl::Atomic>(ctx->constant()->accept(this)));
@@ -272,7 +309,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
-			auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
+			auto node = asNode(ctx->expr()->accept(this), ctx->expr()->start);
 
 			auto firsttok = ctx->start;
 			auto lasttok = ctx->stop;
@@ -303,22 +340,47 @@ namespace mdl {
 		}
 
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
-			errorlistener.semanticError(
-					PrettyErrorListener::ErrorLevel::Error,
-					{{.linenr = firsttok->getLine(),
-					  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-					  .beginMark = firsttok->getCharPositionInLine(),
-					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
-					firsttok->getLine(), firsttok->getCharPositionInLine(), "Method calls are not yet implemented"
-			);
-			return &graph().addErrorNode();
+			auto calleeObj = asObject(ctx->func->accept(this));
+			if (std::holds_alternative<const Node*>(calleeObj) &&
+				std::holds_alternative<ErrorNode>(*std::get<const Node*>(calleeObj)))
+				return &graph().addErrorNode();
+
+			// Evaluate argument expressions.
+			std::vector<std::reference_wrapper<const Node>> args;
+			bool hasError = false;
+			for (size_t i = 0; i < ctx->args.size(); ++i) {
+				const Node* argNode = asNode(ctx->args[i]->accept(this), ctx->args[i]->start);
+				if (std::holds_alternative<ErrorNode>(*argNode))
+					hasError = true;
+				args.emplace_back(std::cref(*argNode));
+			}
+			if (hasError)
+				return &graph().addErrorNode();
+
+			// Collect argument types for overload resolution.
+			std::vector<DataType> argtypes;
+			for (auto& ref : args)
+				argtypes.push_back(mdl::getDataType(ref.get()));
+
+			// Resolve operator() on the callee object.
+			auto decl = getMember(calleeObj, "operator()", argtypes);
+			if (!decl.has_value()) {
+				auto* tok = ctx->func->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						"Object is not callable with these argument types"
+				);
+				return &graph().addErrorNode();
+			}
+			/** \todo descriptive error message when arguments / argument count does not match **/
+			/** \todo For member function calls (obj.func(...)), obj should be passed as the first ("this") argument.
+			 *  This is not yet implemented. */
+			return &graph().addInvocationNode(decl.value(), std::move(args));
 		}
 
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
-			const auto* left = std::any_cast<const Node*>(ctx->left->accept(this));
-			const auto* right = std::any_cast<const Node*>(ctx->right->accept(this));
+			const auto* left = asNode(ctx->left->accept(this), ctx->left->start);
+			const auto* right = asNode(ctx->right->accept(this), ctx->right->stop);
 			if (std::holds_alternative<ErrorNode>(*left) || std::holds_alternative<ErrorNode>(*right)) {
 				// If one of the arguments is an error node (invalid subexpression), we won't find the operator to call.
 				// In this case, don't print another error, just propagate the error node so we do not spam the user
@@ -373,9 +435,9 @@ namespace mdl {
 		}
 
 		virtual std::any visitDeclarationStatement(mdlParser::DeclarationStatementContext* ctx) override {
-			const auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
+			const auto* node = asNode(ctx->expr()->accept(this), ctx->expr()->start);
 			/** \todo check datatype with ctx->type() **/
-			currentNamespace().put(ctx->IDENT()->getText(), node);
+			currentNamespace().put(ctx->IDENT()->getText(), Object{node});
 			return std::nullopt;
 		}
 

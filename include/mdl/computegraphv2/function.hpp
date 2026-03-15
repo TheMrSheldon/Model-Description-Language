@@ -59,15 +59,18 @@ namespace mdl {
 		[&]<size_t... I>(std::index_sequence<I...>) {
 			// Use ArgsTuple (decayed) instead of decltype(argTuple) to avoid
 			// instantiating tuple_element on a reference-to-tuple, which is incomplete.
-			([&] {
-				using Arg = std::tuple_element_t<I, ArgsTuple>;
-				constexpr int ph = std::is_placeholder<Arg>::value;
-				if constexpr (ph > 0) {
-					invocationArgs.push_back(newParamNodes[ph - 1]);
-				} else {
-					invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
-				}
-			}(), ...);
+			(
+					[&] {
+						using Arg = std::tuple_element_t<I, ArgsTuple>;
+						constexpr int ph = std::is_placeholder<Arg>::value;
+						if constexpr (ph > 0) {
+							invocationArgs.push_back(newParamNodes[ph - 1]);
+						} else {
+							invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
+						}
+					}(),
+					...
+			);
 		}(std::make_index_sequence<N>{});
 
 		const Node& outputNode = graph.addInvocationNode(decl, std::move(invocationArgs));
@@ -81,10 +84,10 @@ namespace mdl {
 			parameters.emplace_back(newParamNames[k], std::cref(pn));
 		}
 		return FunctionDecl{
-			.name = decl.name,
-			.templateParameters = decl.templateParameters,
-			.parameters = std::move(parameters),
-			.output = outputNode,
+				.name = decl.name,
+				.templateParameters = decl.templateParameters,
+				.parameters = std::move(parameters),
+				.output = outputNode,
 		};
 	}
 } // namespace mdl

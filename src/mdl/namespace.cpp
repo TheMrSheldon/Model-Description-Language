@@ -3,6 +3,7 @@
 #include <mdl/computegraphv2/builtins.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
+#include <mdl/computegraphv2/object.hpp>
 
 using namespace std::literals;
 
@@ -21,12 +22,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::COS, dtype, {std::cref(param)});
 		builtins.emplace(
 				"__builtin_cos",
-				mdl::FunctionDecl{
-						.name = "__builtin_cos",
-						.templateParameters = {},
-						.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-						.output = std::cref(output)
-				}
+				mdl::Object(
+						mdl::FunctionDecl{
+								.name = "__builtin_cos",
+								.templateParameters = {},
+								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
+								.output = std::cref(output)
+						}
+				)
 		);
 	}
 	{
@@ -36,12 +39,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::SIN, dtype, {std::cref(param)});
 		builtins.emplace(
 				"__builtin_sin",
-				mdl::FunctionDecl{
-						.name = "__builtin_sin",
-						.templateParameters = {},
-						.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-						.output = std::cref(output)
-				}
+				mdl::Object(
+						mdl::FunctionDecl{
+								.name = "__builtin_sin",
+								.templateParameters = {},
+								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
+								.output = std::cref(output)
+						}
+				)
 		);
 	}
 	{
@@ -51,12 +56,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::TAN, dtype, {std::cref(param)});
 		builtins.emplace(
 				"__builtin_tan",
-				mdl::FunctionDecl{
-						.name = "__builtin_tan",
-						.templateParameters = {},
-						.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-						.output = std::cref(output)
-				}
+				mdl::Object(
+						mdl::FunctionDecl{
+								.name = "__builtin_tan",
+								.templateParameters = {},
+								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
+								.output = std::cref(output)
+						}
+				)
 		);
 	}
 	{
@@ -66,12 +73,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::EXP, dtype, {std::cref(param)});
 		builtins.emplace(
 				"__builtin_exp",
-				mdl::FunctionDecl{
-						.name = "__builtin_exp",
-						.templateParameters = {},
-						.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-						.output = std::cref(output)
-				}
+				mdl::Object(
+						mdl::FunctionDecl{
+								.name = "__builtin_exp",
+								.templateParameters = {},
+								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
+								.output = std::cref(output)
+						}
+				)
 		);
 	}
 	{
@@ -81,12 +90,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::ERF, dtype, {std::cref(param)});
 		builtins.emplace(
 				"__builtin_erf",
-				mdl::FunctionDecl{
-						.name = "__builtin_erf",
-						.templateParameters = {},
-						.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-						.output = std::cref(output)
-				}
+				mdl::Object(
+						mdl::FunctionDecl{
+								.name = "__builtin_erf",
+								.templateParameters = {},
+								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
+								.output = std::cref(output)
+						}
+				)
 		);
 	}
 
