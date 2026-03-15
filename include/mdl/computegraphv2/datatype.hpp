@@ -62,6 +62,9 @@ namespace mdl {
 
 	std::optional<std::reference_wrapper<const FunctionDecl>>
 	getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes);
+
+	std::optional<std::reference_wrapper<const FunctionDecl>>
+	getMember(const FunctionDecl& decl, std::string_view name, const std::vector<DataType>& argtypes);
 } // namespace mdl
 
 #endif

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mdl/computegraphv2/datatype.hpp>
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
 #include <mdl/utils/overload.hpp>

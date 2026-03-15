@@ -1,9 +1,60 @@
 name: Run C++ Tests, Linters, and Format Checks
 
 on:
- push:
+  push:
 
 jobs:
+  tests:
+    name: Test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            arch: x86_64
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+          - name: macOS arm64
+            os: macos-latest
+            arch: arm64
+          - name: macOS x86_64
+            os: macos-13
+            arch: x86_64
+          - name: Windows x86_64
+            os: windows-latest
+            arch: x86_64
+            cmake_extra_args: -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -G "MinGW Makefiles"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Install Tools
+        uses: aminya/setup-cpp@v1
+        with:
+          gcc: true
+          cmake: true
+          gcovr: true
+          ninja: true
+          setup-cpp: false
+      - name: Configure CMake
+        run: cmake -B ./build --preset=conf-dev "-DCMAKE_CXX_FLAGS=--coverage" "-DCMAKE_C_FLAGS=--coverage" "-DCMAKE_EXE_LINKER_FLAGS=--coverage" ${{ matrix.cmake_extra_args }}
+      - name: Build
+        run: cmake --build ./build
+      - name: Run Tests
+        run: ctest --test-dir ./build --output-on-failure
+      - name: Generate Coverage Report
+        run: gcovr --root . --xml coverage.xml --filter 'src/' --filter 'include/'
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: ${{ matrix.arch }}
+          name: ${{ matrix.name }}
+          fail_ci_if_error: true
+
   linters:
     name: Run C++ Linters
     runs-on: ubuntu-latest
@@ -21,6 +72,7 @@ jobs:
       - name: Run Clang-Tidy
         working-directory: ${{github.workspace}}
         run: clang-tidy-19 -p ./build/compile_commands.json $(find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$')
+
   format-checks:
     name: Check C++ code format
     runs-on: ubuntu-latest

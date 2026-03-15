@@ -1,5 +1,6 @@
 #include <mdl/computegraphv2/datatype.hpp>
 
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
 
@@ -100,6 +101,14 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 	}();
 
 	auto it = ops.find(name);
-	assert(it != ops.end()); /** \todo proper error reporting for unsupported operators **/
+	if (it == ops.end())
+		return std::nullopt;
 	return std::cref(it->second);
+}
+
+std::optional<std::reference_wrapper<const FunctionDecl>>
+mdl::getMember(const FunctionDecl& decl, std::string_view name, const std::vector<DataType>&) {
+	if (name == "operator()")
+		return std::cref(decl);
+	return std::nullopt;
 }

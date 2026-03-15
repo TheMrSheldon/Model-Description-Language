@@ -9,18 +9,7 @@
 #include <vector>
 
 namespace mdl {
-	/**
-	 * @brief Represents a function definition.
-	 * @details Each function is associated with a computegraph from which it references nodes.
-	 */
-	struct FunctionDecl final {
-		std::string name;
-		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> templateParameters;
-		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
-		std::reference_wrapper<const Node> output;
-
-		const DataType& returnType() const { return mdl::getDataType(output.get()); }
-	};
+	struct FunctionDecl;
 
 	class Computegraph final {
 	private:

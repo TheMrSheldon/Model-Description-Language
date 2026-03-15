@@ -1,5 +1,7 @@
 #include <mdl/computegraphv2/graph.hpp>
 
+#include <mdl/computegraphv2/function.hpp>
+
 #include <cassert>
 #include <unordered_map>
 

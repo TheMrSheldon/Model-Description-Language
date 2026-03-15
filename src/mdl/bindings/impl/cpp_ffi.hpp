@@ -4,6 +4,7 @@
 
 #include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
 
 #include <fstream>

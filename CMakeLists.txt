@@ -6,6 +6,9 @@ cmake_minimum_required(VERSION 3.14...3.22)
 ##########################################################################################
 include(FeatureSummary)
 
+option(MDL_BUILD_TESTS "Build the tests" OFF)
+add_feature_info(tests MDL_BUILD_TESTS "Build TIREx tracker tests")
+
 
 ##########################################################################################
 # Versioning
@@ -81,3 +84,12 @@ add_subdirectory(src)
 ##########################################################################################
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # add_subdirectory(examples)
+
+
+##########################################################################################
+# Tests
+##########################################################################################
+if (MDL_BUILD_TESTS)
+	enable_testing()
+	add_subdirectory(tests)
+endif()

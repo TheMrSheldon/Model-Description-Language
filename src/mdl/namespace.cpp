@@ -1,6 +1,7 @@
 #include <mdl/namespace.hpp>
 
 #include <mdl/computegraphv2/builtins.hpp>
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 
 using namespace std::literals;

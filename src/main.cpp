@@ -3,6 +3,7 @@
 
 #include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/parser.hpp>
 #include <mdl/utils/utils.hpp>
 

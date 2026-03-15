@@ -2,6 +2,7 @@
 
 #include "./parser/errorlistener.hpp"
 
+#include <mdl/computegraphv2/function.hpp>
 #include <mdl/namespace.hpp>
 
 #include <mdlBaseVisitor.h>

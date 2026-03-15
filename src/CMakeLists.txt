@@ -59,7 +59,9 @@ FetchContent_Declare(antlrjar URL https://www.antlr.org/download/antlr-${ANTLR_V
 FetchContent_MakeAvailable(antlrjar)
 set(ANTLR_EXECUTABLE ${antlrjar_SOURCE_DIR}/antlr-${ANTLR_VERSION}-complete.jar)
 # required if linking to static library
-add_definitions(-DANTLR4CPP_STATIC)
+if (NOT BUILD_SHARED_LIBS)
+	add_definitions(-DANTLR4CPP_STATIC)
+endif()
 # using /MD flag for antlr4_runtime (for Visual C++ compilers only)
 set(ANTLR4_WITH_STATIC_CRT OFF)
 set(ANTLR_BUILD_CPP_TESTS OFF)
@@ -92,8 +94,8 @@ target_include_directories(mdl PUBLIC ${LIBA_INCLUDES}) # < I don't know why thi
 
 
 # NVRTC
-find_package(CUDAToolkit REQUIRED)
-target_link_libraries(mdl PRIVATE CUDA::nvrtc)
+# find_package(CUDAToolkit REQUIRED)
+# target_link_libraries(mdl PRIVATE CUDA::nvrtc)
 
 
 # spdlog for logging
