@@ -318,10 +318,33 @@ namespace mdl {
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
 			const auto* left = std::any_cast<const Node*>(ctx->left->accept(this));
 			const auto* right = std::any_cast<const Node*>(ctx->right->accept(this));
-			auto& decl = getMember(
+			if (std::holds_alternative<ErrorNode>(*left) || std::holds_alternative<ErrorNode>(*right)) {
+				// If one of the arguments is an error node (invalid subexpression), we won't find the operator to call.
+				// In this case, don't print another error, just propagate the error node so we do not spam the user
+				// with unhelpful error messages.
+				/** \todo in the future, we could try to infer despite the error nodes to recover from errors for the
+				 *  analysis and give further insightful hints. */
+				return &graph().addErrorNode();
+			}
+			auto decl = getMember(
 					mdl::getDataType(*left), std::format("operator{}", ctx->bop->getText()), {mdl::getDataType(*right)}
 			);
-			return &graph().addInvocationNode(decl, {std::cref(*left), std::cref(*right)});
+			if (!decl.has_value()) { // Function not found!
+				auto firsttok = ctx->start;
+				auto lasttok = ctx->stop;
+				/** \todo describe data types **/
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error,
+						{{.linenr = firsttok->getLine(),
+						  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+						  .beginMark = firsttok->getCharPositionInLine(),
+						  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
+						firsttok->getLine(), firsttok->getCharPositionInLine(),
+						std::format("Operator {} not supported on {}", ctx->bop->getText(), "TODO")
+				);
+				return &graph().addErrorNode();
+			}
+			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)});
 		}
 
 		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {

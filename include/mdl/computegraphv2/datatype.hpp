@@ -7,6 +7,7 @@
 #include <expected>
 #include <format>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -59,7 +60,8 @@ namespace mdl {
 
 	std::expected<DataType, std::string> setTypeArgs(const DataType& dtype, const std::vector<TypeArg>& typeargs);
 
-	FunctionDecl& getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes);
+	std::optional<std::reference_wrapper<const FunctionDecl>>
+	getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes);
 } // namespace mdl
 
 #endif

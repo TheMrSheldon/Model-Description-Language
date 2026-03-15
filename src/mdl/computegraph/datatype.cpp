@@ -62,9 +62,12 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const DataType& dtype, con
 	return std::visit([&](auto& d) { return setTypeArgs(d, typeargs); }, dtype);
 }
 
-FunctionDecl& mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes) {
+std::optional<std::reference_wrapper<const FunctionDecl>>
+mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes) {
 	/** \todo implement properly for all types; for now only TensorType arithmetic operators are supported **/
-	assert(std::holds_alternative<TensorType>(dtype));
+	if (!std::holds_alternative<TensorType>(dtype)) {
+		return std::nullopt;
+	}
 
 	using mdl::builtins::FunctionIDs;
 	static Computegraph graph;
@@ -98,5 +101,5 @@ FunctionDecl& mdl::getMember(const DataType& dtype, std::string_view name, const
 
 	auto it = ops.find(name);
 	assert(it != ops.end()); /** \todo proper error reporting for unsupported operators **/
-	return it->second;
+	return std::cref(it->second);
 }
