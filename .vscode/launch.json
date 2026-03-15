@@ -10,6 +10,7 @@
             "args": [
                 "model.dlm",
                 "-vvv",
+                "--generate-bindings=cpp"
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/examples/01_ffn",

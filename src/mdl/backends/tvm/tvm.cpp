@@ -4,6 +4,7 @@
 #include "./details/builtins.hpp"
 #include "./details/utils.hpp"
 
+#include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
@@ -184,6 +185,14 @@ void mdl::backends::tvm::compileToFile(const mdl::CompilationUnit& unit, const s
 	for (const auto& [name, member] : unit.definitions) {
 		if (auto func = std::get_if<FunctionDecl>(&member))
 			funcs.Set(::tvm::GlobalVar{{name}}, translateFunc(*func));
+		else if (auto* module = std::get_if<ModuleType>(&member)) {
+			/** \todo load hyperparameter values from ArgVals and bind them before translating **/
+			for (const auto& [funcName, funcDecl] : module->functions) {
+				FunctionDecl mangledDecl = funcDecl;
+				mangledDecl.name = mdl::mangledName(name, funcName);
+				funcs.Set(::tvm::GlobalVar{{mangledDecl.name}}, translateFunc(mangledDecl));
+			}
+		}
 	}
 
 	::tvm::Target target{"llvm"};

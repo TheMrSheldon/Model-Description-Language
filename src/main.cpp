@@ -1,6 +1,7 @@
 #include "commands/common.hpp"
 #include "mdl/argvals.hpp"
 
+#include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
 #include <mdl/parser.hpp>
 #include <mdl/utils/utils.hpp>
@@ -8,13 +9,23 @@
 #include <iostream>
 #include <optional>
 
+namespace CLI::detail {
+	template <>
+	bool
+	lexical_cast<mdl::bindings::GeneratorFactory>(const std::string& input, mdl::bindings::GeneratorFactory& output) {
+		/** \todo implement better **/
+		output = mdl::bindings::getGenerators()[input];
+		return true;
+	}
+} // namespace CLI::detail
+
 struct CompileArgs {
 	std::vector<std::filesystem::path> inputs;
 	std::vector<std::filesystem::path> importdirs;
 	std::optional<std::filesystem::path> output;
 	std::optional<std::filesystem::path> argvals;
 	LoggerConf logConf;
-	bool generateHeaders;
+	std::vector<mdl::bindings::GeneratorFactory> bindingsGenerators;
 };
 
 static void print(std::string_view name, const mdl::AggregateType& s) { std::cout << "Struct " << name << std::endl; }
@@ -91,6 +102,11 @@ static void runCompileCommand(const CompileArgs& args) {
 	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
 	mdl::compileToFile(program, output);
+
+	for (const auto& factory : args.bindingsGenerators) {
+		auto generator = factory();
+		generator->generate(program, generator->inferBindingsFilename(output));
+	}
 }
 
 int main(int argc, char* argv[]) {
@@ -104,7 +120,11 @@ int main(int argc, char* argv[]) {
 			->check(CLI::ExistingDirectory);
 	app.add_option("-a,--arg-vals", args.argvals, "Argument values.")->check(CLI::ExistingFile);
 	/** \todo possible alternative name: --generate-bindings=<type>; with possible values: cpp, python, ... */
-	app.add_flag("--generate-headers", args.generateHeaders, "If set, a header file will be generated.");
+	app.add_option(
+			"--generate-bindings", args.bindingsGenerators,
+			"If set, a binding file will be generated for the selected targets."
+	);
+	//->transform(CLI::CheckedTransformer(mdl::bindings::getGenerators()));
 	app.callback([&args]() { runCompileCommand(args); });
 
 	CLI11_PARSE(app, argc, argv);

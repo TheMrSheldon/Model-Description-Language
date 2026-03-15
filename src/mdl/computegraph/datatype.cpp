@@ -90,8 +90,8 @@ FunctionDecl& mdl::getMember(const DataType& dtype, std::string_view name, const
 
 		makeOp("operator+", FunctionIDs::TENSOR_ADD);
 		makeOp("operator-", FunctionIDs::TENSOR_SUB);
-		makeOp("operator*", FunctionIDs::TENSOR_DOT);
-		makeOp("operator@", FunctionIDs::TENSOR_PROD);
+		makeOp("operator@", FunctionIDs::TENSOR_DOT);
+		makeOp("operator*", FunctionIDs::TENSOR_PROD);
 		makeOp("operator/", FunctionIDs::TENSOR_DIV);
 		return m;
 	}();
