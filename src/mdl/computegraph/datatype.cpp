@@ -119,7 +119,10 @@ mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataT
 	return std::visit(
 			overloaded{
 					[&](const Node* node) { return getMember(getDataType(*node), name, argtypes); },
-					[&](const FunctionDecl& decl) { return getMember(decl, name, argtypes); }
+					[&](const FunctionDecl& decl) { return getMember(decl, name, argtypes); },
+					[&](const AggregateInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
+					}
 			},
 			obj
 	);

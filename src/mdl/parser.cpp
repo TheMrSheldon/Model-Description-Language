@@ -42,16 +42,60 @@ namespace mdl {
 			assert(false);
 		}
 
-		// Extract const Node* from an expression result, emitting an error if it is a function.
+		// Extract const Node* from an expression result, emitting an error if it is not a node.
 		const Node* asNode(std::any value, antlr4::Token* tok) {
 			auto obj = asObject(std::move(value));
-			if (auto* node = std::get_if<const Node*>(&obj))
-				return *node;
-			errorlistener.semanticError(
-					PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
-					"Expected a value, got a function"
+			return std::visit(
+					overloaded{
+							[](const Node* node) { return node; },
+							[&](const FunctionDecl&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a value, got a function"
+								);
+								return &graph().addErrorNode();
+							},
+							[&](const AggregateInstance&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a struct"
+								);
+								return &graph().addErrorNode();
+							}
+					},
+					obj
 			);
-			return &graph().addErrorNode();
+		}
+
+		/**
+		 * @brief Recursively create graph nodes for a variable of the given type.
+		 * @details For non-aggregate types, a single node is created via @p addNode and appended to
+		 *          @p leaves. For aggregate types, one leaf node is created per non-aggregate member,
+		 *          with dot-separated names (e.g. @c "prefix.member"), and the whole struct is
+		 *          returned as an AggregateInstance.
+		 * @tparam NodeType  The concrete node type to create (ParameterNode or HyperparameterNode).
+		 * @param prefix     Dot-separated name of this variable, used as the key in @p leaves.
+		 * @param dtype      The MDL type of the variable.
+		 * @param leaves     Accumulator for all created leaf nodes and their fully-qualified names.
+		 * @param addNode    Computegraph member function used to allocate each leaf node.
+		 * @return An Object holding either a @c const @c Node* (scalar/tensor) or an AggregateInstance.
+		 */
+		template <typename NodeType>
+		Object createVariable(
+				const std::string& prefix, const DataType& dtype,
+				std::vector<std::pair<std::string, std::reference_wrapper<const NodeType>>>& leaves,
+				const Node& (Computegraph::*addNode)(DataType)
+		) {
+			if (auto* agg = std::get_if<AggregateType>(&dtype)) {
+				std::map<std::string, Object> values;
+				for (auto& [memberName, memberType] : agg->members)
+					values[memberName] =
+							createVariable<NodeType>(prefix + "." + memberName, memberType, leaves, addNode);
+				return Object{AggregateInstance::create(*agg, std::move(values)).value()};
+			}
+			const Node& node = (graph().*addNode)(dtype);
+			leaves.emplace_back(prefix, std::cref(std::get<NodeType>(node)));
+			return Object{&node};
 		}
 
 	public:
@@ -117,18 +161,19 @@ namespace mdl {
 			ModuleType m;
 			auto name = ctx->IDENT()->getText();
 			pushNamespace();
-			/** \todo add params and vars to namespace */
 			for (auto& param : ctx->param()) {
-				const auto [name, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				const Node& rawNode = graph().addHyperparameterNode(dtype);
-				currentNamespace().put(name, Object{&rawNode});
-				m.typeargs.emplace_back(name, std::cref(std::get<HyperparameterNode>(rawNode)));
+				const auto [pname, dtype] = std::any_cast<ModuleParam>(param->accept(this));
+				currentNamespace().put(
+						pname, createVariable<HyperparameterNode>(
+									   pname, dtype, m.typeargs, &Computegraph::addHyperparameterNode
+							   )
+				);
 			}
 			for (auto& var : ctx->vardecl()) {
-				const auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				const Node& rawNode = graph().addParameterNode(dtype);
-				currentNamespace().put(name, Object{&rawNode});
-				m.variables.emplace_back(name, std::cref(std::get<ParameterNode>(rawNode)));
+				const auto [vname, dtype] = std::any_cast<VarDecl>(var->accept(this));
+				currentNamespace().put(
+						vname, createVariable<ParameterNode>(vname, dtype, m.variables, &Computegraph::addParameterNode)
+				);
 			}
 			for (auto& func : ctx->funcdef()) {
 				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
@@ -309,10 +354,46 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
-			auto node = asNode(ctx->expr()->accept(this), ctx->expr()->start);
+			auto baseObj = asObject(ctx->expr()->accept(this));
+			auto memberName = ctx->IDENT()->getText();
+			auto* memberTok = ctx->IDENT()->getSymbol();
 
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
+			// Struct/aggregate member access.
+			if (auto* agg = std::get_if<AggregateInstance>(&baseObj)) {
+				auto mem = agg->getMember(memberName);
+				if (!mem.has_value()) {
+					errorlistener.semanticError(
+							PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+							memberTok->getCharPositionInLine(), std::format("No member '{}' in struct", memberName)
+					);
+					return &graph().addErrorNode();
+				}
+				return mem.value().get();
+			}
+
+			// Module function access: node of BoundModuleType.
+			if (auto* nodePtr = std::get_if<const Node*>(&baseObj)) {
+				if (std::holds_alternative<mdl::ErrorNode>(**nodePtr)) {
+					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
+					return &graph().addErrorNode();
+				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
+					/** \todo bind the instance as the first argument **/
+					auto& funcs = bmt->definition.get().functions;
+					auto it = funcs.find(memberName);
+					if (it == funcs.end()) {
+						errorlistener.semanticError(
+								PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+								memberTok->getCharPositionInLine(),
+								std::format("No function '{}' in module", memberName)
+						);
+						return &graph().addErrorNode();
+					}
+					return Object{it->second};
+				}
+			}
+
+			auto* firsttok = ctx->start;
+			auto* lasttok = ctx->stop;
 			errorlistener.semanticError(
 					PrettyErrorListener::ErrorLevel::Error,
 					{{.linenr = firsttok->getLine(),
@@ -320,7 +401,7 @@ namespace mdl {
 					  .beginMark = firsttok->getCharPositionInLine(),
 					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 					firsttok->getLine(), firsttok->getCharPositionInLine(),
-					"Member access expressions are not yet implemented"
+					"Member access is only supported on struct instances and module objects"
 			);
 			return &graph().addErrorNode();
 		}

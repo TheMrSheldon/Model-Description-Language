@@ -17,6 +17,7 @@ target_sources(mdl
 		mdl/computegraph/datatype.cpp
 		mdl/computegraph/graph.cpp
 		mdl/computegraph/node.cpp
+		mdl/computegraph/object.cpp
 		mdl/namespace.cpp
 		mdl/parser.cpp
 		mdl/parser/errorlistener.cpp
