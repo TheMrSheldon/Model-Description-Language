@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mdl {
@@ -33,12 +34,23 @@ namespace mdl {
 		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> typeargs;
 		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> variables;
 		std::map<std::string, FunctionDecl> functions;
+
+		static constexpr size_t InvalidIdx = -1;
+
+		size_t variableIdxByName(std::string_view name) const {
+			auto it = std::find_if(std::begin(variables), std::end(variables), [&](const auto& p) {
+				return std::get<0>(p) == name;
+			});
+			if (it == std::end(variables))
+				return ModuleType::InvalidIdx;
+			return std::distance(std::begin(variables), it);
+		}
 	};
 
 	struct BoundModuleType final {
 		std::reference_wrapper<const ModuleType> definition;
 		// Named bindings: must match definition.typeargs length (when fully bound)
-		std::vector<std::pair<std::string, Atomic>> hyperparamValues;
+		std::map<std::string, Atomic> hyperparamValues;
 	};
 
 	/** \todo handle member functions? **/
@@ -48,7 +60,8 @@ namespace mdl {
 		std::map<std::string, DataType> members;
 	};
 
-	using TypeArg = std::variant<Elipsis, Atomic, const Node*>; /** \todo define TypeArgs */
+	using TypeArg = std::variant<
+			Elipsis, Atomic, const Node*>; /** \todo define TypeArgs; should use Object instead of Atomic and Node? */
 
 	std::expected<DataType, std::string> setTypeArgs(const PrimitiveType& prim, const std::vector<TypeArg>& typeargs);
 

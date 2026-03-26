@@ -39,7 +39,7 @@ namespace mdl {
 				return Object{*node};
 			if (auto* obj = std::any_cast<Object>(&value))
 				return *obj;
-			assert(false);
+			std::abort();
 		}
 
 		// Extract const Node* from an expression result, emitting an error if it is not a node.
@@ -61,41 +61,33 @@ namespace mdl {
 										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a struct"
 								);
 								return &graph().addErrorNode();
+							},
+							[&](const ModuleInstance&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a module"
+								);
+								return &graph().addErrorNode();
 							}
 					},
 					obj
 			);
 		}
 
-		/**
-		 * @brief Recursively create graph nodes for a variable of the given type.
-		 * @details For non-aggregate types, a single node is created via @p addNode and appended to
-		 *          @p leaves. For aggregate types, one leaf node is created per non-aggregate member,
-		 *          with dot-separated names (e.g. @c "prefix.member"), and the whole struct is
-		 *          returned as an AggregateInstance.
-		 * @tparam NodeType  The concrete node type to create (ParameterNode or HyperparameterNode).
-		 * @param prefix     Dot-separated name of this variable, used as the key in @p leaves.
-		 * @param dtype      The MDL type of the variable.
-		 * @param leaves     Accumulator for all created leaf nodes and their fully-qualified names.
-		 * @param addNode    Computegraph member function used to allocate each leaf node.
-		 * @return An Object holding either a @c const @c Node* (scalar/tensor) or an AggregateInstance.
-		 */
+		// Build an AggregateInstance for namespace member access, creating one
+		// node per field via addNode (these nodes are NOT added to any leaves list).
 		template <typename NodeType>
-		Object createVariable(
-				const std::string& prefix, const DataType& dtype,
-				std::vector<std::pair<std::string, std::reference_wrapper<const NodeType>>>& leaves,
-				const Node& (Computegraph::*addNode)(DataType)
+		Object makeAggregateObject(
+				const AggregateType& agg, const std::string& prefix, const Node& (Computegraph::*addNode)(DataType)
 		) {
-			if (auto* agg = std::get_if<AggregateType>(&dtype)) {
-				std::map<std::string, Object> values;
-				for (auto& [memberName, memberType] : agg->members)
-					values[memberName] =
-							createVariable<NodeType>(prefix + "." + memberName, memberType, leaves, addNode);
-				return Object{AggregateInstance::create(*agg, std::move(values)).value()};
+			std::map<std::string, Object> values;
+			for (auto& [memberName, memberType] : agg.members) {
+				if (auto* subAgg = std::get_if<AggregateType>(&memberType))
+					values[memberName] = makeAggregateObject<NodeType>(*subAgg, prefix + "." + memberName, addNode);
+				else
+					values[memberName] = Object{&(graph().*addNode)(memberType)};
 			}
-			const Node& node = (graph().*addNode)(dtype);
-			leaves.emplace_back(prefix, std::cref(std::get<NodeType>(node)));
-			return Object{&node};
+			return Object{AggregateInstance::create(agg, std::move(values)).value()};
 		}
 
 	public:
@@ -163,21 +155,29 @@ namespace mdl {
 			pushNamespace();
 			for (auto& param : ctx->param()) {
 				const auto [pname, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				currentNamespace().put(
-						pname, createVariable<HyperparameterNode>(
-									   pname, dtype, m.typeargs, &Computegraph::addHyperparameterNode
-							   )
-				);
+				const Node& node = graph().addHyperparameterNode(dtype);
+				m.typeargs.emplace_back(pname, std::cref(std::get<HyperparameterNode>(node)));
+				if (auto* agg = std::get_if<AggregateType>(&dtype))
+					currentNamespace().put(
+							pname,
+							makeAggregateObject<HyperparameterNode>(*agg, pname, &Computegraph::addHyperparameterNode)
+					);
+				else
+					currentNamespace().put(pname, Object{&node});
 			}
 			for (auto& var : ctx->vardecl()) {
 				const auto [vname, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				currentNamespace().put(
-						vname, createVariable<ParameterNode>(vname, dtype, m.variables, &Computegraph::addParameterNode)
-				);
+				const Node& node = graph().addParameterNode(dtype);
+				m.variables.emplace_back(vname, std::cref(std::get<ParameterNode>(node)));
+				if (auto* agg = std::get_if<AggregateType>(&dtype))
+					currentNamespace().put(
+							vname, makeAggregateObject<ParameterNode>(*agg, vname, &Computegraph::addParameterNode)
+					);
+				else
+					currentNamespace().put(vname, Object{&node});
 			}
 			for (auto& func : ctx->funcdef()) {
 				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
-				// currentNamespace().put(name, Object{decl});
 				auto [_, inserted] = m.functions.insert_or_assign(std::move(name), std::move(decl));
 				if (!inserted) {
 					/** \todo output a helpful warning message that this definition shadows another member, which is undefined behavior **/
@@ -354,6 +354,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
+			/** \todo this function needs refactoring **/
 			auto baseObj = asObject(ctx->expr()->accept(this));
 			auto memberName = ctx->IDENT()->getText();
 			auto* memberTok = ctx->IDENT()->getSymbol();
@@ -361,6 +362,16 @@ namespace mdl {
 			// Struct/aggregate member access.
 			if (auto* agg = std::get_if<AggregateInstance>(&baseObj)) {
 				auto mem = agg->getMember(memberName);
+				if (!mem.has_value()) {
+					errorlistener.semanticError(
+							PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+							memberTok->getCharPositionInLine(), std::format("No member '{}' in struct", memberName)
+					);
+					return &graph().addErrorNode();
+				}
+				return mem.value().get();
+			} else if (auto* mod = std::get_if<ModuleInstance>(&baseObj)) {
+				auto mem = mod->getMember(memberName);
 				if (!mem.has_value()) {
 					errorlistener.semanticError(
 							PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
@@ -378,6 +389,7 @@ namespace mdl {
 					return &graph().addErrorNode();
 				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
 					/** \todo bind the instance as the first argument **/
+					/** \todo merge with ModuleInstance implementation above **/
 					auto& funcs = bmt->definition.get().functions;
 					auto it = funcs.find(memberName);
 					if (it == funcs.end()) {

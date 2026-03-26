@@ -109,7 +109,7 @@ module LayerNorm[dim: uint] {
  * @brief Applies a learnable linear transformation with optional bias.
  * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
  */
-module Linear[indim: uint, outdim: uint, bias: bool = false] {
+module Linear[indim: uint, outdim: uint, bias: bool /*= false*/] {
     W: float[outdim, indim]
     b: float[outdim]
 

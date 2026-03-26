@@ -53,7 +53,7 @@ mdl::setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typearg
 	for (size_t i = 0; i < typeargs.size(); ++i) {
 		auto& [name, _] = decl.typeargs[i];
 		if (auto atom = std::get_if<Atomic>(&typeargs[i]))
-			bound.hyperparamValues.emplace_back(name, *atom);
+			bound.hyperparamValues.insert({name, *atom});
 		else
 			return std::unexpected("Module hyperparameters must be compile-time constants");
 	}
@@ -67,7 +67,7 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const DataType& dtype, con
 std::optional<std::reference_wrapper<const FunctionDecl>>
 mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes) {
 	/** \todo implement properly for all types; for now only TensorType arithmetic operators are supported **/
-	if (!std::holds_alternative<TensorType>(dtype)) {
+	if (!std::holds_alternative<TensorType>(dtype) && !std::holds_alternative<PrimitiveType>(dtype)) {
 		return std::nullopt;
 	}
 
@@ -121,6 +121,9 @@ mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataT
 					[&](const Node* node) { return getMember(getDataType(*node), name, argtypes); },
 					[&](const FunctionDecl& decl) { return getMember(decl, name, argtypes); },
 					[&](const AggregateInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
+					},
+					[&](const ModuleInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
 						return std::nullopt;
 					}
 			},

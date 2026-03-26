@@ -1,32 +1,21 @@
 #ifndef MDL_COMPUTEGRAPH_OBJECT_HPP
 #define MDL_COMPUTEGRAPH_OBJECT_HPP
 
+#include "./object_decl.hpp"
+
 #include "./function.hpp"
-#include "./node_decl.hpp"
 
 #include <expected>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <variant>
 #include <vector>
 
 namespace mdl {
-	struct AggregateInstance;
-
-	/**
-	 * @brief A first-class value in the MDL language.
-	 * @details Either a compute-graph node (const Node*), a function definition
-	 *          (FunctionDecl), or a struct instance (AggregateInstance).
-	 */
-	using Object = std::variant<const Node*, FunctionDecl, AggregateInstance>;
-
 	/**
 	 * @brief Represents an instance of an AggregateType (struct) at compile time.
-	 * @details Holds one Object per named member. The member values are stored as
-	 *          std::any (each holding an Object) to break the otherwise-circular
-	 *          AggregateInstance → Object → AggregateInstance type dependency.
+	 * @details Holds one Object per named member, which in turn are again Objects.
 	 */
 	class AggregateInstance {
 	private:
@@ -39,6 +28,25 @@ namespace mdl {
 	public:
 		static std::expected<AggregateInstance, std::string>
 		create(AggregateType type, std::map<std::string, Object> values);
+
+		std::optional<std::reference_wrapper<const Object>> getMember(std::string_view name) const;
+	};
+
+	/**
+	 * @brief Represents an object that is an instance of a module. Module instance **must** have fully specified
+	 *        template arguments.
+	 */
+	class ModuleInstance {
+	private:
+		BoundModuleType type;
+		std::vector<Object> params;
+
+		ModuleInstance(BoundModuleType type, std::vector<Object> params)
+				: type(std::move(type)), params(std::move(params)) {}
+
+	public:
+		static std::expected<ModuleInstance, std::string>
+		create(BoundModuleType type, std::map<std::string, Object> values);
 
 		std::optional<std::reference_wrapper<const Object>> getMember(std::string_view name) const;
 	};
