@@ -5,6 +5,7 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/object.hpp>
 #include <mdl/namespace.hpp>
+#include <mdl/utils/einops.hpp>
 
 #include <mdlBaseVisitor.h>
 #include <mdlLexer.h>
@@ -354,7 +355,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
-			/** \todo this function needs refactoring **/
+			/** \todo this function needs refactoring; e.g., merge the handling of AggregateInstance, ModuleInstance, TensorType, ... to simple getMember lookups **/
 			auto baseObj = asObject(ctx->expr()->accept(this));
 			auto memberName = ctx->IDENT()->getText();
 			auto* memberTok = ctx->IDENT()->getSymbol();
@@ -380,10 +381,9 @@ namespace mdl {
 					return &graph().addErrorNode();
 				}
 				return mem.value().get();
-			}
-
-			// Module function access: node of BoundModuleType.
-			if (auto* nodePtr = std::get_if<const Node*>(&baseObj)) {
+			} else if (
+					auto* nodePtr = std::get_if<const Node*>(&baseObj)
+			) { // Module function access: node of BoundModuleType.
 				if (std::holds_alternative<mdl::ErrorNode>(**nodePtr)) {
 					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
 					return &graph().addErrorNode();
@@ -401,6 +401,18 @@ namespace mdl {
 						return &graph().addErrorNode();
 					}
 					return Object{it->second};
+				} else if (auto* tensor = std::get_if<TensorType>(&mdl::getDataType(**nodePtr))) {
+					/** \todo this "T" has "property semantic"; i.e. it is a function but automatically invoked; this should be implemented more cleanly */
+					auto member = mdl::getMember(mdl::Object{*nodePtr}, memberName, {mdl::getDataType(**nodePtr)});
+					if (!member.has_value()) {
+						errorlistener.semanticError(
+								PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+								memberTok->getCharPositionInLine(), std::format("No member '{}' for tensor", memberName)
+						);
+						return &graph().addErrorNode();
+					}
+					std::vector<std::reference_wrapper<const Node>> args{std::cref(**nodePtr)};
+					return &graph().addInvocationNode(member.value().get(), std::move(args));
 				}
 			}
 
@@ -418,18 +430,97 @@ namespace mdl {
 			return &graph().addErrorNode();
 		}
 
+		// ---------------------------------------------------------------
+		// Einops helpers
+		// ---------------------------------------------------------------
+
+		static mdl::einops::Atom parseEinopsAtom(mdlParser::Einops_atomContext* ctx) {
+			using mdl::einops::Atom;
+			using mdl::einops::AtomKind;
+			std::string text = ctx->getText();
+			if (text == "...")
+				return Atom{AtomKind::Ellipsis, {}, 0};
+			if (text == "_")
+				return Atom{AtomKind::Anon, {}, 0};
+			// Chunk: starts with '/'
+			if (!text.empty() && text[0] == '/') {
+				int64_t val = std::atoll(text.c_str() + 1);
+				return Atom{AtomKind::Chunk, {}, val};
+			}
+			if (ctx->IDENT() != nullptr)
+				return Atom{AtomKind::Named, ctx->IDENT()->getText(), 0};
+			if (ctx->INTEGER() != nullptr) {
+				int64_t val = std::atoll(ctx->INTEGER()->getText().c_str());
+				return Atom{AtomKind::Literal, {}, val};
+			}
+			// Fallback (shouldn't happen)
+			return Atom{AtomKind::Named, text, 0};
+		}
+
+		static mdl::einops::Spec parseEinopsSpec(mdlParser::Einops_spec_fullContext* specCtx) {
+			using mdl::einops::Spec;
+			using mdl::einops::SpecItem;
+			Spec spec;
+			bool inGroup = false;
+			SpecItem currentGroup{.is_group = true, .atoms = {}};
+
+			for (auto* child : specCtx->children) {
+				auto* term = dynamic_cast<antlr4::tree::TerminalNode*>(child);
+				if (term) {
+					std::string t = term->getText();
+					if (t == "(") {
+						inGroup = true;
+						currentGroup.atoms.clear();
+					} else if (t == ")") {
+						inGroup = false;
+						spec.push_back(std::move(currentGroup));
+						currentGroup = {.is_group = true, .atoms = {}};
+					}
+					continue;
+				}
+				auto* atomCtx = dynamic_cast<mdlParser::Einops_atomContext*>(child);
+				if (!atomCtx)
+					continue;
+				auto atom = parseEinopsAtom(atomCtx);
+				if (inGroup) {
+					currentGroup.atoms.push_back(atom);
+				} else {
+					spec.push_back(SpecItem{.is_group = false, .atoms = {atom}});
+				}
+			}
+			return spec;
+		}
+
 		virtual std::any visitEinopsExpression(mdlParser::EinopsExpressionContext* ctx) override {
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
-			errorlistener.semanticError(
-					PrettyErrorListener::ErrorLevel::Error,
-					{{.linenr = firsttok->getLine(),
-					  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-					  .beginMark = firsttok->getCharPositionInLine(),
-					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
-					firsttok->getLine(), firsttok->getCharPositionInLine(), "Einops expressions are not yet implemented"
-			);
-			return &graph().addErrorNode();
+			// Evaluate the tensor operand.
+			const Node* inputNode = asNode(ctx->expr()->accept(this), ctx->expr()->start);
+			if (std::holds_alternative<ErrorNode>(*inputNode))
+				return &graph().addErrorNode();
+
+			auto* einopsCtx = ctx->einops();
+			auto lhs = parseEinopsSpec(einopsCtx->einops_spec_full(0));
+			auto rhs = parseEinopsSpec(einopsCtx->einops_spec_full(1));
+
+			// Collect key=value bindings.
+			std::map<std::string, const Node*> bindings;
+			for (auto* kv : einopsCtx->keyvalue()) {
+				std::string key = kv->IDENT()->getText();
+				const Node* valNode = asNode(kv->expr()->accept(this), kv->expr()->start);
+				if (std::holds_alternative<ErrorNode>(*valNode))
+					return &graph().addErrorNode();
+				bindings[key] = valNode;
+			}
+
+			auto result = mdl::einops::apply(graph(), *inputNode, lhs, rhs, bindings);
+			if (!result) {
+				auto* tok = ctx->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						std::format("einops error: {}", result.error())
+				);
+				return &graph().addErrorNode();
+			}
+			return static_cast<const Node*>(&result->get());
 		}
 
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {

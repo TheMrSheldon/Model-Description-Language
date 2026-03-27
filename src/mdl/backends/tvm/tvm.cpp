@@ -16,6 +16,7 @@
 #include <tvm/topi/elemwise.h>
 #include <tvm/topi/transform.h>
 
+#include <any>
 #include <cassert>
 #include <ranges>
 
@@ -112,28 +113,45 @@ static tvm::te::Tensor toPlaceholder(const std::string& name, mdl::DataType dtyp
 static tvm::te::Tensor translate(Arguments& args, const mdl::Node& node);
 
 static tvm::te::Tensor translate(Arguments& args, const mdl::ConstNode& node) {
-	auto dtype = node.datatype();
-	assert(std::holds_alternative<mdl::PrimitiveType>(dtype)); /** ConstNode values are always scalars **/
-	auto tvmtype = toUnderlyingTVMType(dtype);
-
-	tvm::PrimExpr constExpr = std::visit(
+	return std::visit(
 			mdl::overloaded{
-					[&](int v) -> tvm::PrimExpr {
-						return tvm::cast(tvmtype, tvm::IntImm(tvm::DataType::Int(32), static_cast<int64_t>(v)));
+					[&](int v) -> tvm::te::Tensor {
+						auto tvmtype = toUnderlyingTVMType(node.datatype());
+						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::IntImm(tvm::DataType::Int(32), v));
+						return tvm::te::compute(
+								{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
 					},
-					[&](double v) -> tvm::PrimExpr {
-						return tvm::cast(tvmtype, tvm::FloatImm(tvm::DataType::Float(64), v));
-					}
+					[&](double v) -> tvm::te::Tensor {
+						auto tvmtype = toUnderlyingTVMType(node.datatype());
+						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::FloatImm(tvm::DataType::Float(64), v));
+						return tvm::te::compute(
+								{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
+					},
+					[&](const std::vector<int>& v) -> tvm::te::Tensor {
+						// Compile-time integer tensor (e.g. permutation indices).
+						// The PERMUTE InvocationNode translation reads this via the ConstNode directly;
+						// this TE placeholder is only needed to satisfy the translate() signature.
+						// \todo Implement properly when PERMUTE is implemented in the TVM backend.
+						return ::tvm::te::placeholder(
+								{tvm::Integer(static_cast<int>(v.size()))},
+								tvm::DataType::Int(32), "perm");
+					},
 			},
 			node.value
 	);
-
-	return tvm::te::compute({1}, [constExpr](tvm::ffi::Array<tvm::tir::Var>) { return constExpr; }, "const");
 }
 static tvm::te::Tensor translate(Arguments& args, const mdl::InvocationNode& node) {
-	std::vector<tvm::te::Tensor> translatedArgs;
-	for (const auto& argRef : node.arguments)
-		translatedArgs.push_back(translate(args, argRef.get()));
+	// ConstNode args are passed as their raw Atomic value (int, double, or vector<int>)
+	// so that builtins can access compile-time constants without going through the TVM TE layer.
+	// All other nodes are translated to tvm::te::Tensor as usual.
+	std::vector<std::any> translatedArgs;
+	for (const auto& argRef : node.arguments) {
+		const auto& n = argRef.get();
+		if (const auto* cn = std::get_if<mdl::ConstNode>(&n))
+			translatedArgs.push_back(std::visit([](const auto& v) { return std::any{v}; }, cn->value));
+		else
+			translatedArgs.push_back(translate(args, n));
+	}
 
 	auto& fn = mdl::backend::tvm::functions[std::to_underlying(node.id)];
 	assert(fn != nullptr); /** builtin not yet implemented for this backend **/

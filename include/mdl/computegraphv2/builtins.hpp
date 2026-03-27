@@ -26,6 +26,10 @@ namespace mdl::builtins {
 		TAN,
 		EXP,
 		ERF,
+		/** Einops **/
+		RESHAPE,
+		PERMUTE, /**< Permutes a tensor based on the given permutation **/
+		EXPAND,
 
 		COUNT
 	};

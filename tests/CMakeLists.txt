@@ -6,6 +6,7 @@ add_executable(tests
 	# Add test files here
     mdl/computegraph/function.cpp
     mdl/computegraph/object.cpp
+    mdl/computegraph/einops.cpp
 )
 
 target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl)

@@ -88,7 +88,7 @@ float[...] rsqrt(x: float[...]) => __builtin_rsqrt(x);
  * @param dof 
  * @return 
  */
-float[...] var(x: float[...], dof: uint = 1) => __builtin_var(x, dof);
+float[...] var(x: float[...], dof: uint /*= 1*/) => __builtin_var(x, dof);
 
 /**
  * @brief Implements layer normalization as proposed by \cite layernorm.
@@ -100,7 +100,7 @@ module LayerNorm[dim: uint] {
     template<N: uint>
     float[..., dim, N] forward(x: float[..., dim, N]) {
         auto numerator = mean(input)[... -> ... 1];
-        auto denominator = rsqrt(var(x[... a b -> ... b a]) + 1e-5);
+        auto denominator = rsqrt(var(x[... a b -> ... b a], 1) + 1e-5);
         return (numerator * denominator) * gamma + beta;
     }
 }

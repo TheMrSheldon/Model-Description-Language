@@ -5,13 +5,18 @@
 #include "./datatype.hpp"
 #include "./node_decl.hpp"
 
+#include <optional>
+
 namespace mdl {
 	/**
-     * @brief "Const nodes" represent constant values in the compute graph. They consist of a data type and an atomic value.
+     * @brief "Const nodes" represent constant values in the compute graph.
+     * @details The value is an Atomic: a scalar (int/double) or a compile-time integer
+     *          tensor (std::vector<int>, e.g. permutation indices).
      * @see Atomic
      */
 	struct ConstNode {
 		mdl::Atomic value;
+		mutable std::optional<DataType> _cachedType; ///< for non-scalar Atomic variants
 
 		/**
 		 * @brief Get the data type of this node.
@@ -22,7 +27,14 @@ namespace mdl {
 			return std::visit(
 					mdl::overloaded{
 							[&](const int&) -> const DataType& { return inttype; },
-							[&](const double&) -> const DataType& { return floattype; }
+							[&](const double&) -> const DataType& { return floattype; },
+							[&](const std::vector<int>& v) -> const DataType& {
+								if (!_cachedType)
+									_cachedType = TensorType{
+											PrimitiveType::integer,
+											{static_cast<unsigned>(v.size())}};
+								return *_cachedType;
+							},
 					},
 					value
 			);

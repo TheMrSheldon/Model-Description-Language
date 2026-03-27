@@ -22,6 +22,7 @@ target_sources(mdl
 		mdl/parser.cpp
 		mdl/parser/errorlistener.cpp
 		mdl/utils/utils.cpp
+		mdl/utils/einops.cpp
 )
 
 # The Model Compiler

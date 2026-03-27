@@ -13,7 +13,7 @@ namespace mdl {
 	/**
 	 * @brief A first-class value in the MDL language.
 	 * @details Either a compute-graph node (const Node*), a function definition
-	 *          (FunctionDecl), or a struct instance (AggregateInstance).
+	 *          (FunctionDecl), or a struct/module instance.
 	 */
 	using Object = std::variant<const Node*, FunctionDecl, AggregateInstance, ModuleInstance>;
 } // namespace mdl
