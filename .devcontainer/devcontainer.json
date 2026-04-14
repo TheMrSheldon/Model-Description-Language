@@ -5,14 +5,14 @@
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
-	"features": {
-		"ghcr.io/devcontainers/features/nvidia-cuda:2": {
-			"installCudnn": true,
-			"installCudnnDev": true,
-			"cudaVersion": "12.5",
-			"cudnnVersion": "automatic"
-		}
-	},
+	// "features": {
+	// 	"ghcr.io/devcontainers/features/nvidia-cuda:2": {
+	// 		"installCudnn": true,
+	// 		"installCudnnDev": true,
+	// 		"cudaVersion": "12.5",
+	// 		"cudnnVersion": "automatic"
+	// 	},
+	// },
 	"customizations": {
 		"vscode": {
 			"extensions": [

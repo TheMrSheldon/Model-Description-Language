@@ -86,7 +86,7 @@ target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 # TVM
 CPMAddPackage(
 	URI "gh:apache/tvm@0.22.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA ON"
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF"
 	EXCLUDE_FROM_ALL YES
 )
 target_link_libraries(mdl PUBLIC tvm)
