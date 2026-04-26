@@ -3,6 +3,7 @@
 #include <mdl/computegraphv2/function.hpp>
 
 #include <cassert>
+#include <format>
 #include <unordered_map>
 
 using namespace mdl;
@@ -41,7 +42,8 @@ static const Node& inlineNode(
 ) {
 	if (const auto* pn = std::get_if<ParameterNode>(&templateNode)) {
 		auto it = subs.find(pn);
-		assert(it != subs.end());
+		if (it == subs.end())
+			return templateNode; // concrete parameter from outer scope; keep as-is
 		return *it->second;
 	} else if (std::get_if<ConstNode>(&templateNode)) {
 		return templateNode;
@@ -58,17 +60,22 @@ static const Node& inlineNode(
 	return graph.addErrorNode();
 }
 
-const Node& Computegraph::addInvocationNode(
+std::expected<std::reference_wrapper<const Node>, std::string> Computegraph::addInvocationNode(
 		const FunctionDecl& func, std::vector<std::reference_wrapper<const Node>>&& arguments,
 		std::vector<std::reference_wrapper<const Node>>&& templateArguments
 ) {
-	assert(func.parameters.size() == arguments.size());
+	if (func.parameters.empty())
+		return std::cref(func.output.get());
+	if (func.parameters.size() != arguments.size())
+		return std::unexpected(std::format(
+				"'{}' expects {} argument(s) but got {}", func.name, func.parameters.size(), arguments.size()
+		));
 
 	std::unordered_map<const ParameterNode*, const Node*> subs;
 	for (size_t i = 0; i < func.parameters.size(); ++i)
 		subs[&func.parameters[i].second.get()] = &arguments[i].get();
 
-	return inlineNode(*this, func.output.get(), subs);
+	return std::cref(inlineNode(*this, func.output.get(), subs));
 }
 
 const Node& Computegraph::addErrorNode() {

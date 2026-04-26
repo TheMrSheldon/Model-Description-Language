@@ -171,7 +171,7 @@ module TransformerEncoder[conf: TransformerConf] {
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto facv = value[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto prod = facq @ fack.T();
-        auto tmp = softmax(prod / sqrt(conf.dims.key), -1) @ facv;
+        auto tmp = softmax(prod / sqrt(conf.dims.key)/*, -1*/) @ facv;
         return tmp[h ... d -> ... (h d)];
     }
     

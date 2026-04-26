@@ -221,7 +221,7 @@ namespace mdl {
 					for (auto arg : ctx->type_arg()) {
 						args.emplace_back(std::any_cast<TypeArg>(arg->accept(this)));
 					}
-					auto ta = setTypeArgs(dtype.value(), args);
+					auto ta = setTypeArgs(dtype.value().get(), args);
 					if (!ta.has_value()) {
 						auto firsttok = ctx->type_arg().front()->start;
 						auto lasttok = ctx->type_arg().back()->stop;
@@ -235,11 +235,11 @@ namespace mdl {
 								  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 								ctx->typename_->getLine(), firsttok->getCharPositionInLine(), ta.error()
 						);
-						return dtype.value(); /** Or return some "error" datatype here? */
+						return dtype.value().get(); /** Or return some "error" datatype here? */
 					}
 					return ta.value();
 				}
-				return dtype.value();
+				return dtype.value().get();
 			}
 		}
 
@@ -390,7 +390,7 @@ namespace mdl {
 				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
 					/** \todo bind the instance as the first argument **/
 					/** \todo merge with ModuleInstance implementation above **/
-					auto& funcs = bmt->definition.get().functions;
+					auto& funcs = bmt->definition.functions;
 					auto it = funcs.find(memberName);
 					if (it == funcs.end()) {
 						errorlistener.semanticError(
@@ -402,7 +402,6 @@ namespace mdl {
 					}
 					return Object{it->second};
 				} else if (auto* tensor = std::get_if<TensorType>(&mdl::getDataType(**nodePtr))) {
-					/** \todo this "T" has "property semantic"; i.e. it is a function but automatically invoked; this should be implemented more cleanly */
 					auto member = mdl::getMember(mdl::Object{*nodePtr}, memberName, {mdl::getDataType(**nodePtr)});
 					if (!member.has_value()) {
 						errorlistener.semanticError(
@@ -411,8 +410,8 @@ namespace mdl {
 						);
 						return &graph().addErrorNode();
 					}
-					std::vector<std::reference_wrapper<const Node>> args{std::cref(**nodePtr)};
-					return &graph().addInvocationNode(member.value().get(), std::move(args));
+					// Bind self to the receiver; the caller invokes the returned 0-param FunctionDecl with ().
+					return Object{mdl::bind(graph(), member.value().get(), **nodePtr)};
 				}
 			}
 
@@ -556,10 +555,18 @@ namespace mdl {
 				);
 				return &graph().addErrorNode();
 			}
-			/** \todo descriptive error message when arguments / argument count does not match **/
 			/** \todo For member function calls (obj.func(...)), obj should be passed as the first ("this") argument.
 			 *  This is not yet implemented. */
-			return &graph().addInvocationNode(decl.value(), std::move(args));
+			auto resultOrErr = graph().addInvocationNode(decl.value(), std::move(args));
+			if (!resultOrErr.has_value()) {
+				auto* tok = ctx->func->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						resultOrErr.error()
+				);
+				return &graph().addErrorNode();
+			}
+			return &resultOrErr.value().get();
 		}
 
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
@@ -591,7 +598,7 @@ namespace mdl {
 				);
 				return &graph().addErrorNode();
 			}
-			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)});
+			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)}).value().get();
 		}
 
 		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {

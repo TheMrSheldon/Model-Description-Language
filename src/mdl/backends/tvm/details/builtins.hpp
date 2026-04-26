@@ -100,14 +100,15 @@ namespace mdl::backend::tvm {
 			[](auto ts) -> ::tvm::te::Tensor {
 				// ts[0]: tensor; ts[1]: std::vector<int> permutation (from ConstNode<vector<int>>).
 				// Negative indices are resolved relative to the actual tensor rank.
-				// \todo Support ellipsis expansion: when perm.size() < rank, one perm entry
-				//       represents all batch dims and must be expanded to individual axes.
-				//       This requires the batch rank to be known at compile time (constant folding).
+				// When perm.size() < rank (trailing permutation), the leading rank-perm.size()
+				// axes are mapped to themselves and the trailing axes follow the given permutation.
 				const auto& perm = tvmArg<std::vector<int>>(ts[1]);
 				const auto& tensor = tvmArg<::tvm::te::Tensor>(ts[0]);
 				int rank = static_cast<int>(tensor->shape.size());
-				assert(static_cast<int>(perm.size()) == rank && "PERMUTE with ellipsis not yet supported");
+				int offset = rank - static_cast<int>(perm.size());
 				::tvm::ffi::Array<::tvm::Integer> axes;
+				for (int i = 0; i < offset; ++i)
+					axes.push_back(::tvm::Integer(i));
 				for (int idx : perm) {
 					if (idx < 0)
 						idx += rank;

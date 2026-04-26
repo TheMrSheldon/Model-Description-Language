@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <functional>
 #include <string>
 #include <utility>
@@ -60,7 +61,9 @@ namespace mdl {
 					...);
 		}(std::make_index_sequence<N>{});
 
-		const Node& outputNode = graph.addInvocationNode(decl, std::move(invocationArgs));
+		auto outputOrErr = graph.addInvocationNode(decl, std::move(invocationArgs));
+		assert(outputOrErr.has_value()); // bind() callers must supply correct arg counts
+		const Node& outputNode = outputOrErr.value().get();
 
 		// Build parameters first; FunctionDecl cannot be default-constructed because
 		// output (reference_wrapper) has no default constructor.

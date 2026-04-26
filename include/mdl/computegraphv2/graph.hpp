@@ -4,6 +4,7 @@
 #include "./builtins.hpp"
 #include "./node.hpp"
 
+#include <expected>
 #include <list>
 #include <string>
 #include <vector>
@@ -23,7 +24,7 @@ namespace mdl {
 
 		const Node& addConstNode(Atomic&& value);
 
-		const Node& addInvocationNode(
+		std::expected<std::reference_wrapper<const Node>, std::string> addInvocationNode(
 				const FunctionDecl& func, std::vector<std::reference_wrapper<const Node>>&& arguments,
 				std::vector<std::reference_wrapper<const Node>>&& templateArguments = {}
 		);

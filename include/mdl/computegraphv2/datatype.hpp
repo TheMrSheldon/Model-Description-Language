@@ -58,7 +58,7 @@ namespace mdl {
 	};
 
 	struct BoundModuleType final {
-		std::reference_wrapper<const ModuleType> definition;
+		ModuleType definition;
 		// Named bindings: must match definition.typeargs length (when fully bound)
 		std::map<std::string, const Node*> hyperparamValues;
 	};

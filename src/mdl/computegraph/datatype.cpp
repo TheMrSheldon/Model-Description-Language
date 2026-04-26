@@ -49,7 +49,7 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const ModuleType& mod, con
 
 std::expected<DataType, std::string>
 mdl::setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typeargs) {
-	const auto& decl = mod.definition.get();
+	const auto& decl = mod.definition;
 	if (typeargs.size() != decl.typeargs.size())
 		return std::unexpected(std::format("Expected {} type arg(s), got {}", decl.typeargs.size(), typeargs.size()));
 	BoundModuleType bound{mod.definition, {}};
@@ -69,6 +69,16 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const DataType& dtype, con
 
 std::optional<std::reference_wrapper<const FunctionDecl>>
 mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes) {
+	if (auto* bmt = std::get_if<BoundModuleType>(&dtype)) {
+		if (name != "operator()")
+			return std::nullopt;
+		auto& funcs = bmt->definition.functions;
+		auto it = funcs.find("forward");
+		if (it == funcs.end())
+			return std::nullopt;
+		return std::cref(it->second);
+	}
+
 	/** \todo implement properly for all types; for now only TensorType arithmetic operators are supported **/
 	if (!std::holds_alternative<TensorType>(dtype) && !std::holds_alternative<PrimitiveType>(dtype)) {
 		return std::nullopt;
@@ -101,6 +111,22 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		makeOp("operator@", FunctionIDs::TENSOR_DOT);
 		makeOp("operator*", FunctionIDs::TENSOR_PROD);
 		makeOp("operator/", FunctionIDs::TENSOR_DIV);
+
+		// T() — swap last two dimensions via PERMUTE with trailing perm {-1, -2}
+		{
+			const Node& self = graph.addParameterNode(ttype);
+			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
+			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, ttype, {std::cref(self), std::cref(permNode)});
+			m.emplace(
+					"T", FunctionDecl{
+								 .name = "T",
+								 .templateParameters = {},
+								 .parameters = {{"self", std::cref(std::get<ParameterNode>(self))}},
+								 .output = std::cref(out),
+						 }
+			);
+		}
+
 		return m;
 	}();
 
