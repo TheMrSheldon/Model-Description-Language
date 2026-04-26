@@ -38,43 +38,42 @@ namespace mdl::backend::tvm {
 			},
 			/*[TENSOR_SUB] =*/
 			[](auto ts) {
-				return ::tvm::topi::subtract(
-						tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::subtract(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
 			},
 			/*[TENSOR_DOT] =*/
 			[](auto ts) {
-				return ::tvm::topi::matmul(
-						tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::matmul(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
 			},
 			/*[TENSOR_PROD]=*/
 			[](auto ts) {
-				return ::tvm::topi::multiply(
-						tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::multiply(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
 			},
 			/*[TENSOR_DIV] =*/
 			[](auto ts) {
-				return ::tvm::topi::divide(
-						tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::divide(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
 			},
 			/** Statistic Functions **/
 			/*[MAX] =*/
 			[](auto ts) {
 				return ::tvm::topi::max(
-						tvmArg<::tvm::te::Tensor>(ts[0]),
-						::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{}, false);
+						tvmArg<::tvm::te::Tensor>(ts[0]), ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{},
+						false
+				);
 			},
 			/*[MIN] =*/
 			[](auto ts) {
 				return ::tvm::topi::min(
-						tvmArg<::tvm::te::Tensor>(ts[0]),
-						::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{}, false);
+						tvmArg<::tvm::te::Tensor>(ts[0]), ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{},
+						false
+				);
 			},
-			/*[AVG] =*/nullptr, /** \todo no direct topi equivalent; implement as sum/count **/
-								/*[SUM] =*/
+			/*[MEAN] =*/nullptr, /** \todo no direct topi equivalent; implement as sum/count **/
+			/*[SUM] =*/
 			[](auto ts) {
 				return ::tvm::topi::sum(
-						tvmArg<::tvm::te::Tensor>(ts[0]),
-						::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{}, false);
+						tvmArg<::tvm::te::Tensor>(ts[0]), ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>>{},
+						false
+				);
 			},
 			/** Arithmetic Functions **/
 			/*[COS] =*/[](auto ts) { return ::tvm::topi::cos(tvmArg<::tvm::te::Tensor>(ts[0])); },
@@ -82,6 +81,12 @@ namespace mdl::backend::tvm {
 			/*[TAN] =*/[](auto ts) { return ::tvm::topi::tan(tvmArg<::tvm::te::Tensor>(ts[0])); },
 			/*[EXP] =*/[](auto ts) { return ::tvm::topi::exp(tvmArg<::tvm::te::Tensor>(ts[0])); },
 			/*[ERF] =*/[](auto ts) { return ::tvm::topi::erf(tvmArg<::tvm::te::Tensor>(ts[0])); },
+			/*[SQRT] =*/[](auto ts) { return ::tvm::topi::sqrt(tvmArg<::tvm::te::Tensor>(ts[0])); },
+			/*[RSQRT] =*/[](auto ts) { return ::tvm::topi::rsqrt(tvmArg<::tvm::te::Tensor>(ts[0])); },
+			/*[VAR] =*/
+			[](auto ts) -> ::tvm::te::Tensor {
+				std::abort(); /** \todo implement */
+			},
 			/** Einops **/
 			/*[RESHAPE] =*/
 			[](auto ts) -> ::tvm::te::Tensor {

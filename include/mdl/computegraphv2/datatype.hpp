@@ -29,7 +29,17 @@ namespace mdl {
 		Shape shape;
 	};
 
-	struct FunctionDecl;
+	/**
+	 * @brief Represents a function definition.
+	 * @details Each function is associated with a computegraph from which it references nodes.
+	 */
+	struct FunctionDecl final {
+		std::string name; /** \todo possibly don't name the function here but only in members; */
+		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> templateParameters;
+		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
+		std::reference_wrapper<const Node> output;
+	};
+
 	struct ModuleType final {
 		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> typeargs;
 		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> variables;
@@ -50,24 +60,25 @@ namespace mdl {
 	struct BoundModuleType final {
 		std::reference_wrapper<const ModuleType> definition;
 		// Named bindings: must match definition.typeargs length (when fully bound)
-		std::map<std::string, Atomic> hyperparamValues;
+		std::map<std::string, const Node*> hyperparamValues;
 	};
 
 	/** \todo handle member functions? **/
-	using DataType = std::variant<PrimitiveType, TensorType, struct AggregateType, BoundModuleType>;
+	using DataType = std::variant<PrimitiveType, TensorType, struct AggregateType, ModuleType, BoundModuleType>;
 
 	struct AggregateType final {
 		std::map<std::string, DataType> members;
 	};
 
-	using TypeArg = std::variant<
-			Elipsis, Atomic, const Node*>; /** \todo define TypeArgs; should use Object instead of Atomic and Node? */
+	using TypeArg = std::variant<Elipsis, const Node*>; /** \todo use mdl::Object instead of Node*? */
 
 	std::expected<DataType, std::string> setTypeArgs(const PrimitiveType& prim, const std::vector<TypeArg>& typeargs);
 
 	std::expected<DataType, std::string> setTypeArgs(const TensorType& tensor, const std::vector<TypeArg>& typeargs);
 
 	std::expected<DataType, std::string> setTypeArgs(const AggregateType& agg, const std::vector<TypeArg>& typeargs);
+
+	std::expected<DataType, std::string> setTypeArgs(const ModuleType& mod, const std::vector<TypeArg>& typeargs);
 
 	std::expected<DataType, std::string> setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typeargs);
 

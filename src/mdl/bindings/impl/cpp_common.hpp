@@ -46,6 +46,7 @@ namespace mdl::bindings::detail {
 							return s;
 						},
 						[](const mdl::AggregateType&) -> std::string { return std::string{"struct"}; },
+						[](const mdl::ModuleType&) -> std::string { return std::string{"module"}; },
 						[](const mdl::BoundModuleType&) -> std::string { return std::string{"module"}; }
 				},
 				dt
@@ -72,6 +73,7 @@ namespace mdl::bindings::detail {
 						},
 						[](const mdl::TensorType&) { return std::string{"tvm::runtime::NDArray"}; },
 						[](const mdl::AggregateType&) { return std::string{"void*"}; },
+						[](const mdl::ModuleType&) { return std::string{"void*"}; },
 						[](const mdl::BoundModuleType&) { return std::string{"void*"}; },
 				},
 				dt
@@ -87,7 +89,7 @@ namespace mdl::bindings::detail {
 			sig += pname + ": " + dtypeStr(mdl::getDataType(pnode.get()));
 			first = false;
 		}
-		return sig + ") -> " + dtypeStr(func.returnType());
+		return sig + ") -> " + dtypeStr(mdl::getDataType(func.output.get()));
 	}
 
 } // namespace mdl::bindings::detail

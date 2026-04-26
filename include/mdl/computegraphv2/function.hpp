@@ -1,6 +1,7 @@
 #ifndef MDL_COMPUTEGRAPH_FUNCTIONS_HPP
 #define MDL_COMPUTEGRAPH_FUNCTIONS_HPP
 
+#include "./datatype.hpp"
 #include "./graph.hpp"
 #include "./node.hpp"
 
@@ -12,19 +13,6 @@
 #include <vector>
 
 namespace mdl {
-	/**
-	 * @brief Represents a function definition.
-	 * @details Each function is associated with a computegraph from which it references nodes.
-	 */
-	struct FunctionDecl final {
-		std::string name; /** \todo possibly don't name the function here but only in members; */
-		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> templateParameters;
-		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
-		std::reference_wrapper<const Node> output;
-
-		const DataType& returnType() const { return mdl::getDataType(output.get()); }
-	};
-
 	template <typename... Args>
 	FunctionDecl bind(Computegraph& graph, const FunctionDecl& decl, Args&&... args) {
 		constexpr size_t N = sizeof...(Args);
@@ -69,8 +57,7 @@ namespace mdl {
 							invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
 						}
 					}(),
-					...
-			);
+					...);
 		}(std::make_index_sequence<N>{});
 
 		const Node& outputNode = graph.addInvocationNode(decl, std::move(invocationArgs));

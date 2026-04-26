@@ -30,9 +30,7 @@ namespace mdl {
 							[&](const double&) -> const DataType& { return floattype; },
 							[&](const std::vector<int>& v) -> const DataType& {
 								if (!_cachedType)
-									_cachedType = TensorType{
-											PrimitiveType::integer,
-											{static_cast<unsigned>(v.size())}};
+									_cachedType = TensorType{PrimitiveType::integer, {static_cast<unsigned>(v.size())}};
 								return *_cachedType;
 							},
 					},

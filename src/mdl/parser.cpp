@@ -185,7 +185,7 @@ namespace mdl {
 				}
 			}
 			popNamespace();
-			currentNamespace().putType(name, DataType{BoundModuleType{.definition = m}});
+			currentNamespace().putType(name, DataType{m});
 			return std::make_pair(name, m);
 		}
 
@@ -267,8 +267,6 @@ namespace mdl {
 							"Parameters must be compile time constant"
 					);
 					return TypeArg{&node}; /** return this node anyway for now **/
-				} else if (auto n = std::get_if<ConstNode>(&node)) {
-					return TypeArg{n->value};
 				} else {
 					return TypeArg{&node};
 				}
@@ -283,6 +281,8 @@ namespace mdl {
 				return mdl::Atomic{std::atoi(ctx->INTEGER()->getText().c_str())};
 			if (ctx->FLOAT() != nullptr)
 				return mdl::Atomic{std::atof(ctx->FLOAT()->getText().c_str())};
+			if (ctx->BOOL() != nullptr)
+				return mdl::Atomic(ctx->BOOL()->getText() == "true");
 			assert(false); // Invalid case
 		}
 

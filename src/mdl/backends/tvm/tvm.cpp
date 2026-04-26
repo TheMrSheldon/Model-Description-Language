@@ -53,6 +53,11 @@ static tvm::runtime::DataType toUnderlyingTVMType(mdl::DataType dtype) {
 						assert(false); /** \todo implement **/
 						return tvm::runtime::DataType{};
 					},
+					[](const mdl::ModuleType&) {
+						std::abort();
+						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
+						return tvm::runtime::DataType{};
+					},
 					[](const mdl::BoundModuleType&) {
 						std::abort();
 						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
@@ -96,6 +101,11 @@ static tvm::ffi::Array<tvm::PrimExpr> getShape(mdl::DataType dtype) {
 						assert(false); /** \todo implement **/
 						return tvm::ffi::Array<tvm::PrimExpr>{};
 					},
+					[](const mdl::ModuleType&) {
+						std::abort();
+						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
+						return tvm::ffi::Array<tvm::PrimExpr>{};
+					},
 					[](const mdl::BoundModuleType&) {
 						std::abort();
 						/** Should not happen; at this point the modules should be resolved and their member functions inlined into the compute graph. **/
@@ -118,23 +128,18 @@ static tvm::te::Tensor translate(Arguments& args, const mdl::ConstNode& node) {
 					[&](int v) -> tvm::te::Tensor {
 						auto tvmtype = toUnderlyingTVMType(node.datatype());
 						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::IntImm(tvm::DataType::Int(32), v));
-						return tvm::te::compute(
-								{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
+						return tvm::te::compute({1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
 					},
 					[&](double v) -> tvm::te::Tensor {
 						auto tvmtype = toUnderlyingTVMType(node.datatype());
 						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::FloatImm(tvm::DataType::Float(64), v));
-						return tvm::te::compute(
-								{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
+						return tvm::te::compute({1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
 					},
 					[&](const std::vector<int>& v) -> tvm::te::Tensor {
-						// Compile-time integer tensor (e.g. permutation indices).
-						// The PERMUTE InvocationNode translation reads this via the ConstNode directly;
-						// this TE placeholder is only needed to satisfy the translate() signature.
-						// \todo Implement properly when PERMUTE is implemented in the TVM backend.
+						/* \todo At some point compile-time constant tensors won't be implemented this way anymore */
 						return ::tvm::te::placeholder(
-								{tvm::Integer(static_cast<int>(v.size()))},
-								tvm::DataType::Int(32), "perm");
+								{tvm::Integer(static_cast<int>(v.size()))}, tvm::DataType::Int(32), "const"
+						);
 					},
 			},
 			node.value

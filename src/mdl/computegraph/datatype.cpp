@@ -15,18 +15,7 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const PrimitiveType& prim,
 	for (auto& arg : typeargs) {
 		using RT = std::expected<TensorType::Shape::value_type, std::string>;
 		auto val = std::visit(
-				overloaded{
-						[](Elipsis) -> RT { return Elipsis{}; },
-						[](const Atomic& value) -> RT {
-							if (auto val = std::get_if<int>(&value)) {
-								return static_cast<unsigned>(*val);
-							} else {
-								return std::unexpected("Invalid type"); /** \todo more descriptive message **/
-							}
-						},
-						[](const Node* node) -> RT { return node; }
-				},
-				arg
+				overloaded{[](Elipsis) -> RT { return Elipsis{}; }, [](const Node* node) -> RT { return node; }}, arg
 		);
 		if (val.has_value())
 			shape.emplace_back(*val);
@@ -44,6 +33,20 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const AggregateType& agg, 
 	return std::unexpected("Type arguments are not available for aggregate types");
 }
 
+std::expected<DataType, std::string> mdl::setTypeArgs(const ModuleType& mod, const std::vector<TypeArg>& typeargs) {
+	if (typeargs.size() != mod.typeargs.size())
+		return std::unexpected(std::format("Expected {} type arg(s), got {}", mod.typeargs.size(), typeargs.size()));
+	BoundModuleType bound{std::cref(mod), {}};
+	for (size_t i = 0; i < typeargs.size(); ++i) {
+		auto& [name, _] = mod.typeargs[i];
+		const Node* node = std::get<const Node*>(typeargs[i]);
+		if (!mdl::isCompiletimeEvalable(*node))
+			return std::unexpected("Module hyperparameters must be compile-time constants");
+		bound.hyperparamValues.insert({name, node});
+	}
+	return bound;
+}
+
 std::expected<DataType, std::string>
 mdl::setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typeargs) {
 	const auto& decl = mod.definition.get();
@@ -52,10 +55,10 @@ mdl::setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typearg
 	BoundModuleType bound{mod.definition, {}};
 	for (size_t i = 0; i < typeargs.size(); ++i) {
 		auto& [name, _] = decl.typeargs[i];
-		if (auto atom = std::get_if<Atomic>(&typeargs[i]))
-			bound.hyperparamValues.insert({name, *atom});
-		else
+		const Node* node = std::get<const Node*>(typeargs[i]);
+		if (!mdl::isCompiletimeEvalable(*node))
 			return std::unexpected("Module hyperparameters must be compile-time constants");
+		bound.hyperparamValues.insert({name, node});
 	}
 	return bound;
 }

@@ -29,6 +29,7 @@ type_arg
 constant
       : INTEGER
       | FLOAT
+	  | BOOL
       ;
 
 vardecl
@@ -90,6 +91,7 @@ statement
 
 FLOAT: '-'?[0-9]*'.'[0-9]+ | INTEGER'e'INTEGER;
 INTEGER: '-'?[0-9]+;
+BOOL: 'true' | 'false';
 
 IDENT: [_a-zA-Z]+;
 
