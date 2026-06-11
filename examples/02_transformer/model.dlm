@@ -118,11 +118,11 @@ module LayerNorm[dim: uint] {
     beta: float[dim]
     gamma: float[dim]
 
-    template<N: uint>
-    float[..., dim, N] forward(x: float[..., dim, N]) {
-        auto numerator = mean(x)[... -> ... 1];
-        auto denominator = rsqrt(var(x[... a b -> ... b a], 1) + 1e-5);
-        return (numerator * denominator) * gamma + beta;
+    float[..., dim] forward(x: float[..., dim]) {
+        auto mu = mean(x)[... -> ... 1];
+        auto x_c = x - mu;
+        auto sigma = rsqrt(mean(x_c * x_c)[... -> ... 1] + 1e-12);
+        return x_c * sigma * gamma + beta;
     }
 }
 

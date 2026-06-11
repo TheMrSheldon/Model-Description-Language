@@ -82,7 +82,7 @@ static void print(std::string_view name, const mdl::ModuleType& m) {
 static void runCompileCommand(const CompileArgs& args) {
 	mdl::log::setVerbosity(args.logConf.getVerbosity());
 
-	auto argvals = args.argvals.transform(mdl::ArgVals::fromYAML);
+	mdl::ArgVals argvals = args.argvals.transform(mdl::ArgVals::fromYAML).value_or(mdl::ArgVals{});
 
 	std::filesystem::path output = args.output.value_or("a.o");
 	/** \todo: handle multiple input files */
@@ -102,7 +102,7 @@ static void runCompileCommand(const CompileArgs& args) {
 	}
 	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
-	mdl::compileToFile(program, output);
+	mdl::compileToFile(program, output, argvals);
 
 	for (const auto& factory : args.bindingsGenerators) {
 		auto generator = factory();

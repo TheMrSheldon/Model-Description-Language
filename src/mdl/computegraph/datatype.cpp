@@ -91,8 +91,8 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		DataType ttype = TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}}};
 
 		auto makeOp = [&](std::string opName, FunctionIDs id) {
-			const Node& lhs = graph.addParameterNode(ttype);
-			const Node& rhs = graph.addParameterNode(ttype);
+			const Node& lhs = graph.addParameterNode(ttype, "lhs");
+			const Node& rhs = graph.addParameterNode(ttype, "rhs");
 			const Node& out = graph.addInvocationNode(id, ttype, {std::cref(lhs), std::cref(rhs)});
 			m.emplace(
 					std::move(opName), FunctionDecl{
@@ -114,7 +114,7 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 
 		// T() — swap last two dimensions via PERMUTE with trailing perm {-1, -2}
 		{
-			const Node& self = graph.addParameterNode(ttype);
+			const Node& self = graph.addParameterNode(ttype, "self");
 			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
 			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, ttype, {std::cref(self), std::cref(permNode)});
 			m.emplace(

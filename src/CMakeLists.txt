@@ -84,12 +84,31 @@ target_include_directories(mdl PUBLIC ${ANTLR4CPP_INCLUDE_DIRS} ${ANTLR_mdlparse
 target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 
 # TVM
+# Pick the best available BLAS backend for this platform.
+# macOS: Accelerate framework (always present, no install needed)
+# Linux: OpenBLAS (install libopenblas-dev)
+# Windows / fallback: none (TVM uses its own loop nests)
+find_package(BLAS QUIET)
+if(BLAS_FOUND)
+	if(APPLE)
+		set(MDL_TVM_BLAS "apple")
+	else()
+		set(MDL_TVM_BLAS "openblas")
+	endif()
+else()
+	set(MDL_TVM_BLAS "none")
+endif()
+
 CPMAddPackage(
 	URI "gh:apache/tvm@0.22.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA OFF"
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS ${MDL_TVM_BLAS}"
 	EXCLUDE_FROM_ALL YES
 )
-target_link_libraries(mdl PUBLIC tvm)
+if(BLAS_FOUND)
+	target_link_libraries(mdl PUBLIC tvm BLAS::BLAS)
+else()
+	target_link_libraries(mdl PUBLIC tvm)
+endif()
 
 get_target_property(LIBA_INCLUDES tvm INCLUDE_DIRECTORIES)
 target_include_directories(mdl PUBLIC ${LIBA_INCLUDES}) # < I don't know why this is necessary
@@ -111,7 +130,7 @@ target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
 # yaml-cpp
 CPMAddPackage(URI "gh:jbeder/yaml-cpp#0.8.0" EXCLUDE_FROM_ALL YES)
-target_link_libraries(mdl PRIVATE yaml-cpp::yaml-cpp)
+target_link_libraries(mdl PUBLIC yaml-cpp::yaml-cpp)
 
 #-------------------#
 # Compiler Command  #

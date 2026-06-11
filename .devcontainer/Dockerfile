@@ -8,6 +8,6 @@ apt update
 apt install -y cmake cppcheck clang-format-19 clang-tidy-19 openjdk-11-jre
 
 # Dependencies
-apt install -y nvidia-cuda-toolkit
+apt install -y nvidia-cuda-toolkit libopenblas-dev
 
 EOF

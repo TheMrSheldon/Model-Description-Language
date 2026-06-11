@@ -79,14 +79,16 @@ namespace mdl {
 		// node per field via addNode (these nodes are NOT added to any leaves list).
 		template <typename NodeType>
 		Object makeAggregateObject(
-				const AggregateType& agg, const std::string& prefix, const Node& (Computegraph::*addNode)(DataType)
+				const AggregateType& agg, const std::string& prefix,
+				const Node& (Computegraph::*addNode)(DataType, std::string)
 		) {
 			std::map<std::string, Object> values;
 			for (auto& [memberName, memberType] : agg.members) {
+				const std::string memberPath = prefix + "." + memberName;
 				if (auto* subAgg = std::get_if<AggregateType>(&memberType))
-					values[memberName] = makeAggregateObject<NodeType>(*subAgg, prefix + "." + memberName, addNode);
+					values[memberName] = makeAggregateObject<NodeType>(*subAgg, memberPath, addNode);
 				else
-					values[memberName] = Object{&(graph().*addNode)(memberType)};
+					values[memberName] = Object{&(graph().*addNode)(memberType, memberPath)};
 			}
 			return Object{AggregateInstance::create(agg, std::move(values)).value()};
 		}
@@ -156,19 +158,20 @@ namespace mdl {
 			pushNamespace();
 			for (auto& param : ctx->param()) {
 				const auto [pname, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				const Node& node = graph().addHyperparameterNode(dtype);
+				const std::string qualifiedName = name + "." + pname;
+				const Node& node = graph().addHyperparameterNode(dtype, qualifiedName);
 				m.typeargs.emplace_back(pname, std::cref(std::get<HyperparameterNode>(node)));
 				if (auto* agg = std::get_if<AggregateType>(&dtype))
 					currentNamespace().put(
 							pname,
-							makeAggregateObject<HyperparameterNode>(*agg, pname, &Computegraph::addHyperparameterNode)
+							makeAggregateObject<HyperparameterNode>(*agg, qualifiedName, &Computegraph::addHyperparameterNode)
 					);
 				else
 					currentNamespace().put(pname, Object{&node});
 			}
 			for (auto& var : ctx->vardecl()) {
 				const auto [vname, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				const Node& node = graph().addParameterNode(dtype);
+				const Node& node = graph().addParameterNode(dtype, vname);
 				m.variables.emplace_back(vname, std::cref(std::get<ParameterNode>(node)));
 				if (auto* agg = std::get_if<AggregateType>(&dtype))
 					currentNamespace().put(
@@ -298,13 +301,13 @@ namespace mdl {
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
-					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype)});
+					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype, name)});
 					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
 			}
 			for (auto& param : ctx->param()) {
 				auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
-				auto& p = currentNamespace().put(name, Object{&graph().addParameterNode(dtype)});
+				auto& p = currentNamespace().put(name, Object{&graph().addParameterNode(dtype, name)});
 				params.emplace_back(name, std::get<mdl::ParameterNode>(*std::get<const mdl::Node*>(p)));
 			}
 			if (ctx->expr() != nullptr) {
@@ -557,7 +560,23 @@ namespace mdl {
 			}
 			/** \todo For member function calls (obj.func(...)), obj should be passed as the first ("this") argument.
 			 *  This is not yet implemented. */
-			auto resultOrErr = graph().addInvocationNode(decl.value(), std::move(args));
+
+			// If the callee is a module instance node, use addModuleInvocationNode so that
+			// each instance (weightQuery, weightKey, ...) gets its own ParameterNodes for
+			// member variables (W, b, gamma, beta) instead of sharing the module type's nodes.
+			std::expected<std::reference_wrapper<const Node>, std::string> resultOrErr = [&]() {
+				if (auto* calleeNodePtr = std::get_if<const Node*>(&calleeObj)) {
+					if (!std::holds_alternative<ErrorNode>(**calleeNodePtr)) {
+						if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**calleeNodePtr))) {
+							std::string instanceName;
+							if (const auto* pn = std::get_if<ParameterNode>(*calleeNodePtr))
+								instanceName = pn->name;
+							return graph().addModuleInvocationNode(*bmt, instanceName, decl.value(), std::move(args));
+						}
+					}
+				}
+				return graph().addInvocationNode(decl.value(), std::move(args));
+			}();
 			if (!resultOrErr.has_value()) {
 				auto* tok = ctx->func->start;
 				errorlistener.semanticError(

@@ -325,10 +325,10 @@ static std::expected<std::pair<const Node*, std::vector<Atom>>, std::string> app
 			} else if (atom.kind == AtomKind::Named) {
 				auto it = sizes.find(atom.name);
 				if (it == sizes.end()) {
-					// Size not statically known; emit -1 and let the backend infer.
-					// Valid only when exactly one dim per RESHAPE is left unresolved.
+					// Size not statically known; use -2 sentinel so the backend passes
+					// TVM's infer-dimension marker (-1) to topi::reshape, not passthrough.
 					newShape.push_back(Elipsis{});
-					shapeArgs.emplace_back(constNode(graph, -1));
+					shapeArgs.emplace_back(constNode(graph, -2));
 				} else if (auto* sz = std::get_if<int64_t>(&it->second)) {
 					newShape.push_back(static_cast<unsigned>(*sz));
 					shapeArgs.emplace_back(constNode(graph, *sz));
@@ -607,9 +607,10 @@ static std::expected<const Node*, std::string> applyRemerge(
 				newShape.push_back(static_cast<unsigned>(*prod));
 				shapeArgs.emplace_back(constNode(graph, *prod));
 			} else {
-				// Dynamic group product – use -1 (infer)
+				// Dynamic group product – use -2 sentinel so backend passes TVM's
+				// infer-dimension marker (-1) to topi::reshape, not passthrough.
 				newShape.push_back(Elipsis{});
-				shapeArgs.emplace_back(constNode(graph, -1));
+				shapeArgs.emplace_back(constNode(graph, -2));
 			}
 		} else {
 			assert(item.atoms.size() == 1);

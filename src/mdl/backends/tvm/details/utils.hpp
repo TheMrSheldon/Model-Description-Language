@@ -1,7 +1,48 @@
 #ifndef MDL_BACKENDS_TVM_UTILS_HPP
 #define MDL_BACKENDS_TVM_UTILS_HPP
 
+#include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+
+namespace {
+
+// Marks the outermost serial for-loop of each compute stage as parallel when
+// its extent is either symbolic (unknown at compile time) or >= threshold.
+// Inner loops are left sequential so VectorizeLoop can still SIMD-ify them.
+// Relies on TVM's thread-pool runtime (tvm_parallel_launch), which is provided
+// by the TVM Python package already loaded when the .so is used.
+struct OuterParallelMutator : ::tvm::tir::StmtMutator {
+	int threshold;
+	explicit OuterParallelMutator(int t = 32) : threshold(t) {}
+
+	::tvm::tir::Stmt VisitStmt_(const ::tvm::tir::ForNode* op) final {
+		if (op->kind == ::tvm::tir::ForKind::kSerial) {
+			const auto* imm = op->extent.as<::tvm::IntImmNode>();
+			if (!imm || imm->value >= threshold) {
+				return ::tvm::tir::For(
+					op->loop_var, op->min, op->extent,
+					::tvm::tir::ForKind::kParallel,
+					op->body,  // leave body unchanged; inner loops stay serial for VectorizeLoop
+					op->thread_binding, op->annotations
+				);
+			}
+		}
+		return StmtMutator::VisitStmt_(op);
+	}
+};
+
+} // namespace
+
+inline ::tvm::transform::Pass ParallelizeOuterLoops(int threshold = 32) {
+	return ::tvm::tir::transform::CreatePrimFuncPass(
+		[threshold](::tvm::tir::PrimFunc f, ::tvm::IRModule, ::tvm::transform::PassContext) {
+			auto* n = f.CopyOnWrite();
+			n->body = OuterParallelMutator{threshold}(std::move(n->body));
+			return f;
+		},
+		0, "mdl.ParallelizeOuterLoops", {}
+	);
+}
 
 inline tvm::transform::Sequential getDefaultPipeline() {
 	// https://github.com/apache/tvm/blob/6dc71f3dc4a54571e3dc0165630cd9a1a0bb97b5/python/tvm/tir/pipeline.py#L29-L126
@@ -33,6 +74,7 @@ inline tvm::transform::Sequential getDefaultPipeline() {
 			tvm::tir::transform::BF16ComputeLegalize(),
 			tvm::tir::transform::NarrowDataType(32),
 			tvm::tir::transform::LoopPartition(),
+			ParallelizeOuterLoops(),
 			tvm::tir::transform::VectorizeLoop(true),
 			tvm::tir::transform::InjectVirtualThread(),
 			tvm::tir::transform::InjectDoubleBuffer(),
@@ -102,9 +144,13 @@ inline tvm::transform::Sequential finalizeHostPasses() {
 
 inline tvm::transform::Sequential finalizeDevicePasses() {
 	// https://github.com/apache/tvm/blob/main/python/tvm/tir/pipeline.py#L142C5-L151
+	// LowerTVMBuiltin is needed here too: for CPU (LLVM) the device module contains
+	// the actual compute kernels, and dynamic allocations must be converted to
+	// workspace alloc calls before reaching LLVM codegen.
 	return tvm::tir::transform::Sequential{{
 			tvm::tir::transform::LowerWarpMemory(),
 			tvm::tir::transform::Simplify(),
+			tvm::tir::transform::LowerTVMBuiltin(),
 			tvm::tir::transform::LowerCustomDatatypes(),
 			tvm::tir::transform::LowerDeviceStorageAccessInfo(),
 			tvm::tir::transform::LowerIntrin(),

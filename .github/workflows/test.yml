@@ -38,6 +38,9 @@ jobs:
           gcovr: true
           ninja: true
           setup-cpp: false
+      - name: Install OpenBLAS (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libopenblas-dev
       - name: Configure CMake
         run: cmake -B ./build --preset=conf-dev "-DCMAKE_CXX_FLAGS=--coverage" "-DCMAKE_C_FLAGS=--coverage" "-DCMAKE_EXE_LINKER_FLAGS=--coverage" ${{ matrix.cmake_extra_args }}
       - name: Build

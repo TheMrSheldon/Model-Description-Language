@@ -38,7 +38,7 @@ namespace mdl {
 		std::vector<std::reference_wrapper<const Node>> newParamNodes;
 		newParamNodes.reserve(maxPh);
 		for (int k = 0; k < maxPh; ++k)
-			newParamNodes.push_back(graph.addParameterNode(newParamTypes[k]));
+			newParamNodes.push_back(graph.addParameterNode(newParamTypes[k], newParamNames[k]));
 
 		// Build the argument list for calling decl:
 		// bound positions use the supplied node, placeholder positions use the new param node.

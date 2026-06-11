@@ -7,8 +7,9 @@
 
 namespace mdl {
 	struct CompilationUnit;
+	class ArgVals;
 
-	void compileToFile(const CompilationUnit& unit, const std::filesystem::path& output);
+	void compileToFile(const CompilationUnit& unit, const std::filesystem::path& output, const ArgVals& argvals);
 
 	/**
 	 * @brief Returns the mangled symbol name for a module member function.
