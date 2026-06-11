@@ -187,12 +187,18 @@ static tvm::te::Tensor translate(Arguments& args, Cache&, const mdl::ConstNode& 
 					[&](int v) -> tvm::te::Tensor {
 						auto tvmtype = toUnderlyingTVMType(node.datatype());
 						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::IntImm(tvm::DataType::Int(32), v));
-						return tvm::te::compute({1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
+						return tvm::te::compute(
+							{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; },
+							mdl::backend::tvm::elemName("c")
+						);
 					},
 					[&](double v) -> tvm::te::Tensor {
 						auto tvmtype = toUnderlyingTVMType(node.datatype());
 						tvm::PrimExpr e = tvm::cast(tvmtype, tvm::FloatImm(tvm::DataType::Float(64), v));
-						return tvm::te::compute({1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "const");
+						return tvm::te::compute(
+							{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; },
+							mdl::backend::tvm::elemName("c")
+						);
 					},
 					[&](const std::vector<int>& v) -> tvm::te::Tensor {
 						int n = static_cast<int>(v.size());
@@ -210,7 +216,7 @@ static tvm::te::Tensor translate(Arguments& args, Cache&, const mdl::ConstNode& 
 										);
 									return result;
 								},
-								"const_vec"
+								mdl::backend::tvm::elemName("cv")
 						);
 					},
 			},
@@ -238,7 +244,10 @@ static tvm::te::Tensor translate(Arguments& args, Cache&, const mdl::ParameterNo
 static tvm::te::Tensor translate(Arguments& args, Cache&, const mdl::HyperparameterNode& node, const mdl::ArgVals& argVals) {
 	if (auto val = argVals.lookup(node.name)) {
 		tvm::PrimExpr e = tvm::IntImm(tvm::DataType::Int(32), *val);
-		return tvm::te::compute({1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; }, "hyperparam");
+		return tvm::te::compute(
+			{1}, [e](tvm::ffi::Array<tvm::tir::Var>) { return e; },
+			mdl::backend::tvm::elemName("hp")
+		);
 	}
 	auto logger = mdl::log::getLogger("compiler");
 	logger->error("No value for hyperparameter '{}' in argvals; all hyperparameter values must be known at compile time", node.name);
@@ -254,6 +263,10 @@ static tvm::te::Tensor translate(Arguments& args, Cache& cache, const mdl::Node&
 }
 
 static ::tvm::BaseFunc translateFunc(const mdl::FunctionDecl& func, const mdl::ArgVals& argVals) {
+	// Reset block-name counter so every te::compute in this function gets a unique name.
+	// Unique names are required for computeInlineElemwise to call GetBlock unambiguously.
+	mdl::backend::tvm::resetBlockNames();
+
 	std::string arguments;
 	auto r = func.parameters | std::views::transform([](const auto& pair) {
 				 return std::to_string(mdl::getDataType(pair.second.get())) + ": " + pair.first;
@@ -284,9 +297,16 @@ static ::tvm::BaseFunc translateFunc(const mdl::FunctionDecl& func, const mdl::A
 
 	// https://github.com/apache/tvm/blob/c8515e1ddfaf4d1afff916c484e68e1513631dd6/python/tvm/tir/build.py#L97C57-L99
 	// set tvm::attr::kCallingConv to CallingConv::kDeviceKernelLaunch
-	return tvm::WithAttrs(
-			tvm::tir::CreatePrimFunc(args, {}), {{tvm::attr::kGlobalSymbol, tvm::ffi::String{func.name}}}
-	);
+	auto pf = ::tvm::tir::CreatePrimFunc(args, {});
+
+	// Fuse all pure-elementwise chains (GELU, residuals, layer-norm scale/shift, …)
+	// into single loops via compute_inline, eliminating intermediate buffer allocations.
+	// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule.compute_inline
+	auto [inlinedPf, nInlined, nDup, nFail] = computeInlineElemwise(pf, func.name);
+	pf = inlinedPf;
+	logger->info("  compute_inline: {} fused, {} dup skipped, {} failed", nInlined, nDup, nFail);
+
+	return tvm::WithAttrs(pf, {{tvm::attr::kGlobalSymbol, tvm::ffi::String{func.name}}});
 }
 
 void mdl::backends::tvm::compileToFile(

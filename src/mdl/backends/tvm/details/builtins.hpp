@@ -27,6 +27,16 @@ namespace mdl::backend::tvm {
 	 */
 	using TranslateFunc = std::function<::tvm::te::Tensor(std::vector<std::any>)>;
 
+	// Per-function counter that gives every te::compute block a unique name.
+	// Unique names are required so tir::Schedule::GetBlock can retrieve any block
+	// unambiguously and ComputeInline can fuse chains (e.g. GELU's 5 ops → 1 loop).
+	// Reset once at the start of each translateFunc call.
+	inline thread_local int gBlockNameCtr = 0;
+	inline std::string elemName(const char* op) {
+		return "e_" + std::string(op) + "_" + std::to_string(gBlockNameCtr++);
+	}
+	inline void resetBlockNames() { gBlockNameCtr = 0; }
+
 	/** Type-checked cast helper — mismatched type is an internal compiler error. **/
 	template <typename T>
 	inline const T& tvmArg(const std::any& a) {
@@ -39,7 +49,7 @@ namespace mdl::backend::tvm {
 	inline ::tvm::te::Tensor toFloat(const ::tvm::te::Tensor& t) {
 		if (t->dtype.is_float())
 			return t;
-		return ::tvm::topi::cast(t, ::tvm::DataType::Float(32));
+		return ::tvm::topi::cast(t, ::tvm::DataType::Float(32), elemName("cast"));
 	}
 
 	/** Extract the body PrimExpr from a single-element compute tensor.
@@ -113,11 +123,15 @@ namespace mdl::backend::tvm {
 			/** Tensor Operators **/
 			/*[TENSOR_ADD] =*/
 			[](auto ts) {
-				return ::tvm::topi::add(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::add(
+					tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]), elemName("add")
+				);
 			},
 			/*[TENSOR_SUB] =*/
 			[](auto ts) {
-				return ::tvm::topi::subtract(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::subtract(
+					tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]), elemName("sub")
+				);
 			},
 			/*[TENSOR_DOT] =*/
 			[](auto ts) -> ::tvm::te::Tensor {
@@ -144,11 +158,15 @@ namespace mdl::backend::tvm {
 			},
 			/*[TENSOR_PROD]=*/
 			[](auto ts) {
-				return ::tvm::topi::multiply(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::multiply(
+					tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]), elemName("mul")
+				);
 			},
 			/*[TENSOR_DIV] =*/
 			[](auto ts) {
-				return ::tvm::topi::divide(tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]));
+				return ::tvm::topi::divide(
+					tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]), elemName("div")
+				);
 			},
 			/** Statistic Functions **/
 			/*[MAX] =*/
@@ -210,13 +228,13 @@ namespace mdl::backend::tvm {
 				return ::tvm::topi::sum(t, axes, /*keepdims=*/true);
 			},
 			/** Arithmetic Functions **/
-			/*[COS] =*/[](auto ts) { return ::tvm::topi::cos(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[SIN] =*/[](auto ts) { return ::tvm::topi::sin(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[TAN] =*/[](auto ts) { return ::tvm::topi::tan(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[EXP] =*/[](auto ts) { return ::tvm::topi::exp(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[ERF] =*/[](auto ts) { return ::tvm::topi::erf(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[SQRT] =*/[](auto ts) { return ::tvm::topi::sqrt(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
-			/*[RSQRT] =*/[](auto ts) { return ::tvm::topi::rsqrt(toFloat(tvmArg<::tvm::te::Tensor>(ts[0]))); },
+			/*[COS] =*/[](auto ts) { return ::tvm::topi::cos(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("cos")); },
+			/*[SIN] =*/[](auto ts) { return ::tvm::topi::sin(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("sin")); },
+			/*[TAN] =*/[](auto ts) { return ::tvm::topi::tan(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("tan")); },
+			/*[EXP] =*/[](auto ts) { return ::tvm::topi::exp(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("exp")); },
+			/*[ERF] =*/[](auto ts) { return ::tvm::topi::erf(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("erf")); },
+			/*[SQRT] =*/[](auto ts) { return ::tvm::topi::sqrt(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("sqrt")); },
+			/*[RSQRT] =*/[](auto ts) { return ::tvm::topi::rsqrt(toFloat(tvmArg<::tvm::te::Tensor>(ts[0])), elemName("rsqrt")); },
 			/*[VAR] =*/
 			[](auto ts) -> ::tvm::te::Tensor {
 				// var(x) ≈ E[x²] - E[x]²  (population variance, dof correction ignored)
@@ -254,7 +272,9 @@ namespace mdl::backend::tvm {
 							auto x = t(fi);
 							return ::tvm::sum(x * x / ::tvm::cast(dtype, lastDim), {k2});
 						}, "var_mean_sq");
-				return ::tvm::topi::subtract(meanSqT, ::tvm::topi::multiply(meanT, meanT));
+				return ::tvm::topi::subtract(
+					meanSqT, ::tvm::topi::multiply(meanT, meanT, elemName("mul")), elemName("sub")
+				);
 			},
 			/** Einops **/
 			/*[RESHAPE] =*/
@@ -304,7 +324,7 @@ namespace mdl::backend::tvm {
 				}
 
 				::tvm::ffi::Array<::tvm::PrimExpr> shape(dims.begin(), dims.end());
-				return ::tvm::topi::reshape(tensor, shape);
+				return ::tvm::topi::reshape(tensor, shape, elemName("reshape"));
 			},
 			/*[PERMUTE] =*/
 			[](auto ts) -> ::tvm::te::Tensor {
@@ -342,7 +362,7 @@ namespace mdl::backend::tvm {
 				}
 				if (!valid)
 					return tensor;
-				return ::tvm::topi::transpose(tensor, axes);
+				return ::tvm::topi::transpose(tensor, axes, elemName("perm"));
 			},
 			/*[EXPAND] =*/
 			[](auto ts) -> ::tvm::te::Tensor {
@@ -360,7 +380,7 @@ namespace mdl::backend::tvm {
 					}
 					shape.push_back(dim);
 				}
-				return ::tvm::topi::broadcast_to(tensor, shape);
+				return ::tvm::topi::broadcast_to(tensor, shape, elemName("bcast"));
 			},
 	};
 

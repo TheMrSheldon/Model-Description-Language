@@ -1,8 +1,11 @@
 #ifndef MDL_BACKENDS_TVM_UTILS_HPP
 #define MDL_BACKENDS_TVM_UTILS_HPP
 
+#include <tvm/tir/schedule/schedule.h>
+#include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/tir/var.h>
 
 namespace {
 
@@ -32,6 +35,83 @@ struct OuterParallelMutator : ::tvm::tir::StmtMutator {
 };
 
 } // namespace
+
+// Collects name_hint and iter_var info for every Block in a PrimFunc body.
+// Used to identify pure-elementwise blocks that are candidates for ComputeInline.
+namespace {
+struct ElemwiseBlockCollector : ::tvm::tir::StmtVisitor {
+	// name → number of times it appears as a pure-elementwise (non-reduction) block
+	std::map<std::string, int> counts;
+
+	void VisitStmt_(const ::tvm::tir::BlockNode* op) final {
+		if (!op->name_hint.empty()) {
+			bool isReduction = false;
+			for (const auto& iv : op->iter_vars) {
+				if (iv->iter_type == ::tvm::tir::kCommReduce) {
+					isReduction = true;
+					break;
+				}
+			}
+			if (!isReduction)
+				counts[std::string(op->name_hint)]++;
+		}
+		StmtVisitor::VisitStmt_(op);
+	}
+};
+} // namespace
+
+// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule.compute_inline
+// Equivalent to iterating sch.compute_inline(block) over all pure-elementwise
+// intermediate blocks in Python:  sch.compute_inline(sch.get_block("name"))
+//
+// Fuses elementwise chains (e.g. GELU's 5 ops → 1 loop) so that
+// intermediate buffers are never materialised and vectorisation covers the full
+// expression.  Only uniquely-named blocks are inlined; duplicates would make
+// GetBlock throw.  Failures (output block, ExternOp consumers) are silently skipped.
+//
+// Each attempt uses a fresh Schedule so a failure (e.g. the output block, which
+// TVM refuses to inline) does not corrupt state for subsequent attempts.
+// Successful inlines are accumulated on a running `current` PrimFunc.
+//
+// Returns {modified PrimFunc, nInlined, nDupName, nFailed}.
+inline std::tuple<::tvm::tir::PrimFunc, int, int, int> computeInlineElemwise(
+	::tvm::tir::PrimFunc pf, const std::string& funcName)
+{
+	ElemwiseBlockCollector collector;
+	collector(pf->body); // StmtVisitor public interface is operator()
+
+	int nInlined = 0, nDup = 0, nFail = 0;
+	::tvm::tir::PrimFunc current = pf;
+
+	for (const auto& [name, cnt] : collector.counts) {
+		if (cnt != 1) { ++nDup; continue; }
+		try {
+			// Fresh schedule each attempt: a failed ComputeInline (e.g. on the output
+			// block) corrupts the Schedule's internal state, so we never reuse it.
+			::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::BaseFunc> tmp;
+			tmp.Set(::tvm::GlobalVar{funcName}, current);
+			// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule
+			auto sch = ::tvm::tir::Schedule::Concrete(
+				::tvm::IRModule{tmp}, /*seed=*/0, /*debug_mask=*/0,
+				::tvm::tir::ScheduleErrorRenderLevel::kNone
+			);
+			// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule.work_on
+			sch->WorkOn(::tvm::ffi::String(funcName));
+			// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule.get_block
+			// https://tvm.apache.org/docs/reference/api/python/tir.html#tvm.tir.Schedule.compute_inline
+			sch->ComputeInline(sch->GetBlock(::tvm::ffi::String(name)));
+			// Use name-based Lookup: GlobalVar identity (pointer) differs from the key
+			// used during Set, so Lookup(GlobalVar{name}) would not find the entry.
+			current = ::tvm::Downcast<::tvm::tir::PrimFunc>(
+				sch->mod()->Lookup(::tvm::ffi::String(funcName))
+			);
+			++nInlined;
+		} catch (...) {
+			++nFail;
+		}
+	}
+	return {current, nInlined, nDup, nFail};
+}
 
 inline ::tvm::transform::Pass ParallelizeOuterLoops(int threshold = 32) {
 	return ::tvm::tir::transform::CreatePrimFuncPass(
