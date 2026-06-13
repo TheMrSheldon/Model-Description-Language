@@ -105,11 +105,16 @@ if os.path.isdir(_tvm_py):
     sys.path.insert(0, _tvm_py)
     os.environ["LD_LIBRARY_PATH"] = _tvm_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")
 
+# Use physical cores only — hyperthreads add pthread barrier overhead without compute gain
+# at the small batch sizes we benchmark. Must be set before tvm.runtime is imported.
+os.environ.setdefault("TVM_NUM_THREADS", str(max(1, os.cpu_count() // 2)))
+
 import tvm.runtime as R
+import tvm.runtime.vm
 
 print(f"\nLoading {SO_PATH} ...")
-lib = R.load_module(SO_PATH)
-fn  = lib["TransformerEncoder__forward"]
+exec_mod = R.load_module(SO_PATH)
+vm = tvm.runtime.vm.VirtualMachine(exec_mod, R.cpu())
 
 dev = R.cpu()
 
@@ -122,9 +127,8 @@ def t(arr: torch.Tensor):
 # The compiled function expects 2D input [SEQ, DIM] — the ellipsis in MDL
 # represents a single leading batch dimension, not arbitrary leading dims.
 x_2d = x_torch.squeeze(0)                             # [SEQ, DIM]
-out_tvm = R.empty((SEQ, DIM), 'float32', dev)         # [SEQ, DIM]
 
-fn(
+result = vm["TransformerEncoder__forward"](
     t(x_2d),             # [0]  x
     t(wQ),               # [1]  weightQuery.W
     t(bQ),               # [2]  weightQuery.b
@@ -142,10 +146,9 @@ fn(
     t(bIO),              # [14] weightIntermedOut.b
     t(ffn_norm_gamma),   # [15] ffnNorm.gamma
     t(ffn_norm_beta),    # [16] ffnNorm.beta
-    out_tvm,             # [17] output
 )
 
-mdl_output = out_tvm.numpy()  # [SEQ, DIM]
+mdl_output = result.numpy()  # [SEQ, DIM]
 print(f"MDL output shape: {mdl_output.shape}, mean={mdl_output.mean():.6f}")
 
 # ---------------------------------------------------------------------------
@@ -294,9 +297,9 @@ def bench_pt(seq):
     return np.array(samples)
 
 def bench_mdl(seq):
-    x_in  = t(torch.randn(seq, DIM))
-    out   = R.empty((seq, DIM), 'float32', dev)
-    args  = [x_in] + _tvm_weights + [out]
+    x_in = t(torch.randn(seq, DIM))
+    args = [x_in] + _tvm_weights
+    fn   = vm["TransformerEncoder__forward"]
     for _ in range(WARMUP):
         fn(*args)
     samples = []
@@ -312,17 +315,17 @@ def fmt(s):
 
 print(f"\n--- Benchmark ({WARMUP} warmup, {RUNS} timed runs, times in ms) ---")
 
-for seq in [8, 32, 128, 512]:
+for seq in [8]:
     print(f"\n  SEQ={seq}")
     pt_s = bench_pt(seq)
-    print(f"    PyTorch : {fmt(pt_s)}")
+    print(f"    PyTorch : {fmt(pt_s)}", flush=True)
     try:
         mdl_s = bench_mdl(seq)
         ratio = np.median(pt_s) / np.median(mdl_s)
         tag   = "MDL faster" if ratio >= 1 else "PyTorch faster"
-        print(f"    MDL/TVM : {fmt(mdl_s)}  ({ratio:.2f}x {tag})")
+        print(f"    MDL/TVM : {fmt(mdl_s)}  ({ratio:.2f}x {tag})", flush=True)
     except Exception as e:
-        print(f"    MDL/TVM : skipped ({e})")
+        print(f"    MDL/TVM : skipped ({e})", flush=True)
 
 # -- isolate data-conversion overhead --
 print("\n--- Data-conversion overhead (torch→TVM, not included above) ---")

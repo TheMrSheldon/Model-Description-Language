@@ -8,8 +8,6 @@
 #include <tvm/topi/elemwise.h>
 #include <tvm/topi/reduction.h>
 #include <tvm/topi/transform.h>
-#include <tvm/tir/buffer.h>
-#include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
 
@@ -77,47 +75,6 @@ namespace mdl::backend::tvm {
 		return static_cast<int>(imm->value);
 	}
 
-	// Wrap a TVM Buffer as a DLTensor argument for tvm_call_packed.
-	// Replicates what Python's tvm.tir.call_packed(fname, buf) generates:
-	// the dtype of the FloatImm constant encodes the element type (its value is unused).
-	inline ::tvm::PrimExpr bufAsArray(const ::tvm::tir::Buffer& buf) {
-		::tvm::ffi::Array<::tvm::PrimExpr> dims(buf->shape.begin(), buf->shape.end());
-		auto shape = ::tvm::tir::Call(
-			::tvm::DataType::Handle(), ::tvm::tir::builtin::tvm_stack_make_shape(), dims
-		);
-		return ::tvm::tir::Call(
-			::tvm::DataType::Handle(), ::tvm::tir::builtin::tvm_stack_make_array(),
-			{
-				buf->data,
-				shape,
-				::tvm::IntImm(::tvm::DataType::Int(32), 0),
-				::tvm::IntImm(::tvm::DataType::Int(32), (int)buf->shape.size()),
-				::tvm::FloatImm(buf->dtype, 0.0),
-				::tvm::IntImm(::tvm::DataType::Int(32), 0),
-			}
-		);
-	}
-
-	// Build a CBLAS ExternOp for a batch matmul of rank-3 tensors.
-	// Computes C[b,i,k] = sum_j A[b,i,j] * B[b,j,k] via tvm.contrib.cblas.batch_matmul.
-	inline ::tvm::te::Tensor cblasGemm(
-			const ::tvm::te::Tensor& A, const ::tvm::te::Tensor& B,
-			const ::tvm::ffi::Array<::tvm::PrimExpr>& outShape,
-			const std::string& fname, bool transa, bool transb)
-	{
-		auto bufA = ::tvm::tir::decl_buffer(A->shape, A->dtype, "cblas_A");
-		auto bufB = ::tvm::tir::decl_buffer(B->shape, B->dtype, "cblas_B");
-		auto bufC = ::tvm::tir::decl_buffer(outShape, A->dtype, "cblas_C");
-		auto body = ::tvm::tir::Evaluate(::tvm::tir::Call(
-			::tvm::DataType::Int(32), ::tvm::tir::builtin::tvm_call_packed(),
-			{
-				::tvm::tir::StringImm(fname),
-				bufAsArray(bufA), bufAsArray(bufB), bufAsArray(bufC),
-				::tvm::Bool(transa), ::tvm::Bool(transb),
-			}
-		));
-		return ::tvm::te::ExternOp(fname, "", {}, {A, B}, {bufA, bufB}, {bufC}, body).output(0);
-	}
 
 	std::array<TranslateFunc, std::to_underlying(mdl::builtins::FunctionIDs::COUNT)> functions{
 			/** Tensor Operators **/
@@ -133,6 +90,7 @@ namespace mdl::backend::tvm {
 					tvmArg<::tvm::te::Tensor>(ts[0]), tvmArg<::tvm::te::Tensor>(ts[1]), elemName("sub")
 				);
 			},
+			// https://tvm.apache.org/docs/reference/api/python/topi.html#tvm.topi.matmul
 			/*[TENSOR_DOT] =*/
 			[](auto ts) -> ::tvm::te::Tensor {
 				const auto& A = tvmArg<::tvm::te::Tensor>(ts[0]);
@@ -140,12 +98,9 @@ namespace mdl::backend::tvm {
 				int rA = static_cast<int>(A->shape.size());
 				int rB = static_cast<int>(B->shape.size());
 				if (rA == 2 && rB == 2)
-					return cblasGemm(A, B, {A->shape[0], B->shape[1]},
-						"tvm.contrib.cblas.matmul", false, false);
-				if (rA == 3 && rB == 3)
-					return cblasGemm(A, B, {A->shape[0], A->shape[1], B->shape[2]},
-						"tvm.contrib.cblas.batch_matmul", false, false);
-				// General: leading dims are shared batch dims; last two of A contract with last two of B.
+					return ::tvm::topi::matmul(A, B, false, false, elemName("gemm"));
+				// General (including batch): leading dims are shared batch dims;
+				// last two of A contract with last two of B.
 				// Build einsum string: batch letters + (i,j) for A's matrix dims, (j,k) for B's.
 				int nBatch = std::max(rA, rB) - 2;
 				std::string lhsSub, rhsSub, outSub;

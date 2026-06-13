@@ -27,6 +27,7 @@ struct CompileArgs {
 	std::optional<std::filesystem::path> argvals;
 	LoggerConf logConf;
 	std::vector<mdl::bindings::GeneratorFactory> bindingsGenerators;
+	mdl::CompileOptions compileOpts;
 };
 
 static void print(std::string_view name, const mdl::AggregateType& s) { std::cout << "Struct " << name << std::endl; }
@@ -102,7 +103,7 @@ static void runCompileCommand(const CompileArgs& args) {
 	}
 	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
-	mdl::compileToFile(program, output, argvals);
+	mdl::compileToFile(program, output, argvals, args.compileOpts);
 
 	for (const auto& factory : args.bindingsGenerators) {
 		auto generator = factory();
@@ -124,6 +125,11 @@ int main(int argc, char* argv[]) {
 	app.add_option(
 			"--generate-bindings", args.bindingsGenerators,
 			"If set, a binding file will be generated for the selected targets."
+	);
+	app.add_option(
+			"-O,--optimize", args.compileOpts.optimization,
+			"Optimization level. Use 'metaschedule' to enable MetaSchedule auto-tuning "
+			"(slow compile, near-optimal runtime)."
 	);
 	//->transform(CLI::CheckedTransformer(mdl::bindings::getGenerators()));
 	app.callback([&args]() { runCompileCommand(args); });

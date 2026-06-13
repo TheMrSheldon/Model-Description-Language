@@ -4,7 +4,10 @@
 #include "./backends/tvm/tvm.hpp"
 
 void mdl::compileToFile(
-		const mdl::CompilationUnit& unit, const std::filesystem::path& output, const mdl::ArgVals& argvals
+		const mdl::CompilationUnit& unit,
+		const std::filesystem::path& output,
+		const mdl::ArgVals& argvals,
+		const mdl::CompileOptions& opts
 ) {
-	mdl::backends::tvm::compileToFile(unit, output, argvals);
+	mdl::backends::tvm::compileToFile(unit, output, argvals, opts);
 }
