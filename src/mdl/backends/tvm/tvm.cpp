@@ -3,7 +3,6 @@
 #include "../../argvals.hpp"
 #include "../../logging.hpp"
 #include "./details/relax_builtins.hpp"
-#include "./details/utils.hpp"
 
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
@@ -13,11 +12,11 @@
 #include <mdl/parserv2/compilation_unit.hpp>
 #include <mdl/utils/utils.hpp>
 
-#include <tvm/node/serialization.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/var.h>
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/struct_info.h>
-#include <tvm/node/cast.h>
 
 #include <any>
 #include <cassert>
@@ -74,7 +73,7 @@ static ::tvm::PrimExpr nodeToPrimExpr(const mdl::Node& node, const mdl::ArgVals&
             [&argVals](const mdl::HyperparameterNode& hn) -> ::tvm::PrimExpr {
                 if (auto val = argVals.lookup(hn.name))
                     return ::tvm::IntImm(::tvm::DataType::Int(32), *val);
-                return ::tvm::tir::Var(hn.name.empty() ? "dim" : hn.name, ::tvm::DataType::Int(32));
+                return ::tvm::tirx::Var(hn.name.empty() ? "dim" : hn.name, ::tvm::DataType::Int(32));
             },
             [&argVals](const mdl::InvocationNode& in) -> ::tvm::PrimExpr {
                 if (in.arguments.size() == 2) {
@@ -88,9 +87,9 @@ static ::tvm::PrimExpr nodeToPrimExpr(const mdl::Node& node, const mdl::ArgVals&
                     default: break;
                     }
                 }
-                return ::tvm::tir::Var("dim", ::tvm::DataType::Int(32));
+                return ::tvm::tirx::Var("dim", ::tvm::DataType::Int(32));
             },
-            [](const auto&) -> ::tvm::PrimExpr { return ::tvm::tir::Var("dim", ::tvm::DataType::Int(32)); },
+            [](const auto&) -> ::tvm::PrimExpr { return ::tvm::tirx::Var("dim", ::tvm::DataType::Int(32)); },
         },
         node
     );
@@ -108,7 +107,7 @@ static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const md
                     auto expr = std::visit(
                         mdl::overloaded{
                             [](mdl::Elipsis) -> ::tvm::PrimExpr {
-                                return ::tvm::tir::Var(
+                                return ::tvm::tirx::Var(
                                     "B" + std::to_string(ellipsisDimCounter++),
                                     ::tvm::DataType::Int(64)
                                 );
@@ -214,7 +213,7 @@ static ::tvm::relax::Expr translateRelax(
         return ::tvm::relax::PrimValue(::tvm::IntImm(::tvm::DataType::Int(32), *val));
     // Symbolic hyperparameter
     return ::tvm::relax::PrimValue(
-        ::tvm::tir::Var(node.name.empty() ? "dim" : node.name, ::tvm::DataType::Int(32))
+        ::tvm::tirx::Var(node.name.empty() ? "dim" : node.name, ::tvm::DataType::Int(32))
     );
 }
 
@@ -446,7 +445,8 @@ void mdl::backends::tvm::compileToFile(
     // ── 3. Serialize IRModule to JSON ─────────────────────────────────────────
     std::string jsonPath = output.string() + ".irmod.json";
     {
-        std::string json = ::tvm::SaveJSON(irMod);
+        auto save_json = *::tvm::ffi::Function::GetGlobal("node.SaveJSON");
+        std::string json = save_json(irMod).cast<std::string>();
         std::ofstream f(jsonPath);
         f << json;
     }
@@ -465,7 +465,6 @@ output_path = sys.argv[2]
 target_str  = sys.argv[3] if len(sys.argv) > 3 else "llvm"
 opt_level   = sys.argv[4] if len(sys.argv) > 4 else "default"
 
-# Find TVM Python package in common build-tree locations
 _here = os.path.dirname(os.path.abspath(__file__))
 _candidates = [
     os.path.join(_here, "../out/build/conf-dev/_deps/tvm-src/python"),
@@ -473,12 +472,12 @@ _candidates = [
     os.environ.get("TVM_PYTHON_PATH", ""),
 ]
 _lib_candidates = [
+    "/workspaces/model-description-language/out/build/conf-dev/lib",
     "/workspaces/model-description-language/out/build/conf-dev/_deps/tvm-build",
 ]
 for c in _candidates:
     if c and os.path.isdir(c):
         sys.path.insert(0, c)
-        # Propagate to subprocess workers (e.g. MetaSchedule popen_worker)
         os.environ["PYTHONPATH"] = c + ":" + os.environ.get("PYTHONPATH", "")
         break
 for c in _lib_candidates:
@@ -493,13 +492,21 @@ import tvm.relax.transform as RT
 with open(json_path) as f:
     mod = tvm.ir.load_json(f.read())
 
-target = tvm.target.Target(target_str)
+# TVM 0.24.0 dropped the "llvm -mcpu=xxx" CLI string form; build a Target from a dict.
+def _parse_target(s):
+    import json
+    parts = s.split()
+    d = {"kind": parts[0]}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.lstrip("-").split("=", 1)
+            d[k] = v
+    return tvm.target.Target(json.dumps(d))
 
-# Step 1a: Bind all symbolic dimension variables to 8.
-# The whole IR has dynamic leading dims (B0..B7) for sequence length.
-# Binding them statically eliminates runtime shape computation, allows
-# StaticPlanBlockMemory to pre-plan all allocations, and unlocks vectorization
-# for loops that would otherwise have symbolic extents.
+target = _parse_target(target_str)
+
+# Bind symbolic batch/sequence dims to 8 so all shapes are static.
+# This unlocks StaticPlanBlockMemory and vectorization for symbolic-extent loops.
 sym_vars = {}
 for gv in mod.get_global_vars():
     fn = mod[gv]
@@ -509,118 +516,107 @@ for gv in mod.get_global_vars():
         si = p.struct_info
         if hasattr(si, 'shape') and si.shape is not None:
             for dim in si.shape.values:
-                if isinstance(dim, tvm.tir.Var) and dim.name not in sym_vars:
+                if isinstance(dim, tvm.tirx.Var) and dim.name not in sym_vars:
                     sym_vars[dim.name] = 8
 
 if sym_vars:
     print(f"[mdl] Binding symbolic vars to 8: {list(sym_vars.keys())}", flush=True)
     mod = RT.BindSymbolicVars(sym_vars)(mod)
 
-def default_pipeline(mod, target, target_str):
-    """Default pipeline: CBLAS for 2-D matmul + tile+vectorize rest, FuseOps, VM lowering."""
-    # CBLAS dispatch via tir.call_extern — generates a direct LLVM call that survives
-    # the full Relax+TIR lowering pipeline without requiring LowerTVMBuiltin.
-    # libopenblas (linked into libtvm.so) provides cblas_sgemm at runtime.
-    #
-    # Two cases:
-    #   (a) matmul(A, B) where B is already in the right orientation → NoTrans/NoTrans
-    #   (b) matmul(A, permute_dims(B_orig, [1,0])) → eliminate the explicit transpose
-    #       by calling cblas_sgemm with CblasTrans on B_orig directly.
-    _CblasRowMajor = 101
-    _CblasColMajor = 102
-    _CblasNoTrans  = 111
-    _CblasTrans    = 112
+# ── CBLAS matmul legalization ─────────────────────────────────────────────────
+# cblas_sgemm is linked into libtvm.so via OpenBLAS.  tir.call_extern emits a
+# direct LLVM call that survives the full lowering pipeline.
+#
+# Two variants:
+#   _cblas_matmul_te       — C = A @ B      (ColMajor swap trick)
+#   _cblas_matmul_transb_te — C = A @ B.T   (CblasTrans; eliminates explicit transpose copy)
+#
+# LegalizeOps lowers permute_dims before matmul in topological order, so when
+# _legalize_matmul_cblas runs, a weight transpose W.T() has already become a
+# call_tir(T_transpose, [W]).  We detect this via a shape-swap check and fuse
+# it directly into the BLAS call.
 
-    def _cblas_matmul_te(A, B):
-        """C = A[M,K] @ B[K,N] — row-major, no transpose (ColMajor swap trick)."""
-        M, K, N = A.shape[0], A.shape[1], B.shape[1]
-        return tvm.te.extern(
-            (M, N), [A, B],
-            lambda ins, outs: tvm.tir.Evaluate(tvm.tir.call_extern(
-                "int32", "cblas_sgemm",
-                _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
-                N, M, K,
-                tvm.tir.const(1.0, "float32"),
-                ins[1].access_ptr("r"), N,
-                ins[0].access_ptr("r"), K,
-                tvm.tir.const(0.0, "float32"),
-                outs[0].access_ptr("w"), N,
-            )),
-            name="C", dtype="float32",
-        )
+_CblasColMajor, _CblasRowMajor = 102, 101
+_CblasNoTrans,  _CblasTrans    = 111, 112
+_call_tir_op = tvm.ir.Op.get("relax.call_tir")
 
-    def _cblas_matmul_transb_te(A, B):
-        """C = A[M,K] @ B[N,K].T — avoids materialising the explicit transpose.
-        Uses CblasRowMajor with CblasTrans so BLAS handles the transposition internally."""
-        M, K, N = A.shape[0], A.shape[1], B.shape[0]
-        return tvm.te.extern(
-            (M, N), [A, B],
-            lambda ins, outs: tvm.tir.Evaluate(tvm.tir.call_extern(
-                "int32", "cblas_sgemm",
-                _CblasRowMajor, _CblasNoTrans, _CblasTrans,
-                M, N, K,
-                tvm.tir.const(1.0, "float32"),
-                ins[0].access_ptr("r"), K,   # A [M, K], lda = K
-                ins[1].access_ptr("r"), K,   # B [N, K], ldb = K (transposed by BLAS)
-                tvm.tir.const(0.0, "float32"),
-                outs[0].access_ptr("w"), N,
-            )),
-            name="C", dtype="float32",
-        )
+def _cblas_matmul_te(A, B):
+    """C = A[M,K] @ B[K,N]."""
+    M, K, N = A.shape[0], A.shape[1], B.shape[1]
+    return tvm.te.extern(
+        (M, N), [A, B],
+        lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "cblas_sgemm",
+            _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
+            N, M, K,
+            tvm.tirx.const(1.0, "float32"),
+            ins[1].access_ptr("r"), N,
+            ins[0].access_ptr("r"), K,
+            tvm.tirx.const(0.0, "float32"),
+            outs[0].access_ptr("w"), N,
+        )),
+        name="C", dtype="float32",
+    )
 
-    _call_tir_op = tvm.ir.Op.get("relax.call_tir")
+def _cblas_matmul_transb_te(A, B):
+    """C = A[M,K] @ B[N,K].T — BLAS handles the transpose internally."""
+    M, K, N = A.shape[0], A.shape[1], B.shape[0]
+    return tvm.te.extern(
+        (M, N), [A, B],
+        lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "cblas_sgemm",
+            _CblasRowMajor, _CblasNoTrans, _CblasTrans,
+            M, N, K,
+            tvm.tirx.const(1.0, "float32"),
+            ins[0].access_ptr("r"), K,
+            ins[1].access_ptr("r"), K,
+            tvm.tirx.const(0.0, "float32"),
+            outs[0].access_ptr("w"), N,
+        )),
+        name="C", dtype="float32",
+    )
 
-    def _is_2d_transpose(b_defn, B):
-        """Return the original (pre-transpose) tensor if b_defn is a call_tir to a
-        2-D transpose (output shape is the row/col-swap of input shape).  Else None."""
-        if not (isinstance(b_defn, tvm.relax.Call) and
-                isinstance(b_defn.op, tvm.ir.Op) and
-                b_defn.op == _call_tir_op):
-            return None
-        # call_tir(gv, Tuple([input, ...]), sinfo_args)
-        args_tuple = b_defn.args[1]
-        if not (isinstance(args_tuple, tvm.relax.Tuple) and len(args_tuple.fields) == 1):
-            return None
-        B_input = args_tuple.fields[0]
-        # Shape of the transpose input vs output (what matmul sees as B)
-        try:
-            in_shape = B_input.struct_info.shape.values
-            out_shape = B.struct_info.shape.values
-        except Exception:
-            return None
-        if (len(in_shape) == 2 and len(out_shape) == 2 and
-                int(in_shape[0]) == int(out_shape[1]) and
-                int(in_shape[1]) == int(out_shape[0])):
-            return B_input
+def _is_2d_transpose(b_defn, B):
+    """Return the pre-transpose input if b_defn is a call_tir 2-D transpose, else None."""
+    if not (isinstance(b_defn, tvm.relax.Call) and
+            isinstance(b_defn.op, tvm.ir.Op) and
+            b_defn.op == _call_tir_op):
         return None
+    args_tuple = b_defn.args[1]
+    if not (isinstance(args_tuple, tvm.relax.Tuple) and len(args_tuple.fields) == 1):
+        return None
+    B_input = args_tuple.fields[0]
+    try:
+        in_shape  = B_input.struct_info.shape.values
+        out_shape = B.struct_info.shape.values
+    except Exception:
+        return None
+    if (len(in_shape) == 2 and len(out_shape) == 2 and
+            int(in_shape[0]) == int(out_shape[1]) and
+            int(in_shape[1]) == int(out_shape[0])):
+        return B_input
+    return None
 
-    def _legalize_matmul_cblas(bb, call):
-        A, B = call.args
-        # LegalizeOps processes permute_dims before matmul, so by the time we see
-        # matmul(A, B), B already points to a call_tir(T_transpose, [W], sinfo).
-        # Detect this pattern by checking whether B's defining call_tir is a 2-D
-        # transpose (swapped shape), and if so use CblasTrans to avoid the copy.
-        if isinstance(B, tvm.relax.Var):
-            b_defn = bb.lookup_binding(B)
-            B_orig = _is_2d_transpose(b_defn, B)
-            if B_orig is not None:
-                return bb.call_te(_cblas_matmul_transb_te, A, B_orig)
-        return bb.call_te(_cblas_matmul_te, A, B)
+def _legalize_matmul_cblas(bb, call):
+    A, B = call.args
+    if isinstance(B, tvm.relax.Var):
+        B_orig = _is_2d_transpose(bb.lookup_binding(B), B)
+        if B_orig is not None:
+            return bb.call_te(_cblas_matmul_transb_te, A, B_orig)
+    return bb.call_te(_cblas_matmul_te, A, B)
 
-    with tvm.target.Target(target_str):
+
+def default_pipeline(mod):
+    with target:
         mod = tvm.transform.Sequential([
             RT.LegalizeOps({"relax.matmul": _legalize_matmul_cblas}),
-            RT.DeadCodeElimination(),  # remove now-unused permute_dims bindings
+            RT.DeadCodeElimination(),
         ])(mod)
-    print("[mdl] LegalizeOps done (CBLAS dispatch + transpose fusion)", flush=True)
+    print("[mdl] LegalizeOps done (CBLAS dispatch)", flush=True)
 
-    # Schedule individual TIR PrimFuncs for cache-friendly access.
-    # Reorder (i, j, k) → (i, j_outer, k, j_inner) with tile=16:
-    #  - j_inner is vectorizable (sequential B access, one cache line per step)
-    #  - C accumulator tile stays in SIMD registers across all k iterations
     def try_schedule_reduction_func(func):
         try:
-            sch = tvm.tir.Schedule(func)
+            sch = tvm.s_tir.Schedule(func)
             for bname in ["matmul", "C", "T_matmul_NN", "T_batch_matmul_NT",
                           "einsum", "T_einsum", "compute"]:
                 try:
@@ -640,13 +636,12 @@ def default_pipeline(mod, target, target_str):
                 last_s_idx = spatial[-1]
                 j_loop = loops[last_s_idx]
                 j_ext = sch.get(j_loop).extent
-                if isinstance(j_ext, tvm.tir.IntImm) and int(j_ext.value) % TILE_J == 0:
+                if isinstance(j_ext, tvm.tirx.IntImm) and int(j_ext.value) % TILE_J == 0:
                     jo, ji = sch.split(j_loop, factors=[None, TILE_J])
                     loops2 = sch.get_loops(block)
                     outer_s = [loops2[i] for i in spatial[:-1]]
                     new_red = [loops2[i + 1] for i in reduc]
-                    new_order = outer_s + [jo] + new_red + [ji]
-                    sch.reorder(*new_order)
+                    sch.reorder(*outer_s + [jo] + new_red + [ji])
                     try:
                         sch.vectorize(sch.get_loops(block)[-1])
                     except Exception:
@@ -657,7 +652,7 @@ def default_pipeline(mod, target, target_str):
                                  [loops[spatial[-1]]])
                     sch.reorder(*new_order)
                     inner = sch.get_loops(block)[-1]
-                    if isinstance(sch.get(inner).extent, tvm.tir.IntImm):
+                    if isinstance(sch.get(inner).extent, tvm.tirx.IntImm):
                         try:
                             sch.vectorize(inner)
                         except Exception:
@@ -670,7 +665,7 @@ def default_pipeline(mod, target, target_str):
     n_scheduled = 0
     for gv in list(mod.get_global_vars()):
         fn = mod[gv]
-        if not isinstance(fn, tvm.tir.PrimFunc):
+        if not isinstance(fn, tvm.tirx.PrimFunc):
             continue
         opt = try_schedule_reduction_func(fn)
         if opt is not fn:
@@ -678,9 +673,7 @@ def default_pipeline(mod, target, target_str):
             n_scheduled += 1
     print(f"[mdl] Scheduled {n_scheduled} PrimFuncs", flush=True)
 
-    # FuseOps+FuseTIR reduces VM dispatch overhead.
-    # Safe now that all shapes are static (no symbolic-sized intermediates).
-    with tvm.target.Target(target_str):
+    with target:
         mod = tvm.transform.Sequential([
             RT.AnnotateTIROpPattern(),
             RT.FoldConstant(),
@@ -689,8 +682,7 @@ def default_pipeline(mod, target, target_str):
         ])(mod)
     print("[mdl] FuseOps+FuseTIR done", flush=True)
 
-    # Standard Relax VM lowering
-    with tvm.target.Target(target_str):
+    with target:
         mod = tvm.transform.Sequential([
             RT.RewriteDataflowReshape(),
             RT.ToNonDataflow(),
@@ -706,167 +698,92 @@ def default_pipeline(mod, target, target_str):
         ])(mod)
     return mod
 
-def metaschedule_pipeline(mod, target, target_str):
-    """MetaSchedule pipeline: auto-tune all Relax operators, then compile."""
+
+def metaschedule_pipeline(mod):
     import tvm.meta_schedule as ms
     import multiprocessing
     work_dir = output_path + ".ms_workdir"
     os.makedirs(work_dir, exist_ok=True)
 
-    # MetaSchedule requires num-cores. -libs=cblas enables BLAS dispatch for matmul blocks,
-    # which the MultiLevelTilingWithIntrin schedule rule will pick up automatically — this
-    # keeps the pattern visible to the compiler (no opaque extern call) while letting the
-    # runtime link to OpenBLAS.
+    import json
     num_cores = multiprocessing.cpu_count()
-    ms_target_str = target_str + f" -num-cores {num_cores} -libs=cblas"
+    parts = target_str.split()
+    ms_dict = {"kind": parts[0], "num-cores": num_cores, "libs": ["cblas"]}
+    for p in parts[1:]:
+        if "=" in p:
+            k, v = p.lstrip("-").split("=", 1)
+            ms_dict[k] = v
+    ms_target_str = json.dumps(ms_dict)
     ms_target = tvm.target.Target(ms_target_str)
 
     print(f"[mdl] MetaSchedule tuning (work_dir={work_dir}, cores={num_cores})", flush=True)
-    print(f"[mdl] This may take several minutes...", flush=True)
 
-    # Enable TVM's built-in MetaSchedule progress logging
     import logging
     logging.getLogger("tvm.meta_schedule").setLevel(logging.INFO)
     logging.basicConfig(format="[mdl/ms] %(message)s", level=logging.INFO)
 
-    # tune_relax requires TIR PrimFuncs — must legalize first so it can extract tasks.
-    _CblasRowMajor = 101
-    _CblasColMajor = 102
-    _CblasNoTrans  = 111
-    _CblasTrans    = 112
-
-    def _cblas_matmul_te_ms(A, B):
-        M, K, N = A.shape[0], A.shape[1], B.shape[1]
-        return tvm.te.extern(
-            (M, N), [A, B],
-            lambda ins, outs: tvm.tir.Evaluate(tvm.tir.call_extern(
-                "int32", "cblas_sgemm",
-                _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
-                N, M, K,
-                tvm.tir.const(1.0, "float32"),
-                ins[1].access_ptr("r"), N,
-                ins[0].access_ptr("r"), K,
-                tvm.tir.const(0.0, "float32"),
-                outs[0].access_ptr("w"), N,
-            )),
-            name="C", dtype="float32",
-        )
-
-    def _cblas_matmul_transb_te_ms(A, B):
-        M, K, N = A.shape[0], A.shape[1], B.shape[0]
-        return tvm.te.extern(
-            (M, N), [A, B],
-            lambda ins, outs: tvm.tir.Evaluate(tvm.tir.call_extern(
-                "int32", "cblas_sgemm",
-                _CblasRowMajor, _CblasNoTrans, _CblasTrans,
-                M, N, K,
-                tvm.tir.const(1.0, "float32"),
-                ins[0].access_ptr("r"), K,
-                ins[1].access_ptr("r"), K,
-                tvm.tir.const(0.0, "float32"),
-                outs[0].access_ptr("w"), N,
-            )),
-            name="C", dtype="float32",
-        )
-
-    _call_tir_op_ms = tvm.ir.Op.get("relax.call_tir")
-
-    def _is_2d_transpose_ms(b_defn, B):
-        if not (isinstance(b_defn, tvm.relax.Call) and
-                isinstance(b_defn.op, tvm.ir.Op) and b_defn.op == _call_tir_op_ms):
-            return None
-        args_tuple = b_defn.args[1]
-        if not (isinstance(args_tuple, tvm.relax.Tuple) and len(args_tuple.fields) == 1):
-            return None
-        B_input = args_tuple.fields[0]
-        try:
-            in_s = B_input.struct_info.shape.values
-            out_s = B.struct_info.shape.values
-        except Exception:
-            return None
-        if (len(in_s) == 2 and len(out_s) == 2 and
-                int(in_s[0]) == int(out_s[1]) and int(in_s[1]) == int(out_s[0])):
-            return B_input
-        return None
-
-    def _legalize_matmul_cblas_ms(bb, call):
-        A, B = call.args
-        if isinstance(B, tvm.relax.Var):
-            b_defn = bb.lookup_binding(B)
-            B_orig = _is_2d_transpose_ms(b_defn, B)
-            if B_orig is not None:
-                return bb.call_te(_cblas_matmul_transb_te_ms, A, B_orig)
-        return bb.call_te(_cblas_matmul_te_ms, A, B)
-
-    with tvm.target.Target(ms_target_str):
+    with ms_target:
         mod_legalized = tvm.transform.Sequential([
-            RT.LegalizeOps({"relax.matmul": _legalize_matmul_cblas_ms}),
+            RT.LegalizeOps({"relax.matmul": _legalize_matmul_cblas}),
             RT.DeadCodeElimination(),
         ])(mod)
 
-    # Pick cost model: XGBoost is best but requires the package; fall back to random.
     try:
         import xgboost  # noqa: F401
         cost_model = "xgb"
     except ImportError:
         cost_model = "random"
-        print("[mdl] xgboost not found, using random cost model (install xgboost for better tuning)", flush=True)
+        print("[mdl] xgboost not found, using random cost model", flush=True)
 
-    # params={} because weights are loaded at runtime, not baked in at compile time.
-    # num_trials_per_iter=16 prints the task summary table (with GFLOPS + trial count)
-    # more often than the default 64 — useful for tracking progress.
-    max_trials_global = 512
     database = ms.relax_integration.tune_relax(
         mod=mod_legalized,
         params={},
         target=ms_target_str,
         work_dir=work_dir,
-        max_trials_global=max_trials_global,
+        max_trials_global=512,
         num_trials_per_iter=16,
         cost_model=cost_model,
     )
-
     print("[mdl] MetaSchedule tuning done, compiling...", flush=True)
 
-    # compile_relax applies the tuned schedules and lowers to VM bytecode
     mod = ms.relax_integration.compile_relax(database, mod_legalized, ms_target_str, params={})
-
     print("[mdl] MetaSchedule compile done", flush=True)
     return mod, ms_target
 
-# Dispatch based on optimization level
+
+def _bind_sym_vars(mod):
+    sym_vars = {}
+    for gv in mod.get_global_vars():
+        fn = mod[gv]
+        if not isinstance(fn, tvm.relax.Function):
+            continue
+        for p in fn.params:
+            si = p.struct_info
+            if hasattr(si, 'shape') and si.shape is not None:
+                for dim in si.shape.values:
+                    if isinstance(dim, tvm.tirx.Var) and dim.name not in sym_vars:
+                        sym_vars[dim.name] = 8
+    return RT.BindSymbolicVars(sym_vars)(mod) if sym_vars else mod
+
+
 if opt_level in ("metaschedule", "*"):
     try:
-        ex, ms_target = metaschedule_pipeline(mod, target, target_str)
+        ex, ms_target = metaschedule_pipeline(mod)
         ex.export_library(output_path)
         print(f"[mdl] Relax compiled (MetaSchedule) -> {output_path}", flush=True)
     except Exception as e:
         import traceback
         print(f"[mdl] MetaSchedule failed ({e}), falling back to default", flush=True)
         traceback.print_exc()
-        # Re-load the module since metaschedule_pipeline may have partially mutated it
         with open(json_path) as f:
             mod = tvm.ir.load_json(f.read())
-        # Re-bind
-        sym_vars2 = {}
-        for gv in mod.get_global_vars():
-            fn = mod[gv]
-            if not isinstance(fn, tvm.relax.Function):
-                continue
-            for p in fn.params:
-                si = p.struct_info
-                if hasattr(si, 'shape') and si.shape is not None:
-                    for dim in si.shape.values:
-                        if isinstance(dim, tvm.tir.Var) and dim.name not in sym_vars2:
-                            sym_vars2[dim.name] = 8
-        if sym_vars2:
-            mod = RT.BindSymbolicVars(sym_vars2)(mod)
-        mod = default_pipeline(mod, target, target_str)
+        mod = _bind_sym_vars(mod)
+        mod = default_pipeline(mod)
         ex = tvm.relax.build(mod, target=target, relax_pipeline=None)
         ex.export_library(output_path)
         print(f"[mdl] Relax compiled (fallback) -> {output_path}", flush=True)
 else:
-    mod = default_pipeline(mod, target, target_str)
+    mod = default_pipeline(mod)
     ex = tvm.relax.build(mod, target=target, relax_pipeline=None)
     ex.export_library(output_path)
     print(f"[mdl] Relax compiled -> {output_path}", flush=True)

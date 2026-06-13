@@ -100,7 +100,7 @@ if not os.path.exists(SO_PATH):
 # Set up TVM Python path from the in-tree TVM build
 _repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _tvm_py = os.path.join(_repo, "out/build/conf-dev/_deps/tvm-src/python")
-_tvm_lib = os.path.join(_repo, "out/build/conf-dev/_deps/tvm-build")
+_tvm_lib = os.path.join(_repo, "out/build/conf-dev/lib")
 if os.path.isdir(_tvm_py):
     sys.path.insert(0, _tvm_py)
     os.environ["LD_LIBRARY_PATH"] = _tvm_lib + ":" + os.environ.get("LD_LIBRARY_PATH", "")

@@ -100,18 +100,22 @@ else()
 endif()
 
 CPMAddPackage(
-	URI "gh:apache/tvm@0.22.0"
+	URI "gh:apache/tvm@0.24.0"
 	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS ${MDL_TVM_BLAS}"
 	EXCLUDE_FROM_ALL YES
 )
 if(BLAS_FOUND)
-	target_link_libraries(mdl PUBLIC tvm BLAS::BLAS)
+	target_link_libraries(mdl PUBLIC tvm_compiler BLAS::BLAS)
 else()
-	target_link_libraries(mdl PUBLIC tvm)
+	target_link_libraries(mdl PUBLIC tvm_compiler)
 endif()
 
-get_target_property(LIBA_INCLUDES tvm INCLUDE_DIRECTORIES)
-target_include_directories(mdl PUBLIC ${LIBA_INCLUDES}) # < I don't know why this is necessary
+# tvm_compiler uses directory-scoped include_directories internally,
+# which does not propagate to consumers — add both include roots explicitly.
+target_include_directories(mdl PUBLIC
+    ${tvm_SOURCE_DIR}/include
+    ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include
+)
 
 
 # NVRTC
