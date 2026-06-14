@@ -68,22 +68,27 @@ struct PatternEntry {
 #include "./patterns/softmax.hpp"
 #include "./patterns/gelu.hpp"
 #include "./patterns/layer_norm.hpp"
+#include "./patterns/attention.hpp"
 
 namespace mdl::backend::tvm {
 
 /**
  * @brief Return the default set of patterns applied to every compilation.
  *
- * Order matters: later patterns may rely on earlier ones having run.
- * For example, LayerNorm relies on softmax having already been replaced if the
- * two appear in the same function (they don't share a common sub-expression, so
- * in practice order does not matter for the current set).
+ * Order matters: softmax must run before attention so that the softmax
+ * decomposition inside SDPA is already replaced with relax.nn.softmax
+ * when the attention pattern tries to match it.
  */
 inline std::vector<PatternEntry> defaultPatterns() {
     return {
         patterns::makeSoftmax(),
         patterns::makeGelu(),
         patterns::makeLayerNorm(),
+        // Attention rewrite is done in Python (_rewrite_attention_python) because
+        // TVM's C++ RewriteCall always produces a new AST, making same_as() useless
+        // as a change detector, and compound expressions from the rewriter are not
+        // reliably inserted into ANF form.  Python dpl.rewrite_call handles this.
+        // patterns::makeAttention(),
     };
 }
 

@@ -24,6 +24,9 @@ namespace mdl::backend::tvm {
                 if (!new_fn.same_as(func)) {
                     mod->Update(gv, new_fn);
                     ++nRewrites;
+                    logger->info("[mdl] {} pattern: rewrote '{}'",
+                                 std::string(entry.name),
+                                 std::string(gv->name_hint));
                 }
             } catch (const std::exception& e) {
                 logger->warn("[mdl] {} pattern rewrite failed for '{}': {}",

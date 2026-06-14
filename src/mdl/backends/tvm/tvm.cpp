@@ -607,6 +607,50 @@ def _cblas_batmul_te(A, B):
         (batch, M, N), [A, B], body, name="C_batch", dtype="float32",
     )
 
+def _cblas_batmul_scaled_te(A, B, alpha_val=1.0):
+    """C[b,M,N] = alpha_val * A[b,M,K] @ B[b,K,N]  (same ColMajor swap as _cblas_batmul_te)."""
+    batch, M, K = A.shape[0], A.shape[1], A.shape[2]
+    N = B.shape[2]
+    stride_a = M * K
+    stride_b = K * N
+    stride_c = M * N
+    alpha = float(alpha_val)
+    def body(ins, outs):
+        return tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "cblas_sgemm_batch_strided",
+            _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
+            N, M, K,
+            tvm.tirx.const(alpha, "float32"),
+            ins[1].access_ptr("r"), N, stride_b,
+            ins[0].access_ptr("r"), K, stride_a,
+            tvm.tirx.const(0.0, "float32"),
+            outs[0].access_ptr("w"), N, stride_c,
+            batch,
+        ))
+    return tvm.te.extern(
+        (batch, M, N), [A, B], body, name="C_batch_scaled", dtype="float32",
+    )
+
+def _cblas_matmul_biased_te(A, B, bias, trans_b=False):
+    """C[M,N] = A[M,K] @ B + bias[N] via oneDNN fused matmul+bias.
+    B shape is [N,K] if trans_b else [K,N].
+    Uses mdl_dnnl_matmul_bias_f32: bias is fused into the matmul kernel,
+    avoiding the separate memcpy-bias-then-CBLAS-beta=1 approach.
+    """
+    M, K = A.shape[0], A.shape[1]
+    N = B.shape[0] if trans_b else B.shape[1]
+    trans_b_int = 1 if trans_b else 0
+    return tvm.te.extern(
+        (M, N), [A, B, bias],
+        lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "mdl_dnnl_matmul_bias_f32",
+            outs[0].access_ptr("w"),
+            ins[0].access_ptr("r"), ins[1].access_ptr("r"), ins[2].access_ptr("r"),
+            M, K, N, tvm.tirx.const(trans_b_int, "int32"),
+        )),
+        name="_cblas_matmul_biased", dtype="float32",
+    )
+
 def _is_2d_transpose(b_defn, B):
     """Return the pre-transpose input if b_defn is a call_tir 2-D transpose, else None."""
     if not (isinstance(b_defn, tvm.relax.Call) and
@@ -641,6 +685,103 @@ def _legalize_matmul_cblas(bb, call):
             return bb.call_te(_cblas_matmul_transb_te, A, B_orig)
     return bb.call_te(_cblas_matmul_te, A, B)
 
+def _legalize_divide_fold_batmul_scale(bb, call):
+    """Fold relax.divide(3D_batmul_call_tir, const_scalar) into CBLAS alpha.
+
+    After LegalizeOps processes relax.matmul → call_tir(C_batch...), the downstream
+    divide by the attention scale 1/sqrt(dk) can be folded into the alpha parameter
+    of cblas_sgemm_batch_strided, eliminating a separate kernel launch.
+    Non-matching cases fall back to the standard topi.divide legalization.
+    """
+    import tvm.topi as topi
+    dividend, divisor = call.args
+    if not isinstance(dividend, tvm.relax.Var):
+        return bb.call_te(topi.divide, dividend, divisor)
+    if not isinstance(divisor, tvm.relax.Constant):
+        return bb.call_te(topi.divide, dividend, divisor)
+    divisor_np = divisor.data.numpy()
+    if divisor_np.size != 1:
+        return bb.call_te(topi.divide, dividend, divisor)
+    scale_val = float(divisor_np.flat[0])
+    if scale_val == 0.0:
+        return bb.call_te(topi.divide, dividend, divisor)
+    binding = bb.lookup_binding(dividend)
+    if binding is None:
+        return bb.call_te(topi.divide, dividend, divisor)
+    if not (isinstance(binding, tvm.relax.Call) and
+            isinstance(binding.op, tvm.ir.Op) and
+            binding.op == _call_tir_op):
+        return bb.call_te(topi.divide, dividend, divisor)
+    gv = binding.args[0]
+    # TVM names TIR functions after the Python function passed to call_te
+    if not (hasattr(gv, 'name_hint') and gv.name_hint.startswith("_cblas_batmul_te")):
+        return bb.call_te(topi.divide, dividend, divisor)
+    args_tuple = binding.args[1]
+    if not (isinstance(args_tuple, tvm.relax.Tuple) and len(args_tuple.fields) == 2):
+        return bb.call_te(topi.divide, dividend, divisor)
+    A, B = args_tuple.fields
+    if not (A.struct_info.shape and len(A.struct_info.shape.values) == 3):
+        return bb.call_te(topi.divide, dividend, divisor)
+    alpha = 1.0 / scale_val
+    print(f"[mdl] folded attention scale (1/{scale_val:.4f}) into CBLAS alpha={alpha:.6f}", flush=True)
+    def _cblas_batmul_scaled_call(a, b, _alpha=alpha):
+        return _cblas_batmul_scaled_te(a, b, _alpha)
+    return bb.call_te(_cblas_batmul_scaled_call, A, B)
+
+def _legalize_add_fold_matmul_bias(bb, call):
+    """Fold relax.add(2D_matmul_call_tir, 1D_bias) into fused CBLAS bias call.
+
+    Detects add(call_tir(C/C_biased..., [A, B]), bias) where bias is rank-1 and
+    replaces it with a single mdl_sgemm_bias_f32 call that initialises output with
+    the bias and calls cblas_sgemm with beta=1.
+    Non-matching cases fall back to the standard topi.add legalization.
+    """
+    import tvm.topi as topi
+    lhs, rhs = call.args
+    # Identify which side is the 1-D bias
+    def is_1d(v):
+        return (hasattr(v, 'struct_info') and v.struct_info is not None and
+                v.struct_info.shape is not None and
+                len(v.struct_info.shape.values) == 1)
+    if is_1d(rhs):
+        matmul_var, bias = lhs, rhs
+    elif is_1d(lhs):
+        matmul_var, bias = rhs, lhs
+    else:
+        return bb.call_te(topi.add, lhs, rhs)
+    if not isinstance(matmul_var, tvm.relax.Var):
+        return bb.call_te(topi.add, lhs, rhs)
+    binding = bb.lookup_binding(matmul_var)
+    if not (isinstance(binding, tvm.relax.Call) and
+            isinstance(binding.op, tvm.ir.Op) and
+            binding.op == _call_tir_op):
+        return bb.call_te(topi.add, lhs, rhs)
+    gv = binding.args[0]
+    # TVM names TIR functions after the Python function passed to call_te
+    if not (hasattr(gv, 'name_hint') and gv.name_hint.startswith("_cblas_matmul")):
+        return bb.call_te(topi.add, lhs, rhs)
+    args_tuple = binding.args[1]
+    if not (isinstance(args_tuple, tvm.relax.Tuple) and len(args_tuple.fields) == 2):
+        return bb.call_te(topi.add, lhs, rhs)
+    A, B = args_tuple.fields
+    if not (A.struct_info.shape and len(A.struct_info.shape.values) == 2):
+        return bb.call_te(topi.add, lhs, rhs)
+    # Determine if B is transposed: B[N,K] (trans_b=True) or B[K,N] (trans_b=False)
+    if not (B.struct_info.shape and len(B.struct_info.shape.values) == 2):
+        return bb.call_te(topi.add, lhs, rhs)
+    K = int(A.struct_info.shape.values[1])
+    b0, b1 = int(B.struct_info.shape.values[0]), int(B.struct_info.shape.values[1])
+    if b1 == K:
+        trans_b = True
+    elif b0 == K:
+        trans_b = False
+    else:
+        return bb.call_te(topi.add, lhs, rhs)
+    print(f"[mdl] folded bias add into CBLAS matmul (trans_b={trans_b})", flush=True)
+    def _cblas_matmul_biased_call(a, b, c, _trans_b=trans_b):
+        return _cblas_matmul_biased_te(a, b, c, _trans_b)
+    return bb.call_te(_cblas_matmul_biased_call, A, B, bias)
+
 
 # ── oneDNN wrapper source ─────────────────────────────────────────────────────
 # This C++ source is written to a temp file and compiled into the model .so
@@ -649,11 +790,14 @@ def _legalize_matmul_cblas(bb, call):
 # once per unique shape, not every call.
 _DNNL_OPS_SRC = r"""
 #include <oneapi/dnnl/dnnl.hpp>
+#include <mkl_cblas.h>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 using namespace dnnl;
 
@@ -777,6 +921,132 @@ extern "C" int mdl_dnnl_layer_norm_f32(
     dnnl_strm().wait();
     return 0;
 }
+
+// ── matmul with fused bias (oneDNN) ──────────────────────────────────────────
+// C[M,N] = A[M,K] @ B + bias[N], where B is [N,K] if trans_b=1 else [K,N].
+//
+// Uses oneDNN matmul with bias as a first-class argument.  Compared to the old
+// approach (memcpy bias into C rows, then cblas_sgemm with beta=1), this reads
+// and writes C only once — no separate bias broadcast pass needed.
+//
+// For trans_b=1 (B stored row-major as [N,K]): describe weights with strides
+// {1, K} so that weights[k,n] = B_ptr[n*K+k] = B[n,k], i.e. a column-major
+// view of B, giving A @ B.T.
+
+struct MatmulBiasCache {
+    dnnl::matmul::primitive_desc pd;
+    dnnl::matmul prim;
+};
+static std::unordered_map<size_t, MatmulBiasCache> g_matbias_cache;
+static std::mutex g_matbias_mu;
+
+static MatmulBiasCache& get_matmul_bias(int64_t M, int64_t K, int64_t N, int trans_b) {
+    size_t key = (size_t)M * 0xdeadbeefULL
+               ^ (size_t)K * 0x9e3779b9ULL
+               ^ (size_t)N * 0x517cc1b7ULL
+               ^ (size_t)trans_b;
+    std::lock_guard<std::mutex> lk(g_matbias_mu);
+    auto it = g_matbias_cache.find(key);
+    if (it != g_matbias_cache.end()) return it->second;
+
+    auto f32 = memory::data_type::f32;
+    memory::desc src_md ({M, K}, f32, {K, 1});
+    memory::desc wgt_md = trans_b
+        ? memory::desc({K, N}, f32, {1, K})  // col-major view: wgt[k,n]=B[n,k]
+        : memory::desc({K, N}, f32, {N, 1});
+    memory::desc bias_md({1, N}, f32, {N, 1});
+    memory::desc dst_md ({M, N}, f32, {N, 1});
+
+    auto pd   = dnnl::matmul::primitive_desc(dnnl_eng(), src_md, wgt_md, bias_md, dst_md);
+    auto prim = dnnl::matmul(pd);
+    g_matbias_cache.emplace(key, MatmulBiasCache{std::move(pd), std::move(prim)});
+    return g_matbias_cache.at(key);
+}
+
+extern "C" int mdl_dnnl_matmul_bias_f32(
+    float* dst, const float* A, const float* B, const float* bias,
+    int64_t M, int64_t K, int64_t N, int trans_b)
+{
+    auto& c = get_matmul_bias(M, K, N, trans_b);
+    auto& e = dnnl_eng();
+    auto f32 = memory::data_type::f32;
+    memory::desc src_md ({M, K}, f32, {K, 1});
+    memory::desc wgt_md = trans_b
+        ? memory::desc({K, N}, f32, {1, K})
+        : memory::desc({K, N}, f32, {N, 1});
+    memory::desc bias_md({1, N}, f32, {N, 1});
+    memory::desc dst_md ({M, N}, f32, {N, 1});
+    memory src_m (src_md,  e, (void*)A);
+    memory wgt_m (wgt_md,  e, (void*)B);
+    memory bias_m(bias_md, e, (void*)bias);
+    memory dst_m (dst_md,  e, dst);
+    c.prim.execute(dnnl_strm(), {
+        {DNNL_ARG_SRC,     src_m},
+        {DNNL_ARG_WEIGHTS, wgt_m},
+        {DNNL_ARG_BIAS,    bias_m},
+        {DNNL_ARG_DST,     dst_m},
+    });
+    dnnl_strm().wait();
+    return 0;
+}
+
+// ── fused scaled dot-product attention (BSNH layout, batch SGEMM) ────────────
+// Inputs/output: [1, S, H, D] in BSNH row-major layout.
+//
+// Uses cblas_sgemm_batch (pointer-array variant) instead of cblas_sgemm_batch_strided.
+// The strided variant requires stride_a >= lda*K, which BSNH interleaved layout
+// cannot satisfy (stride=D but lda*K = H*D*D).  The pointer variant has no such
+// constraint — each A_Array[h] = Q + h*D with lda=H*D is legal because lda >= K.
+// MKL dispatches all H heads as a single batch, parallelising across cores.
+extern "C" int mdl_sdpa_bsnh_f32(
+    float* out,        // [1, S, H, D]  BSNH
+    const float* Q,    // [1, S, H, D]  BSNH
+    const float* K,    // [1, S, H, D]  BSNH
+    const float* V,    // [1, S, H, D]  BSNH
+    int64_t S, int64_t H, int64_t D)
+{
+    const float scale = 1.0f / std::sqrt((float)D);
+    std::vector<float> scores((size_t)(H * S * S));
+
+    // Build pointer arrays: A_arr[h] / B_arr[h] point directly into BSNH tensor.
+    std::vector<const float*> A_arr(H), B_arr(H);
+    std::vector<float*>       C_arr(H);
+    for (int64_t h = 0; h < H; ++h) {
+        A_arr[h] = Q + h * D;               // Q_h: row stride lda=H*D, K cols
+        B_arr[h] = K + h * D;               // K_h: same (TransB → treated as N×K)
+        C_arr[h] = scores.data() + h * S * S;
+    }
+
+    // Pass 1: scores[h][S,S] = Q_h[S,D] @ K_h.T[D,S] * scale  (one MKL batch call)
+    const CBLAS_TRANSPOSE tN = CblasNoTrans, tT = CblasTrans;
+    const MKL_INT iS = (MKL_INT)S, iD = (MKL_INT)D, iHD = (MKL_INT)(H * D);
+    const MKL_INT iH  = (MKL_INT)H;
+    const float   one = 1.0f, zero = 0.0f;
+    cblas_sgemm_batch(CblasRowMajor,
+        &tN, &tT, &iS, &iS, &iD, &scale,
+        A_arr.data(), &iHD,
+        B_arr.data(), &iHD,
+        &zero, C_arr.data(), &iS,
+        /*group_count=*/1, &iH);
+
+    // Softmax over all H*S score rows (one oneDNN call).
+    mdl_dnnl_softmax_f32(scores.data(), scores.data(), H * S, S);
+
+    // Pass 2: out_h[S,D] = scores[h][S,S] @ V_h[S,D], written to BSNH output.
+    for (int64_t h = 0; h < H; ++h) {
+        A_arr[h] = scores.data() + h * S * S;
+        B_arr[h] = V   + h * D;
+        C_arr[h] = out + h * D;
+    }
+    cblas_sgemm_batch(CblasRowMajor,
+        &tN, &tN, &iS, &iD, &iS, &one,
+        A_arr.data(), &iS,
+        B_arr.data(), &iHD,
+        &zero, C_arr.data(), &iHD,
+        /*group_count=*/1, &iH);
+
+    return 0;
+}
 """
 
 def _make_dnnl_fcompile(workspace_dir):
@@ -791,6 +1061,7 @@ def _make_dnnl_fcompile(workspace_dir):
     subprocess.check_call([
         "g++", "-O3", "-fPIC", "-std=c++17",
         "-I/usr/include", "-I/usr/local/include",
+        "-I/opt/intel/oneapi/mkl/latest/include",
         "-c", src_path, "-o", obj_path
     ])
     print("[mdl] oneDNN wrappers compiled", flush=True)
@@ -893,6 +1164,141 @@ def _legalize_layer_norm_dnnl(bb, call):
     return bb.call_te(_dnnl_layer_norm_te, x, scale, shift, axes, eps)
 
 
+def _rewrite_attention_python(mod):
+    """
+    Python DFPattern pass: replace the manual SDPA decomposition with
+    relax.nn.attention so that LegalizeOps can dispatch it to
+    _legalize_attention_sdpa_bsnh (CBLAS + oneDNN, no explicit transposes).
+
+    Matched pattern (after softmax rewrite has run):
+      q_heads = permute_dims(reshape(q_proj, [S, H, D]), [1,0,2])  -> [H,S,D]
+      k_heads = permute_dims(reshape(k_proj, [S, H, D]), [1,0,2])  -> [H,S,D]
+      v_heads = permute_dims(reshape(v_proj, [S, H, D]), [1,0,2])  -> [H,S,D]
+      k_T     = permute_dims(k_heads, [0,2,1])                      -> [H,D,S]
+      scores  = matmul(q_heads, k_T)                                -> [H,S,S]
+      scaled  = divide(scores, sqrt_scale)
+      attn    = relax.nn.softmax(scaled, axis=-1)
+      ctx     = matmul(attn, v_heads)                               -> [H,S,D]
+      ctx_p   = permute_dims(ctx, [1,0,2])                          -> [S,H,D]
+      out     = reshape(ctx_p, [S, H*D])   <- TOP-LEVEL MATCH
+
+    Replacement:
+      relax.nn.attention(
+          reshape(q_proj, [1, S_q, H, D_k]),   # BSNH
+          reshape(k_proj, [1, S_k, H, D_k]),
+          reshape(v_proj, [1, S_v, H, D_v]),
+      )  -> [1, S_q, H, D_v]
+      then reshape to [S_q, H*D_v]
+    """
+    import tvm.relax.dpl as dpl
+
+    q_proj = dpl.wildcard()
+    k_proj = dpl.wildcard()
+    v_proj = dpl.wildcard()
+
+    q_heads = dpl.is_op("relax.permute_dims")(dpl.is_op("relax.reshape")(q_proj, dpl.wildcard()))
+    k_heads = dpl.is_op("relax.permute_dims")(dpl.is_op("relax.reshape")(k_proj, dpl.wildcard()))
+    v_heads = dpl.is_op("relax.permute_dims")(dpl.is_op("relax.reshape")(v_proj, dpl.wildcard()))
+
+    k_T    = dpl.is_op("relax.permute_dims")(k_heads)
+    scores = dpl.is_op("relax.matmul")(q_heads, k_T)
+    scaled = dpl.is_op("relax.divide")(scores, dpl.wildcard())
+    attn   = dpl.is_op("relax.nn.softmax")(scaled)
+    ctx    = dpl.is_op("relax.matmul")(attn, v_heads)
+    ctx_p  = dpl.is_op("relax.permute_dims")(ctx)
+    pat    = dpl.is_op("relax.reshape")(ctx_p, dpl.wildcard())
+
+    def rewriter(expr, bindings):
+        # Extract matched tensors
+        q = bindings[q_proj]
+        k = bindings[k_proj]
+        v = bindings[v_proj]
+        # Extract shapes
+        q_si = q.struct_info
+        k_si = k.struct_info
+        v_si = v.struct_info
+        if q_si is None or k_si is None or v_si is None:
+            return expr
+        q_shape = q_si.shape.values if q_si.shape else None
+        k_shape = k_si.shape.values if k_si.shape else None
+        v_shape = v_si.shape.values if v_si.shape else None
+        if q_shape is None or k_shape is None or v_shape is None:
+            return expr
+        if len(q_shape) < 2 or len(k_shape) < 2 or len(v_shape) < 2:
+            return expr
+        S_q = q_shape[0]
+        S_k = k_shape[0]
+        S_v = v_shape[0]
+        H_D_q = q_shape[1]  # H * D_k
+
+        # Get H from k_heads shape [H, S_k, D_k]
+        kh = bindings[k_heads]
+        kh_shape = kh.struct_info.shape.values if kh.struct_info and kh.struct_info.shape else None
+        if kh_shape is None or len(kh_shape) != 3:
+            return expr
+        H   = kh_shape[0]
+        D_k = kh_shape[2]
+        # Derive D_v from v_heads shape [H, S_v, D_v]
+        vh = bindings[v_heads]
+        vh_shape = vh.struct_info.shape.values if vh.struct_info and vh.struct_info.shape else None
+        if vh_shape is None or len(vh_shape) != 3:
+            return expr
+        D_v = vh_shape[2]
+
+        # Reshape to BSNH [1, S, H, D] using each tensor's own symbolic seq-length
+        q_bsnh = tvm.relax.op.reshape(q, [1, S_q, H, D_k])
+        k_bsnh = tvm.relax.op.reshape(k, [1, S_k, H, D_k])
+        v_bsnh = tvm.relax.op.reshape(v, [1, S_v, H, D_v])
+
+        # relax.nn.attention (scale=None → TVM default 1/sqrt(D_k))
+        attn_bsnh = tvm.relax.op.nn.attention(q_bsnh, k_bsnh, v_bsnh)  # [1, S_q, H, D_v]
+
+        # Reshape output [1, S_q, H, D_v] → [S_q, H*D_v]
+        return tvm.relax.op.reshape(attn_bsnh, [S_q, H * D_v])
+
+    n_rewrites = 0
+    for gv in mod.get_global_vars():
+        fn = mod[gv]
+        if not isinstance(fn, tvm.relax.Function):
+            continue
+        new_fn = dpl.rewrite_call(pat, rewriter, fn)
+        if not new_fn.same_as(fn):
+            mod.update_func(gv, new_fn)
+            n_rewrites += 1
+    if n_rewrites:
+        print(f"[mdl] attention pattern: {n_rewrites} function(s) rewritten", flush=True)
+    return mod
+
+
+def _sdpa_bsnh_te(q_bsnh, k_bsnh, v_bsnh):
+    """Fused SDPA in BSNH layout via mdl_sdpa_bsnh_f32.
+
+    Inputs: [1, S, H, D] each.  Output: [1, S, H, D].
+    Uses CBLAS sgemm_batch_strided with non-unit lda to read heads directly
+    from the BSNH layout — no explicit head-transpose tensors needed.
+    """
+    S = q_bsnh.shape[1]
+    H = q_bsnh.shape[2]
+    D = q_bsnh.shape[3]
+    return tvm.te.extern(
+        q_bsnh.shape, [q_bsnh, k_bsnh, v_bsnh],
+        lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "mdl_sdpa_bsnh_f32",
+            outs[0].access_ptr("w"),
+            ins[0].access_ptr("r"),
+            ins[1].access_ptr("r"),
+            ins[2].access_ptr("r"),
+            S, H, D,
+        )),
+        dtype="float32", name="sdpa_bsnh",
+    )
+
+def _legalize_attention_sdpa_bsnh(bb, call):
+    """Legalize relax.nn.attention → mdl_sdpa_bsnh_f32 (CBLAS + oneDNN softmax)."""
+    q, k, v = call.args[0], call.args[1], call.args[2]
+    return bb.call_te(_sdpa_bsnh_te, q, k, v)
+
+
 def _fast_gelu_te(x):
     """GELU using fast_erf polynomial — fallback when oneDNN is not available."""
     import tvm.te as te
@@ -965,13 +1371,32 @@ def default_pipeline(mod):
     # Additionally, a Python DFPattern pass replaces the softmax decomposition
     # with relax.nn.softmax (the C++ pass may miss some forms; Python handles all).
     mod = _rewrite_softmax_python(mod)
+    mod = _rewrite_attention_python(mod)
+    # Normalize to ANF: the Python attention rewriter may return compound expressions
+    # (reshape(attention(reshape(q),...), [S,H*D])) which violates Relax's single-
+    # call-per-binding rule.  Normalize() flattens nested calls into separate
+    # DataflowVar bindings so LegalizeOps can legalize relax.nn.attention properly.
+    mod = tvm.relax.transform.Normalize()(mod)
+    # Remove dead SDPA bindings (Q_heads, K_T, scores, attn, ctx, etc.) that
+    # the attention pattern left behind.  Eliminating them BEFORE LegalizeOps
+    # avoids legalizing-then-DCE-ing dead CBLAS / oneDNN kernels, which would
+    # waste compile time and leave ghost kernels in the runtime profile.
+    with target:
+        mod = RT.DeadCodeElimination()(mod)
+    # FoldConstant before LegalizeOps so sqrt(const(64)) → const(8), enabling
+    # _legalize_divide_fold_batmul_scale to recognise the attention scale as a Constant.
+    with target:
+        mod = RT.FoldConstant()(mod)
     with target:
         mod = tvm.transform.Sequential([
             RT.LegalizeOps({
                 "relax.matmul":         _legalize_matmul_cblas,
+                "relax.divide":         _legalize_divide_fold_batmul_scale,
+                "relax.add":            _legalize_add_fold_matmul_bias,
                 "relax.nn.softmax":     _legalize_softmax_dnnl,
                 "relax.nn.gelu":        _legalize_gelu_dnnl,
                 "relax.nn.layer_norm":  _legalize_layer_norm_dnnl,
+                "relax.nn.attention":   _legalize_attention_sdpa_bsnh,
             }),
             RT.DeadCodeElimination(),
         ])(mod)
