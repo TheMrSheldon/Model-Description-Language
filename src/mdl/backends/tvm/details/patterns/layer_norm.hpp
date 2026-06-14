@@ -38,7 +38,8 @@ inline PatternEntry makeLayerNorm() {
     auto beta  = Wildcard();
 
     // mean(x) = sum(x) / N  then reshape to keepdims shape
-    auto sum_x     = IsOp("relax.sum")(x, Wildcard(), Wildcard());
+    // axis/keepdims are *attrs* not positional args — 1 arg only.
+    auto sum_x     = IsOp("relax.sum")(x);
     auto mean_x    = IsOp("relax.divide")(sum_x, Wildcard());
     auto mean_x_r  = IsOp("relax.reshape")(mean_x, Wildcard());
 
@@ -47,7 +48,7 @@ inline PatternEntry makeLayerNorm() {
 
     // variance: sum(x_c²) / N  then reshape to keepdims shape
     auto xc_sq      = IsOp("relax.multiply")(x_c, x_c);
-    auto sum_xcsq   = IsOp("relax.sum")(xc_sq, Wildcard(), Wildcard());
+    auto sum_xcsq   = IsOp("relax.sum")(xc_sq);
     auto mean_xcsq  = IsOp("relax.divide")(sum_xcsq, Wildcard());
     auto mean_xcsq_r = IsOp("relax.reshape")(mean_xcsq, Wildcard());
 
@@ -61,12 +62,12 @@ inline PatternEntry makeLayerNorm() {
     DFPattern pat = IsOp("relax.add")(scaled, beta);
 
     RewriterFn rewriter = [x, gamma, beta](Expr call, ::tvm::ffi::Map<DFPattern, Expr> m) -> Expr {
-        // axes=[-1], epsilon=1e-12 — matches BERT and most transformer LayerNorms.
+        // axes=[-1], epsilon=1e-12, center=true, scale=true
         ::tvm::ffi::Array<::tvm::Integer> axes{::tvm::Integer(-1)};
         double eps = 1e-12;
         return callRelaxOp("relax.op.nn.layer_norm",
                            m.at(x), m.at(gamma), m.at(beta),
-                           axes, eps);
+                           axes, eps, true, true);
     };
 
     return {"layer_norm", pat, std::move(rewriter)};

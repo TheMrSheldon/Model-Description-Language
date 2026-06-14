@@ -28,8 +28,9 @@ inline PatternEntry makeSoftmax() {
     // x — the input tensor (any shape/rank)
     auto x = Wildcard();
 
-    // max(x, axis=-1, keepdims=True)  — wildcard axis/keepdims args
-    auto max_x  = IsOp("relax.max")(x, Wildcard(), Wildcard());
+    // max(x, axis=-1, keepdims=True)
+    // axis/keepdims are *attrs*, not positional args — match with 1 arg only.
+    auto max_x  = IsOp("relax.max")(x);
 
     // x - max(x)  [numerically stabilised shift]
     auto shifted = IsOp("relax.subtract")(x, max_x);
@@ -37,8 +38,8 @@ inline PatternEntry makeSoftmax() {
     // exp(x - max(x))
     auto exp_val = IsOp("relax.exp")(shifted);
 
-    // sum(exp_val, axis=-1, keepdims=True)
-    auto sum_exp = IsOp("relax.sum")(exp_val, Wildcard(), Wildcard());
+    // sum(exp_val, axis=-1, keepdims=True) — 1 positional arg
+    auto sum_exp = IsOp("relax.sum")(exp_val);
 
     // exp_val / sum_exp
     DFPattern pat = IsOp("relax.divide")(exp_val, sum_exp);

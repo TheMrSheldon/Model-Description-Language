@@ -337,3 +337,63 @@ for _ in range(RUNS):
     arr.copyfrom(_x_np)
     _conv_samples.append((time.perf_counter() - t0) * 1e3)
 print(f"  1 tensor [8,768] copy: med={np.median(_conv_samples):.3f} ms")
+
+# ---------------------------------------------------------------------------
+# 7. Per-kernel profiling at SEQ=512
+# ---------------------------------------------------------------------------
+print("\n--- Per-kernel profiling (SEQ=512, 50 runs each) ---")
+
+PROF_SEQ = 512
+x_prof = t(torch.randn(PROF_SEQ, DIM))
+args_prof = [x_prof] + _tvm_weights
+
+# Warm up
+fn = vm["TransformerEncoder__forward"]
+for _ in range(20):
+    fn(*args_prof)
+
+# Instrument: record wall-clock time per kernel call
+import collections
+kernel_times = collections.defaultdict(list)
+_t_before = {}
+
+def _instrument(func, func_symbol, before_run, ret_value, *args):
+    if before_run:
+        _t_before[func_symbol] = time.perf_counter()
+    else:
+        elapsed = (time.perf_counter() - _t_before.get(func_symbol, time.perf_counter())) * 1e6
+        kernel_times[func_symbol].append(elapsed)
+    return None  # continue normally
+
+vm.set_instrument(_instrument)
+
+PROF_RUNS = 50
+for _ in range(PROF_RUNS):
+    fn(*args_prof)
+
+vm.set_instrument(None)  # remove instrument
+
+# Aggregate
+print(f"\n  {'Kernel':<55} {'calls':>5}  {'med µs':>8}  {'sum ms':>8}")
+print(f"  {'-'*55}  {'-'*5}  {'-'*8}  {'-'*8}")
+total_accounted = 0.0
+rows = []
+for sym, times_list in kernel_times.items():
+    per_call = np.array(times_list).reshape(PROF_RUNS, -1).mean(axis=0)  # avg over runs
+    med = float(np.median(per_call))
+    calls_per_run = len(per_call)
+    total = med * calls_per_run / 1e3  # ms
+    total_accounted += total
+    rows.append((sym, calls_per_run, med, total))
+
+rows.sort(key=lambda r: r[3], reverse=True)
+for sym, calls, med, total in rows[:30]:
+    name = sym if len(sym) <= 55 else sym[:52] + "..."
+    print(f"  {name:<55} {calls:>5}  {med:>8.1f}  {total:>8.3f}")
+print(f"  {'TOTAL accounted':<55} {'':>5}  {'':>8}  {total_accounted:>8.3f}")
+
+# Also time with time_evaluator for ground truth
+te = vm.time_evaluator("TransformerEncoder__forward", dev, number=50, repeat=3)
+te_result = te(*args_prof)
+print(f"\n  time_evaluator (50 runs×3 repeats): mean={te_result.mean*1e3:.3f} ms  "
+      f"std={te_result.std*1e3:.3f} ms")

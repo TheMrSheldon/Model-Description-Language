@@ -86,27 +86,38 @@ target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 
 # TVM
 # Pick the best available BLAS backend for this platform.
-# macOS: Accelerate framework (always present, no install needed)
-# Linux: OpenBLAS (install libopenblas-dev)
-# Windows / fallback: none (TVM uses its own loop nests)
-find_package(BLAS QUIET)
-if(BLAS_FOUND)
-	if(APPLE)
-		set(MDL_TVM_BLAS "apple")
-	else()
-		set(MDL_TVM_BLAS "openblas")
-	endif()
+# Preference order: Intel MKL (AVX-512, cblas_sgemm_batch_strided) > OpenBLAS > none.
+# macOS always uses Accelerate.
+set(_MDL_MKL_HINT "/opt/intel/oneapi/mkl/latest")
+if(APPLE)
+	find_package(BLAS QUIET)
+	# USE_BLAS=apple selects Accelerate; no extra option needed.
+	set(MDL_TVM_BLAS_OPTS "USE_BLAS apple")
+	set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
+elseif(EXISTS "${_MDL_MKL_HINT}/include/mkl.h")
+	message(STATUS "[mdl] Using Intel MKL at ${_MDL_MKL_HINT}")
+	# USE_MKL takes the root path directly; do NOT also set USE_BLAS=mkl (deprecated
+	# and causes TVM to overwrite USE_MKL before it's checked as a directory path).
+	set(MDL_TVM_BLAS_OPTS "USE_MKL ${_MDL_MKL_HINT}")
+	set(MDL_BLAS_LINK_LIBS "${_MDL_MKL_HINT}/lib/libmkl_rt.so")
 else()
-	set(MDL_TVM_BLAS "none")
+	find_package(BLAS QUIET)
+	if(BLAS_FOUND)
+		set(MDL_TVM_BLAS_OPTS "USE_BLAS openblas")
+		set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
+	else()
+		set(MDL_TVM_BLAS_OPTS "USE_BLAS none")
+		set(MDL_BLAS_LINK_LIBS "")
+	endif()
 endif()
 
 CPMAddPackage(
 	URI "gh:apache/tvm@0.24.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS ${MDL_TVM_BLAS}"
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" ${MDL_TVM_BLAS_OPTS}
 	EXCLUDE_FROM_ALL YES
 )
-if(BLAS_FOUND)
-	target_link_libraries(mdl PUBLIC tvm_compiler BLAS::BLAS)
+if(MDL_BLAS_LINK_LIBS)
+	target_link_libraries(mdl PUBLIC tvm_compiler "${MDL_BLAS_LINK_LIBS}")
 else()
 	target_link_libraries(mdl PUBLIC tvm_compiler)
 endif()

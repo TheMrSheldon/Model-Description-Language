@@ -508,14 +508,15 @@ def _parse_target(s):
         if "=" in p:
             k, v = p.lstrip("-").split("=", 1)
             d[k] = v
+    # fast-math enables vectorized exp/erf via LLVM's approximation (significant speedup
+    # for softmax and GELU kernels which would otherwise fall back to scalar libm calls).
+    if d.get("kind") == "llvm":
+        d["fast-math"] = True
     return tvm.target.Target(json.dumps(d))
 
 target = _parse_target(target_str)
 
-# Symbolic batch/sequence dims are left unbound so the compiled binary handles
-# any sequence length at runtime.  CBLAS dispatch (below) takes M/N/K as runtime
-# args, so it works regardless of shape.  Elementwise and nn.* ops (softmax,
-# layer_norm, gelu) generate dynamic-shape kernels that are fused by FuseOps.
+# Dynamic shapes: symbolic dims left unbound so any seq length works at runtime.
 
 # ── CBLAS matmul legalization ─────────────────────────────────────────────────
 # cblas_sgemm is linked into libtvm.so via OpenBLAS.  tir.call_extern emits a
@@ -571,34 +572,37 @@ def _cblas_matmul_transb_te(A, B):
     )
 
 def _cblas_batmul_te(A, B):
-    """C[b,M,N] = A[b,M,K] @ B[b,K,N]  (3-D batched: loop over b, call cblas_sgemm each)."""
+    """C[b,M,N] = A[b,M,K] @ B[b,K,N].
+
+    Uses cblas_sgemm_batch_strided (MKL) when available — one library call for all
+    batch heads, avoids per-head function-call overhead and allows MKL to fuse the
+    batch into one parallelised kernel.  Falls back to a serial loop otherwise.
+    The compiled .so will link cblas_sgemm_batch_strided as an unresolved symbol;
+    it must be satisfied at runtime (e.g. via LD_PRELOAD or linking against MKL).
+    """
     batch, M, K = A.shape[0], A.shape[1], A.shape[2]
     N = B.shape[2]
-    # When batch is a compile-time constant (e.g. 12 attention heads), mark the
-    # loop PARALLEL so TVM's thread pool runs all heads concurrently.  Each sgemm
-    # call then uses fewer BLAS threads (controlled by OPENBLAS_NUM_THREADS), which
-    # avoids over-subscription and mirrors how PyTorch dispatches batch matmul.
-    # For symbolic batch dims, fall back to SERIAL.
-    batch_is_static = isinstance(batch, tvm.tirx.IntImm)
-    # PARALLEL causes over-subscription when cblas_sgemm is itself multi-threaded.
-    # Use SERIAL here; the outer BLAS threading already uses all cores per call.
-    loop_kind = tvm.tirx.ForKind.SERIAL
+    stride_a = M * K
+    stride_b = K * N
+    stride_c = M * N
     def body(ins, outs):
-        b = tvm.tirx.Var("b", "int64")
-        stride_a = M * K
-        stride_b = K * N
-        stride_c = M * N
-        loop_body = tvm.tirx.Evaluate(tvm.tirx.call_extern(
-            "int32", "cblas_sgemm",
+        # ColMajor swap trick: C[M,N] = A[M,K]@B[K,N] in row-major is equivalent
+        # to C^T[N,M] = B^T[N,K]@A^T[K,M] in col-major (no data copies needed).
+        # cblas_sgemm_batch_strided with ColMajor and NoTrans on B,A (swapped):
+        #   lda=N (leading dim of B^T in col-major = N cols of B)  stride_a=K*N
+        #   ldb=K (leading dim of A^T in col-major = K cols of A)  stride_b=M*K
+        #   ldc=N (leading dim of C^T in col-major)               stride_c=M*N
+        return tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "cblas_sgemm_batch_strided",
             _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
             N, M, K,
             tvm.tirx.const(1.0, "float32"),
-            ins[1].access_ptr("r", offset=b * stride_b), N,
-            ins[0].access_ptr("r", offset=b * stride_a), K,
+            ins[1].access_ptr("r"), N, stride_b,   # B^T col-major
+            ins[0].access_ptr("r"), K, stride_a,   # A^T col-major
             tvm.tirx.const(0.0, "float32"),
-            outs[0].access_ptr("w", offset=b * stride_c), N,
+            outs[0].access_ptr("w"), N, stride_c,  # C^T col-major
+            batch,
         ))
-        return tvm.tirx.For(b, 0, batch, loop_kind, loop_body)
     return tvm.te.extern(
         (batch, M, N), [A, B], body, name="C_batch", dtype="float32",
     )
@@ -638,15 +642,343 @@ def _legalize_matmul_cblas(bb, call):
     return bb.call_te(_cblas_matmul_te, A, B)
 
 
+# ── oneDNN wrapper source ─────────────────────────────────────────────────────
+# This C++ source is written to a temp file and compiled into the model .so
+# alongside TVM's generated TIR code.  It wraps oneDNN softmax, GELU(erf), and
+# layer_norm with a lightweight shape-keyed primitive cache so creation happens
+# once per unique shape, not every call.
+_DNNL_OPS_SRC = r"""
+#include <oneapi/dnnl/dnnl.hpp>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
+
+using namespace dnnl;
+
+// ── global engine / stream (CPU, device 0) ──────────────────────────────────
+static engine& dnnl_eng() {
+    static engine e(engine::kind::cpu, 0);
+    return e;
+}
+static stream& dnnl_strm() {
+    static stream s(dnnl_eng());
+    return s;
+}
+
+// ── softmax ──────────────────────────────────────────────────────────────────
+struct SoftmaxCache {
+    memory::dims dims;
+    softmax_forward::primitive_desc pd;
+    softmax_forward prim;
+};
+static std::unordered_map<size_t, SoftmaxCache> g_softmax_cache;
+static std::mutex g_softmax_mu;
+
+static SoftmaxCache& get_softmax(int64_t outer, int64_t axis) {
+    size_t key = (size_t)outer * 0x9e3779b97f4a7c15ULL ^ (size_t)axis;
+    std::lock_guard<std::mutex> lk(g_softmax_mu);
+    auto it = g_softmax_cache.find(key);
+    if (it != g_softmax_cache.end()) return it->second;
+    memory::desc md({outer, axis}, memory::data_type::f32, memory::format_tag::nc);
+    auto pd = softmax_forward::primitive_desc(dnnl_eng(),
+        prop_kind::forward_inference, algorithm::softmax_accurate, md, md, /*axis=*/1);
+    auto prim = softmax_forward(pd);
+    g_softmax_cache.emplace(key, SoftmaxCache{{outer, axis}, std::move(pd), std::move(prim)});
+    return g_softmax_cache.at(key);
+}
+
+extern "C" int mdl_dnnl_softmax_f32(
+    float* dst, const float* src, int64_t outer, int64_t axis)
+{
+    auto& c = get_softmax(outer, axis);
+    memory::desc md({outer, axis}, memory::data_type::f32, memory::format_tag::nc);
+    memory src_m(md, dnnl_eng(), (void*)src);
+    memory dst_m(md, dnnl_eng(), dst);
+    c.prim.execute(dnnl_strm(), {{DNNL_ARG_SRC, src_m}, {DNNL_ARG_DST, dst_m}});
+    dnnl_strm().wait();
+    return 0;
+}
+
+// ── GELU (erf variant) ────────────────────────────────────────────────────────
+struct EltwiseCache {
+    memory::dims dims;
+    eltwise_forward::primitive_desc pd;
+    eltwise_forward prim;
+};
+static std::unordered_map<size_t, EltwiseCache> g_gelu_cache;
+static std::mutex g_gelu_mu;
+
+static EltwiseCache& get_gelu(int64_t n) {
+    std::lock_guard<std::mutex> lk(g_gelu_mu);
+    auto it = g_gelu_cache.find((size_t)n);
+    if (it != g_gelu_cache.end()) return it->second;
+    memory::desc md({{n}, memory::data_type::f32, memory::format_tag::a});
+    auto pd = eltwise_forward::primitive_desc(dnnl_eng(),
+        prop_kind::forward_inference, algorithm::eltwise_gelu_erf, md, md, 0.f, 0.f);
+    auto prim = eltwise_forward(pd);
+    g_gelu_cache.emplace(n, EltwiseCache{{n}, std::move(pd), std::move(prim)});
+    return g_gelu_cache.at(n);
+}
+
+extern "C" int mdl_dnnl_gelu_f32(float* dst, const float* src, int64_t n) {
+    auto& c = get_gelu(n);
+    memory::desc md({n}, memory::data_type::f32, memory::format_tag::a);
+    memory src_m(md, dnnl_eng(), (void*)src);
+    memory dst_m(md, dnnl_eng(), dst);
+    c.prim.execute(dnnl_strm(), {{DNNL_ARG_SRC, src_m}, {DNNL_ARG_DST, dst_m}});
+    dnnl_strm().wait();
+    return 0;
+}
+
+// ── layer normalisation ───────────────────────────────────────────────────────
+struct LNCache {
+    int64_t batch, channels;
+    layer_normalization_forward::primitive_desc pd;
+    layer_normalization_forward prim;
+};
+static std::unordered_map<size_t, LNCache> g_ln_cache;
+static std::mutex g_ln_mu;
+
+static LNCache& get_ln(int64_t batch, int64_t channels, float eps) {
+    size_t key = (size_t)batch * 0xdeadbeef ^ (size_t)channels;
+    std::lock_guard<std::mutex> lk(g_ln_mu);
+    auto it = g_ln_cache.find(key);
+    if (it != g_ln_cache.end()) return it->second;
+    memory::desc md({{batch, channels}, memory::data_type::f32, memory::format_tag::nc});
+    memory::desc stat_md({{batch}, memory::data_type::f32, memory::format_tag::a});
+    auto pd = layer_normalization_forward::primitive_desc(dnnl_eng(),
+        prop_kind::forward_inference, md, md, stat_md, eps,
+        normalization_flags::use_scale | normalization_flags::use_shift);
+    auto prim = layer_normalization_forward(pd);
+    g_ln_cache.emplace(key, LNCache{batch, channels, std::move(pd), std::move(prim)});
+    return g_ln_cache.at(key);
+}
+
+extern "C" int mdl_dnnl_layer_norm_f32(
+    float* dst, const float* src,
+    const float* scale, const float* shift,
+    int64_t batch, int64_t channels, float eps)
+{
+    auto& c = get_ln(batch, channels, eps);
+    auto& e = dnnl_eng();
+    memory::desc data_md({batch, channels}, memory::data_type::f32, memory::format_tag::nc);
+    memory::desc vec_md({channels}, memory::data_type::f32, memory::format_tag::a);
+    memory src_m(data_md, e, (void*)src);
+    memory dst_m(data_md, e, dst);
+    // In oneDNN 3.x, scale (gamma) and shift (beta) are separate [C] vectors.
+    memory sc_m(vec_md, e, (void*)scale);
+    memory sh_m(vec_md, e, (void*)shift);
+    c.prim.execute(dnnl_strm(), {
+        {DNNL_ARG_SRC, src_m}, {DNNL_ARG_DST, dst_m},
+        {DNNL_ARG_SCALE, sc_m}, {DNNL_ARG_SHIFT, sh_m}
+    });
+    dnnl_strm().wait();
+    return 0;
+}
+"""
+
+def _make_dnnl_fcompile(workspace_dir):
+    """Return a fcompile callback that compiles mdl_dnnl_ops.cpp into the model .so."""
+    import subprocess, os
+    from tvm.contrib import cc
+
+    src_path = os.path.join(workspace_dir, "mdl_dnnl_ops.cpp")
+    obj_path = os.path.join(workspace_dir, "mdl_dnnl_ops.o")
+    with open(src_path, "w") as f:
+        f.write(_DNNL_OPS_SRC)
+    subprocess.check_call([
+        "g++", "-O3", "-fPIC", "-std=c++17",
+        "-I/usr/include", "-I/usr/local/include",
+        "-c", src_path, "-o", obj_path
+    ])
+    print("[mdl] oneDNN wrappers compiled", flush=True)
+
+    def fcompile(output, objects, options=None):
+        # Libraries (-l flags) must come AFTER object files in GCC's link order.
+        # TVM's create_shared puts `options` BEFORE objects, so -ldnnl would be
+        # ignored by --as-needed if passed there.  Build the command manually.
+        import subprocess, shutil
+        cc_cmd = shutil.which("g++") or "g++"
+        cmd = ([cc_cmd, "-shared", "-fPIC", "-o", output]
+               + list(options or [])
+               + list(objects) + [obj_path]
+               + ["-ldnnl"])
+        subprocess.check_call(cmd)
+
+    return fcompile
+
+
+def _dnnl_softmax_te(x):
+    """Softmax over the last axis via oneDNN (single-pass fused kernel)."""
+    import tvm.te as te
+    shape = x.shape
+    outer = 1
+    for d in shape[:-1]:
+        outer = outer * d
+    axis_size = shape[-1]
+    def body(ins, outs):
+        return te.extern_outs(
+            outs, ins,
+            lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+                "int32", "mdl_dnnl_softmax_f32",
+                outs[0].access_ptr("w"),
+                ins[0].access_ptr("r"),
+                outer, axis_size,
+            )),
+            name="dnnl_softmax",
+        )
+    return te.extern(shape, [x],
+                     lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+                         "int32", "mdl_dnnl_softmax_f32",
+                         outs[0].access_ptr("w"),
+                         ins[0].access_ptr("r"),
+                         outer, axis_size,
+                     )),
+                     dtype=x.dtype, name="dnnl_softmax")
+
+def _legalize_softmax_dnnl(bb, call):
+    return bb.call_te(_dnnl_softmax_te, call.args[0])
+
+def _dnnl_gelu_te(x):
+    """GELU (erf variant) via oneDNN eltwise kernel."""
+    shape = x.shape
+    n = 1
+    for d in shape:
+        n = n * d
+    return tvm.te.extern(
+        shape, [x],
+        lambda ins, outs: tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "mdl_dnnl_gelu_f32",
+            outs[0].access_ptr("w"),
+            ins[0].access_ptr("r"),
+            n,
+        )),
+        dtype=x.dtype, name="dnnl_gelu",
+    )
+
+def _legalize_gelu_dnnl(bb, call):
+    return bb.call_te(_dnnl_gelu_te, call.args[0])
+
+def _dnnl_layer_norm_te(x, scale, shift, axes, eps):
+    """Layer normalisation via oneDNN (single fused kernel)."""
+    # axes is a list; we always normalize over the last dim.
+    shape = x.shape
+    batch = 1
+    for d in shape[:-1]:
+        batch = batch * d
+    channels = shape[-1]
+    def body(ins, outs):
+        return tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "mdl_dnnl_layer_norm_f32",
+            outs[0].access_ptr("w"),
+            ins[0].access_ptr("r"),  # src
+            ins[1].access_ptr("r"),  # scale (gamma)
+            ins[2].access_ptr("r"),  # shift (beta)
+            batch, channels, tvm.tirx.const(float(eps), "float32"),
+        ))
+    return tvm.te.extern(
+        shape, [x, scale, shift],
+        body,
+        dtype=x.dtype, name="dnnl_layer_norm",
+    )
+
+def _legalize_layer_norm_dnnl(bb, call):
+    x     = call.args[0]
+    scale = call.args[1]
+    shift = call.args[2]
+    axes  = list(call.attrs.axes)
+    eps   = float(call.attrs.epsilon)
+    return bb.call_te(_dnnl_layer_norm_te, x, scale, shift, axes, eps)
+
+
+def _fast_gelu_te(x):
+    """GELU using fast_erf polynomial — fallback when oneDNN is not available."""
+    import tvm.te as te
+    import tvm.topi as topi
+    sqrt2 = te.const(1.4142135623730951, x.dtype)
+    half  = te.const(0.5, x.dtype)
+    one   = te.const(1.0, x.dtype)
+    return topi.multiply(topi.multiply(x, half),
+                         topi.add(one, topi.fast_erf(topi.divide(x, sqrt2))))
+
+def _legalize_gelu_fast(bb, call):
+    return bb.call_te(_fast_gelu_te, call.args[0])
+
+
+def _rewrite_softmax_python(mod):
+    """
+    Python DFPattern pass: replace numerically-stable softmax decomposition
+    (exp(x-max(x)) / sum(exp(x-max(x)))) with relax.nn.softmax.
+
+    This is done in Python because TVM's C++ RewriteCall does not correctly
+    propagate DAG constraints for patterns where the same node (exp_val) must
+    appear as both the numerator and the argument to sum().  Python dpl handles
+    this correctly by tracking bindings across the full match.
+
+    Two sub-patterns are handled:
+      (a) CSE form: divide(exp_val, sum(exp_val))   [shared exp node]
+      (b) Dup form:  divide(exp_num, sum(exp_den))  [two separate exp nodes
+                     from the same input — emitted when CSE is not applied]
+    """
+    import tvm.relax.dpl as dpl
+
+    # Tree pattern — use separate wildcards to avoid DAG issues in matcher.
+    x1 = dpl.wildcard()
+    exp_num = dpl.is_op("relax.exp")(
+        dpl.is_op("relax.subtract")(x1, dpl.is_op("relax.max")(x1)))
+
+    x2 = dpl.wildcard()
+    exp_den = dpl.is_op("relax.exp")(
+        dpl.is_op("relax.subtract")(x2, dpl.is_op("relax.max")(x2)))
+    sum_pat = dpl.is_op("relax.sum")(exp_den)
+
+    pat = dpl.is_op("relax.divide")(exp_num, sum_pat)
+
+    def rewriter(expr, bindings):
+        inp1 = bindings[x1]
+        inp2 = bindings[x2]
+        # Both branches must come from the same input tensor.
+        if not tvm.ir.structural_equal(inp1, inp2):
+            return expr
+        return tvm.relax.op.nn.softmax(inp1, axis=-1)
+
+    for gv in mod.get_global_vars():
+        fn = mod[gv]
+        if not isinstance(fn, tvm.relax.Function):
+            continue
+        new_fn = dpl.rewrite_call(pat, rewriter, fn)
+        if not new_fn.same_as(fn):
+            mod.update_func(gv, new_fn)  # mutates in place
+    return mod
+
+
 def default_pipeline(mod):
     # Pattern rewrites (softmax, gelu, layer_norm) are applied in C++ before
     # this point; the module arrives here already containing the high-level ops.
+    #
+    # LegalizeOps runs FIRST so oneDNN/CBLAS legalizers intercept softmax/gelu/
+    # layer_norm before FastMathTransform can replace them with TIR fast_exp kernels.
+    # FastMathTransform then handles any residual relax.exp/erf/tanh.
+    #
+    # Additionally, a Python DFPattern pass replaces the softmax decomposition
+    # with relax.nn.softmax (the C++ pass may miss some forms; Python handles all).
+    mod = _rewrite_softmax_python(mod)
     with target:
         mod = tvm.transform.Sequential([
-            RT.LegalizeOps({"relax.matmul": _legalize_matmul_cblas}),
+            RT.LegalizeOps({
+                "relax.matmul":         _legalize_matmul_cblas,
+                "relax.nn.softmax":     _legalize_softmax_dnnl,
+                "relax.nn.gelu":        _legalize_gelu_dnnl,
+                "relax.nn.layer_norm":  _legalize_layer_norm_dnnl,
+            }),
             RT.DeadCodeElimination(),
         ])(mod)
-    print("[mdl] LegalizeOps done (CBLAS dispatch)", flush=True)
+    print("[mdl] LegalizeOps done (CBLAS + oneDNN softmax/gelu/layer_norm)", flush=True)
+    with target:
+        mod = RT.FastMathTransform()(mod)
+    print("[mdl] FastMathTransform done", flush=True)
 
     def try_schedule_reduction_func(func):
         try:
@@ -817,10 +1149,13 @@ if opt_level in ("metaschedule", "*"):
         ex.export_library(output_path)
         print(f"[mdl] Relax compiled (fallback) -> {output_path}", flush=True)
 else:
+    import tempfile
+    _ws = tempfile.mkdtemp(prefix="mdl_dnnl_")
+    _fcompile = _make_dnnl_fcompile(_ws)
     mod = default_pipeline(mod)
     ex = tvm.relax.build(mod, target=target, relax_pipeline=None)
-    ex.export_library(output_path)
-    print(f"[mdl] Relax compiled -> {output_path}", flush=True)
+    ex.export_library(output_path, fcompile=_fcompile)
+    print(f"[mdl] Relax compiled (oneDNN) -> {output_path}", flush=True)
 )PYHELPER";
     }
 
