@@ -98,16 +98,18 @@ relaxFunctions{
     },
     /** TENSOR_DOT **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-        // 2-D × 2-D → matmul; otherwise batched einsum
+        // Use relax.op.matmul for any rank ≥ 2 — it handles batched matmul natively
+        // and can be legalized to CBLAS (sgemm or sgemm loop over batch dims).
+        // einsum is avoided entirely: it does not get CBLAS dispatch.
         const auto& A = ts[0];
         const auto& B = ts[1];
         int rA = tensorNdim(A);
         int rB = tensorNdim(B);
-        if (rA == 2 && rB == 2) {
+        if (rA >= 2 && rB >= 2) {
             ::tvm::ffi::Optional<::tvm::DataType> out_dtype;
             return callRelaxOp("relax.op.matmul", A, B, out_dtype);
         }
-        // General: leading dims are batch, last two of A contract with B
+        // Fallback for unusual ranks (should not occur in practice)
         int nBatch = std::max(rA, rB) - 2;
         std::string lhs, rhs, out;
         for (int b = 0; b < nBatch; ++b) {

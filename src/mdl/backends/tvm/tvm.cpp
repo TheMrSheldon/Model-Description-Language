@@ -2,6 +2,7 @@
 
 #include "../../argvals.hpp"
 #include "../../logging.hpp"
+#include "./details/pattern_registry.hpp"
 #include "./details/relax_builtins.hpp"
 
 #include <mdl/compiler.hpp>
@@ -436,6 +437,12 @@ void mdl::backends::tvm::compileToFile(
     auto irMod = bb->Finalize();
     logger->info("Relax IRModule built ({} functions)", irMod->functions.size());
 
+    // ── 1b. Apply C++ pattern rewrites ────────────────────────────────────────
+    //   Replaces decomposed softmax/gelu/layer_norm with high-level Relax ops
+    //   before handing the module to Python for legalization and compilation.
+    auto patterns = mdl::backend::tvm::defaultPatterns();
+    irMod = mdl::backend::tvm::applyPatterns(irMod, patterns);
+
     // ── 2. Determine CPU target string ────────────────────────────────────────
     std::string cpuName = "generic";
     if (auto fn = ::tvm::ffi::Function::GetGlobal("tvm.codegen.llvm.GetHostCPUName"))
@@ -505,23 +512,10 @@ def _parse_target(s):
 
 target = _parse_target(target_str)
 
-# Bind symbolic batch/sequence dims to 8 so all shapes are static.
-# This unlocks StaticPlanBlockMemory and vectorization for symbolic-extent loops.
-sym_vars = {}
-for gv in mod.get_global_vars():
-    fn = mod[gv]
-    if not isinstance(fn, tvm.relax.Function):
-        continue
-    for p in fn.params:
-        si = p.struct_info
-        if hasattr(si, 'shape') and si.shape is not None:
-            for dim in si.shape.values:
-                if isinstance(dim, tvm.tirx.Var) and dim.name not in sym_vars:
-                    sym_vars[dim.name] = 8
-
-if sym_vars:
-    print(f"[mdl] Binding symbolic vars to 8: {list(sym_vars.keys())}", flush=True)
-    mod = RT.BindSymbolicVars(sym_vars)(mod)
+# Symbolic batch/sequence dims are left unbound so the compiled binary handles
+# any sequence length at runtime.  CBLAS dispatch (below) takes M/N/K as runtime
+# args, so it works regardless of shape.  Elementwise and nn.* ops (softmax,
+# layer_norm, gelu) generate dynamic-shape kernels that are fused by FuseOps.
 
 # ── CBLAS matmul legalization ─────────────────────────────────────────────────
 # cblas_sgemm is linked into libtvm.so via OpenBLAS.  tir.call_extern emits a
@@ -541,7 +535,7 @@ _CblasNoTrans,  _CblasTrans    = 111, 112
 _call_tir_op = tvm.ir.Op.get("relax.call_tir")
 
 def _cblas_matmul_te(A, B):
-    """C = A[M,K] @ B[K,N]."""
+    """C[M,N] = A[M,K] @ B[K,N]  (2-D, ColMajor swap trick)."""
     M, K, N = A.shape[0], A.shape[1], B.shape[1]
     return tvm.te.extern(
         (M, N), [A, B],
@@ -559,7 +553,7 @@ def _cblas_matmul_te(A, B):
     )
 
 def _cblas_matmul_transb_te(A, B):
-    """C = A[M,K] @ B[N,K].T — BLAS handles the transpose internally."""
+    """C[M,N] = A[M,K] @ B[N,K].T  (2-D, CblasTrans — no explicit copy)."""
     M, K, N = A.shape[0], A.shape[1], B.shape[0]
     return tvm.te.extern(
         (M, N), [A, B],
@@ -574,6 +568,39 @@ def _cblas_matmul_transb_te(A, B):
             outs[0].access_ptr("w"), N,
         )),
         name="C", dtype="float32",
+    )
+
+def _cblas_batmul_te(A, B):
+    """C[b,M,N] = A[b,M,K] @ B[b,K,N]  (3-D batched: loop over b, call cblas_sgemm each)."""
+    batch, M, K = A.shape[0], A.shape[1], A.shape[2]
+    N = B.shape[2]
+    # When batch is a compile-time constant (e.g. 12 attention heads), mark the
+    # loop PARALLEL so TVM's thread pool runs all heads concurrently.  Each sgemm
+    # call then uses fewer BLAS threads (controlled by OPENBLAS_NUM_THREADS), which
+    # avoids over-subscription and mirrors how PyTorch dispatches batch matmul.
+    # For symbolic batch dims, fall back to SERIAL.
+    batch_is_static = isinstance(batch, tvm.tirx.IntImm)
+    # PARALLEL causes over-subscription when cblas_sgemm is itself multi-threaded.
+    # Use SERIAL here; the outer BLAS threading already uses all cores per call.
+    loop_kind = tvm.tirx.ForKind.SERIAL
+    def body(ins, outs):
+        b = tvm.tirx.Var("b", "int64")
+        stride_a = M * K
+        stride_b = K * N
+        stride_c = M * N
+        loop_body = tvm.tirx.Evaluate(tvm.tirx.call_extern(
+            "int32", "cblas_sgemm",
+            _CblasColMajor, _CblasNoTrans, _CblasNoTrans,
+            N, M, K,
+            tvm.tirx.const(1.0, "float32"),
+            ins[1].access_ptr("r", offset=b * stride_b), N,
+            ins[0].access_ptr("r", offset=b * stride_a), K,
+            tvm.tirx.const(0.0, "float32"),
+            outs[0].access_ptr("w", offset=b * stride_c), N,
+        ))
+        return tvm.tirx.For(b, 0, batch, loop_kind, loop_body)
+    return tvm.te.extern(
+        (batch, M, N), [A, B], body, name="C_batch", dtype="float32",
     )
 
 def _is_2d_transpose(b_defn, B):
@@ -599,6 +626,11 @@ def _is_2d_transpose(b_defn, B):
 
 def _legalize_matmul_cblas(bb, call):
     A, B = call.args
+    ndim_a = len(A.struct_info.shape.values) if A.struct_info.shape else 0
+    # 3-D batched matmul: A[batch,M,K] @ B[batch,K,N]
+    if ndim_a == 3:
+        return bb.call_te(_cblas_batmul_te, A, B)
+    # 2-D: check for fused transpose on B
     if isinstance(B, tvm.relax.Var):
         B_orig = _is_2d_transpose(bb.lookup_binding(B), B)
         if B_orig is not None:
@@ -607,6 +639,8 @@ def _legalize_matmul_cblas(bb, call):
 
 
 def default_pipeline(mod):
+    # Pattern rewrites (softmax, gelu, layer_norm) are applied in C++ before
+    # this point; the module arrives here already containing the high-level ops.
     with target:
         mod = tvm.transform.Sequential([
             RT.LegalizeOps({"relax.matmul": _legalize_matmul_cblas}),

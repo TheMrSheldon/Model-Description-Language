@@ -315,7 +315,7 @@ def fmt(s):
 
 print(f"\n--- Benchmark ({WARMUP} warmup, {RUNS} timed runs, times in ms) ---")
 
-for seq in [8]:
+for seq in [8, 32, 128, 512]:
     print(f"\n  SEQ={seq}")
     pt_s = bench_pt(seq)
     print(f"    PyTorch : {fmt(pt_s)}", flush=True)
