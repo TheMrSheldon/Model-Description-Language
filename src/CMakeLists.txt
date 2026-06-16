@@ -13,6 +13,7 @@ target_sources(mdl
 		mdl/argvals.cpp
 		mdl/backends/tvm/tvm.cpp
 		mdl/backends/tvm/details/pattern_registry.cpp
+		mdl/backends/tvm/details/pipeline.cpp
 		mdl/bindings/generator.cpp
 		mdl/compiler.cpp
 		mdl/computegraph/datatype.cpp
