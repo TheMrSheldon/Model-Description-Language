@@ -170,7 +170,12 @@ static const Node& inlineNode(
 		newArgs.reserve(invn->arguments.size());
 		for (const auto& arg : invn->arguments)
 			newArgs.push_back(std::cref(inlineNode(graph, arg.get(), subs)));
-		DataType outType = inferOutputType(invn->id, newArgs);
+		// RESHAPE and EXPAND carry precise output shapes set by the einops layer.
+		// inferOutputType returns a 1-D fallback for these ops, which would lose
+		// the split/merge shape information computed during einops processing.
+		DataType outType = (invn->id == FunctionIDs::RESHAPE || invn->id == FunctionIDs::EXPAND)
+			? invn->type
+			: inferOutputType(invn->id, newArgs);
 		return graph.addInvocationNode(invn->id, std::move(outType), std::move(newArgs));
 	} else if (
 			std::holds_alternative<ErrorNode>(templateNode) || std::holds_alternative<ConstNode>(templateNode) ||

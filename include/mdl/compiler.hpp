@@ -9,6 +9,11 @@ namespace mdl {
 	struct CompilationUnit;
 	class ArgVals;
 
+	enum class Backend {
+		Tvm,  ///< TVM/Relax backend (default) — produces a .so via TVM
+		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
+	};
+
 	struct CompileOptions {
 		/**
 		 * Optimization level string.
@@ -18,6 +23,9 @@ namespace mdl {
 		 *                  near-optimal runtime performance)
 		 */
 		std::string optimization;
+
+		/** Target backend. Defaults to TVM. */
+		Backend backend = Backend::Tvm;
 	};
 
 	void compileToFile(

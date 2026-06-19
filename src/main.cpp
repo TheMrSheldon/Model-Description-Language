@@ -131,6 +131,11 @@ int main(int argc, char* argv[]) {
 			"Optimization level. Use 'metaschedule' to enable MetaSchedule auto-tuning "
 			"(slow compile, near-optimal runtime)."
 	);
+	app.add_option("--backend", args.compileOpts.backend, "Compiler backend: tvm (default), iree")
+		->transform(CLI::CheckedTransformer(std::map<std::string, mdl::Backend>{
+			{"tvm",  mdl::Backend::Tvm},
+			{"iree", mdl::Backend::Iree},
+		}));
 	//->transform(CLI::CheckedTransformer(mdl::bindings::getGenerators()));
 	app.callback([&args]() { runCompileCommand(args); });
 

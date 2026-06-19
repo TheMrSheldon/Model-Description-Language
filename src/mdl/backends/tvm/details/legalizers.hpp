@@ -58,7 +58,7 @@ using ::tvm::tirx::Buffer;
 using ::tvm::PrimExpr;
 using ::tvm::IntImm;
 
-static const auto& call_tir_op = ::tvm::ir::Op::Get("relax.call_tir");
+static const auto& call_tir_op = ::tvm::Op::Get("relax.call_tir");
 
 // Return the shape values of a relax tensor expression.
 Array<PrimExpr> tensorDims(const Expr& e) {
@@ -164,9 +164,9 @@ BufSpec makeSpec(const std::string& name, const Array<PrimExpr>& shape,
 // Retrieve the default FLegalize function registered for an op (used as fallback).
 Optional<::tvm::relax::FLegalize> defaultLegalize(const Call& call) {
     static const auto& legalize_map =
-        ::tvm::ir::Op::GetAttrMap<::tvm::relax::FLegalize>("FLegalize");
-    if (auto op = call->op.as<::tvm::ir::OpNode>()) {
-        auto ref = ::tvm::ffi::GetRef<::tvm::ir::Op>(op);
+        ::tvm::Op::GetAttrMap<::tvm::relax::FLegalize>("FLegalize");
+    if (auto op = call->op.as<::tvm::OpNode>()) {
+        auto ref = ::tvm::ffi::GetRef<::tvm::Op>(op);
         if (legalize_map.count(ref))
             return legalize_map[ref];
     }
@@ -239,8 +239,7 @@ inline Expr legalizeLayerNormDnnl(BlockBuilder bb, Call call) {
     auto gshape = tensorDims(gamma);  // [cols]
     float eps = 1e-5f;
     // Extract epsilon from attrs if available
-    if (auto* attrs = call->attrs.as<::tvm::AttrsNode>()) {
-        // Attrs differ per op; access epsilon via common path if possible
+    if (auto* attrs = call->attrs.as<::tvm::BaseAttrsNode>()) {
         (void)attrs;
     }
 
@@ -372,9 +371,9 @@ bool isTirCallWithPrefix(const Expr& e, const std::string& prefix) {
     if (!c) return false;
     if (!c->op.same_as(call_tir_op)) return false;
     if (c->args.empty()) return false;
-    const auto* gv = c->args[0].as<::tvm::ir::GlobalVarNode>();
+    const auto* gv = c->args[0].as<::tvm::GlobalVarNode>();
     if (!gv) return false;
-    return gv->name_hint.rfind(prefix, 0) == 0;
+    return gv->name_hint.starts_with(std::string_view(prefix));
 }
 
 // Check if B is a transposed weight: a 2D call_tir with swapped shape dims.
@@ -459,15 +458,14 @@ inline Expr legalizeDivideFoldScale(BlockBuilder bb, Call call) {
         return fallbackLegalize(bb, call);
 
     // Extract scalar value from the constant.
-    auto* cn = div_const->data.as<::tvm::runtime::NDArray::ContainerType>();
-    if (!cn) return fallbackLegalize(bb, call);
+    if (!div_const->data.defined()) return fallbackLegalize(bb, call);
 
     // Get divisor scalar from constant NDArray
     float scale_val = 0.0f;
     {
         auto arr = div_const->data;
         if (arr->dtype.code != kDLFloat || arr->dtype.bits != 32) return fallbackLegalize(bb, call);
-        if (arr->ndim != 0 && arr.Size() != 1) return fallbackLegalize(bb, call);
+        if (arr->ndim != 0 && arr.numel() != 1) return fallbackLegalize(bb, call);
         scale_val = static_cast<const float*>(arr->data)[0];
     }
     if (scale_val == 0.0f) return fallbackLegalize(bb, call);
@@ -588,12 +586,12 @@ inline Expr legalizeAttentionSdpa(BlockBuilder bb, Call call) {
  *
  * Pass this to tvm::relax::transform::LegalizeOps(mdlLegalizeMap()).
  */
-inline ::tvm::ffi::Map<::tvm::String, ::tvm::ffi::Function> mdlLegalizeMap() {
+inline ::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> mdlLegalizeMap() {
     using ::tvm::ffi::Function;
-    using ::tvm::TypedPackedFunc;
+    using ::tvm::ffi::TypedFunction;
 
     auto wrap = [](auto fn) -> Function {
-        return TypedPackedFunc<Expr(BlockBuilder, Call)>(fn);
+        return TypedFunction<Expr(BlockBuilder, Call)>(fn);
     };
 
     return {

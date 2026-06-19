@@ -34,8 +34,8 @@ static ::tvm::IRModule runPass(::tvm::IRModule mod,
                                 const ::tvm::Target& target)
 {
     ::tvm::transform::PassContext ctx = ::tvm::transform::PassContext::Create();
-    tvm::With<::tvm::transform::PassContext> guard(ctx);
-    tvm::With<::tvm::Target>                 tguard(target);
+    ::tvm::With<::tvm::transform::PassContext> guard(ctx);
+    ::tvm::With<::tvm::Target>                 tguard(target);
     return pass(mod);
 }
 
@@ -51,14 +51,14 @@ static ::tvm::IRModule runSeq(::tvm::IRModule mod,
 static ::tvm::IRModule callGlobalPass(::tvm::IRModule mod, const std::string& global_name) {
     auto pass = requireGlobal(global_name)().cast<::tvm::transform::Pass>();
     ::tvm::transform::PassContext ctx = ::tvm::transform::PassContext::Create();
-    tvm::With<::tvm::transform::PassContext> guard(ctx);
+    ::tvm::With<::tvm::transform::PassContext> guard(ctx);
     return pass(mod);
 }
 
 // ── bind symbolic dims (dynamic shapes → constants for LegalizeOps) ───────────
 
 static ::tvm::IRModule bindSymbolicVars(::tvm::IRModule mod) {
-    ::tvm::ffi::Map<::tvm::ffi::Variant<::tvm::tirx::Var, ::tvm::String>, ::tvm::PrimExpr> sym;
+    ::tvm::ffi::Map<::tvm::ffi::Variant<::tvm::tirx::Var, ::tvm::ffi::String>, ::tvm::PrimExpr> sym;
     for (const auto& gv : mod->GetGlobalVars()) {
         const auto* fn = mod->Lookup(gv).as<::tvm::relax::FunctionNode>();
         if (!fn) continue;
@@ -108,19 +108,19 @@ static ::tvm::IRModule bindSymbolicVars(::tvm::IRModule mod) {
     // LegalizeOps: CBLAS matmul, oneDNN softmax/gelu/layer_norm/attention,
     // bias fold, and scale fold all happen here via C++ TIR builders.
     irMod = runSeq(irMod, {
-        RT::LegalizeOps(legalizers::mdlLegalizeMap()),
+        RT::LegalizeOps(legalizers::mdlLegalizeMap(), std::nullopt, false),
         RT::DeadCodeElimination(),
     }, target);
     logger->info("[mdl] LegalizeOps done (CBLAS + oneDNN)");
 
-    // Op fusion.
+    // Op fusion.  Note: FuseTIR is intentionally omitted — it is incompatible
+    // with the extern TIR functions emitted by the CBLAS/oneDNN/SDPA legalizers.
     irMod = runSeq(irMod, {
         RT::AnnotateTIROpPattern(),
         RT::FoldConstant(),
         RT::FuseOps(),
-        RT::FuseTIR(),
     }, target);
-    logger->info("[mdl] FuseOps + FuseTIR done");
+    logger->info("[mdl] FuseOps done");
 
     // VM lowering: in-header passes.
     irMod = runSeq(irMod, {

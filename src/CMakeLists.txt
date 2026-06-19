@@ -160,6 +160,36 @@ target_link_libraries(mdlc CLI11::CLI11)
 CPMAddPackage(URI "gh:ikalnytskyi/termcolor@2.1.0" EXCLUDE_FROM_ALL YES)
 target_link_libraries(mdl PRIVATE termcolor::termcolor)
 
+# ── IREE backend (optional) ───────────────────────────────────────────────────
+# Enable with: cmake -DMDL_ENABLE_IREE=ON
+#
+# IREE is located in one of two ways (in preference order):
+#   1. find_package — set MDL_IREE_INSTALL_DIR or IREE_INSTALL_DIR (env) to the
+#      prefix used when installing IREE with `cmake --install`.
+#   2. Automatic download — the pre-built release tar for Linux x86_64 is fetched
+#      from GitHub.  Override MDL_IREE_DIST_URL to target a different release or
+#      platform (see https://github.com/iree-org/iree/releases).
+#
+# The downloaded distribution contains libIREECompiler.so and the C API headers;
+# it is placed in the CMake build directory and does NOT require compiling LLVM.
+option(MDL_ENABLE_IREE "Build the IREE backend" OFF)
+set(MDL_IREE_INSTALL_DIR "" CACHE PATH
+    "Path to an installed IREE prefix (sets the find_package hint).")
+set(MDL_IREE_DIST_URL "" CACHE STRING
+    "URL of a pre-built IREE distribution tar. Leave empty to use the default release.")
+
+if(MDL_ENABLE_IREE)
+    # The IREE backend invokes iree-compile as a subprocess to avoid an LLVM
+    # version conflict: libIREECompiler.so embeds LLVM 20 while TVM links
+    # system LLVM 19, which causes a segfault when both are loaded in-process.
+    # No link-time dependency on IREE is needed; iree-compile must be on PATH
+    # (or pointed to via the IREE_COMPILE environment variable at runtime).
+
+    target_sources(mdl PRIVATE mdl/backends/iree/iree_backend.cpp)
+    target_compile_definitions(mdl PUBLIC MDL_IREE_ENABLED)
+    message(STATUS "[mdl] IREE backend enabled (iree-compile subprocess)")
+endif()
+
 #-------------------#
 # mdl-info Command  #
 #-------------------#

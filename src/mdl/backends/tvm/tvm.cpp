@@ -560,17 +560,9 @@ print("[mdl] Python rewrites done", flush=True)
 			throw std::runtime_error("Python rewrite pass failed (exit " + std::to_string(rc) + ")");
 	}
 
-	// ── 5. C++ Relax pipeline ─────────────────────────────────────────────────
-	//    LegalizeOps (CBLAS + oneDNN), FuseOps, VM lowering — all in C++.
-	irMod = loadIRMod(rewrittenPath);
-	auto target = mdl::backend::tvm::parseTarget(targetStr);
-	irMod = mdl::backend::tvm::runRelaxPipeline(irMod, target);
-	saveIRMod(irMod, loweredPath);
-	logger->info("C++ Relax pipeline done → {}", loweredPath);
-
-	// ── 6. Python export: VMCodeGen + export_library ──────────────────────────
-	//    The lowered module is handed to Python for the final .so export step.
-	//    The custom fcompile callback compiles the oneDNN C++ wrapper source.
+	// ── 5. Python full pipeline + export ─────────────────────────────────────
+	//    LegalizeOps (CBLAS + oneDNN), scheduling, VM lowering, and export_library
+	//    are all handled by the Python helper (default_pipeline + tvm.relax.build).
 	std::string exportHelperPath = output.string() + ".export_helper.py";
 	{
 		std::ofstream f(exportHelperPath);
@@ -619,11 +611,15 @@ print(f"[mdl] Relax compiled -> {output_path}", flush=True)
 )PYHELPER";
 	}
 
-	// Write the oneDNN C++ source to a file for the export helper to compile.
-	std::string dnnlSrcPath = output.string() + ".mdl_dnnl_ops.cpp";
 	{
-		std::ofstream f(dnnlSrcPath);
-		f << _DNNL_OPS_SRC;
+		std::ofstream f(helperPath);
+		f << R"PYHELPER(
+import sys, os
+
+json_path   = sys.argv[1]
+output_path = sys.argv[2]
+target_str  = sys.argv[3] if len(sys.argv) > 3 else "llvm"
+opt_level   = sys.argv[4] if len(sys.argv) > 4 else "default"
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _candidates = [
@@ -1796,7 +1792,7 @@ else:
 )PYHELPER";
 	}
 
-	std::string cmd = "python3 " + helperPath + " " + jsonPath + " " + output.string() + " \"" + targetStr + "\"" +
+	std::string cmd = "python3 " + helperPath + " " + rewrittenPath + " " + output.string() + " \"" + targetStr + "\"" +
 					  " \"" + (opts.optimization.empty() ? "default" : opts.optimization) + "\"";
 	logger->info("Running: {}", cmd);
 	int rc = std::system(cmd.c_str());
