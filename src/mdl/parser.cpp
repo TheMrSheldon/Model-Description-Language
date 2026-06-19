@@ -3,7 +3,9 @@
 #include "./parser/errorlistener.hpp"
 
 #include <mdl/computegraphv2/function.hpp>
+#include <mdl/computegraphv2/object.hpp>
 #include <mdl/namespace.hpp>
+#include <mdl/utils/einops.hpp>
 
 #include <mdlBaseVisitor.h>
 #include <mdlLexer.h>
@@ -32,6 +34,65 @@ namespace mdl {
 		void pushNamespace() { nsstack.push(nsstack.top().createSubnamespace()); }
 		void popNamespace() { nsstack.pop(); }
 
+		// Convert any expression result (const Node* or Object) to Object.
+		Object asObject(std::any value) {
+			if (auto* node = std::any_cast<const Node*>(&value))
+				return Object{*node};
+			if (auto* obj = std::any_cast<Object>(&value))
+				return *obj;
+			std::abort();
+		}
+
+		// Extract const Node* from an expression result, emitting an error if it is not a node.
+		const Node* asNode(std::any value, antlr4::Token* tok) {
+			auto obj = asObject(std::move(value));
+			return std::visit(
+					overloaded{
+							[](const Node* node) { return node; },
+							[&](const FunctionDecl&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a value, got a function"
+								);
+								return &graph().addErrorNode();
+							},
+							[&](const AggregateInstance&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a struct"
+								);
+								return &graph().addErrorNode();
+							},
+							[&](const ModuleInstance&) -> const Node* {
+								errorlistener.semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a module"
+								);
+								return &graph().addErrorNode();
+							}
+					},
+					obj
+			);
+		}
+
+		// Build an AggregateInstance for namespace member access, creating one
+		// node per field via addNode (these nodes are NOT added to any leaves list).
+		template <typename NodeType>
+		Object makeAggregateObject(
+				const AggregateType& agg, const std::string& prefix,
+				const Node& (Computegraph::*addNode)(DataType, std::string)
+		) {
+			std::map<std::string, Object> values;
+			for (auto& [memberName, memberType] : agg.members) {
+				const std::string memberPath = prefix + "." + memberName;
+				if (auto* subAgg = std::get_if<AggregateType>(&memberType))
+					values[memberName] = makeAggregateObject<NodeType>(*subAgg, memberPath, addNode);
+				else
+					values[memberName] = Object{&(graph().*addNode)(memberType, memberPath)};
+			}
+			return Object{AggregateInstance::create(agg, std::move(values)).value()};
+		}
+
 	public:
 		TranslatingVisitor(PrettyErrorListener& errorlistener) : errorlistener(errorlistener) {}
 
@@ -46,7 +107,12 @@ namespace mdl {
 				auto [name, s] = std::any_cast<std::pair<std::string, AggregateType>>(def->accept(this));
 				program.definitions.try_emplace(name, std::move(s));
 			}
-			// Parse Modules second (no matter where they are in the file)
+			// Parse func definitions
+			for (auto&& def : ctx->funcdef()) {
+				auto [name, f] = std::any_cast<std::pair<std::string, FunctionDecl>>(def->accept(this));
+				program.definitions.try_emplace(name, std::move(f));
+			}
+			// Parse Modules third (no matter where they are in the file)
 			for (auto&& def : ctx->module_def()) {
 				auto [name, m] = std::any_cast<std::pair<std::string, ModuleType>>(def->accept(this));
 				program.definitions.try_emplace(name, std::move(m));
@@ -90,27 +156,39 @@ namespace mdl {
 			ModuleType m;
 			auto name = ctx->IDENT()->getText();
 			pushNamespace();
-			/** \todo add params and vars to namespace */
 			for (auto& param : ctx->param()) {
-				const auto [name, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				auto& node = *currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
-				m.typeargs.emplace_back(name, std::cref(std::get<HyperparameterNode>(node)));
+				const auto [pname, dtype] = std::any_cast<ModuleParam>(param->accept(this));
+				const std::string qualifiedName = name + "." + pname;
+				const Node& node = graph().addHyperparameterNode(dtype, qualifiedName);
+				m.typeargs.emplace_back(pname, std::cref(std::get<HyperparameterNode>(node)));
+				if (auto* agg = std::get_if<AggregateType>(&dtype))
+					currentNamespace().put(
+							pname,
+							makeAggregateObject<HyperparameterNode>(*agg, qualifiedName, &Computegraph::addHyperparameterNode)
+					);
+				else
+					currentNamespace().put(pname, Object{&node});
 			}
 			for (auto& var : ctx->vardecl()) {
-				const auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				auto& node = *currentNamespace().put(name, &graph().addParameterNode(dtype));
-				m.variables.emplace_back(name, std::cref(std::get<ParameterNode>(node)));
+				const auto [vname, dtype] = std::any_cast<VarDecl>(var->accept(this));
+				const Node& node = graph().addParameterNode(dtype, vname);
+				m.variables.emplace_back(vname, std::cref(std::get<ParameterNode>(node)));
+				if (auto* agg = std::get_if<AggregateType>(&dtype))
+					currentNamespace().put(
+							vname, makeAggregateObject<ParameterNode>(*agg, vname, &Computegraph::addParameterNode)
+					);
+				else
+					currentNamespace().put(vname, Object{&node});
 			}
 			for (auto& func : ctx->funcdef()) {
-				auto decl = std::any_cast<FunctionDecl>(func->accept(this));
-				auto name = decl.name;
+				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
 				auto [_, inserted] = m.functions.insert_or_assign(std::move(name), std::move(decl));
 				if (!inserted) {
 					/** \todo output a helpful warning message that this definition shadows another member, which is undefined behavior **/
 				}
 			}
 			popNamespace();
-			currentNamespace().putType(name, DataType{BoundModuleType{.definition = m}});
+			currentNamespace().putType(name, DataType{m});
 			return std::make_pair(name, m);
 		}
 
@@ -146,7 +224,7 @@ namespace mdl {
 					for (auto arg : ctx->type_arg()) {
 						args.emplace_back(std::any_cast<TypeArg>(arg->accept(this)));
 					}
-					auto ta = setTypeArgs(dtype.value(), args);
+					auto ta = setTypeArgs(dtype.value().get(), args);
 					if (!ta.has_value()) {
 						auto firsttok = ctx->type_arg().front()->start;
 						auto lasttok = ctx->type_arg().back()->stop;
@@ -160,11 +238,11 @@ namespace mdl {
 								  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 								ctx->typename_->getLine(), firsttok->getCharPositionInLine(), ta.error()
 						);
-						return dtype.value(); /** Or return some "error" datatype here? */
+						return dtype.value().get(); /** Or return some "error" datatype here? */
 					}
 					return ta.value();
 				}
-				return dtype.value();
+				return dtype.value().get();
 			}
 		}
 
@@ -178,8 +256,7 @@ namespace mdl {
 			if (ctx->elipsis != nullptr) {
 				return TypeArg{mdl::Elipsis{}};
 			} else if (ctx->expr() != nullptr) {
-				auto tmp = ctx->expr()->accept(this);
-				const auto& node = *std::any_cast<const Node*>(tmp);
+				const auto& node = *asNode(ctx->expr()->accept(this), ctx->expr()->start);
 				if (!mdl::isCompiletimeEvalable(node)) {
 					auto firsttok = ctx->expr()->start;
 					auto lasttok = ctx->expr()->stop;
@@ -193,8 +270,6 @@ namespace mdl {
 							"Parameters must be compile time constant"
 					);
 					return TypeArg{&node}; /** return this node anyway for now **/
-				} else if (auto n = std::get_if<ConstNode>(&node)) {
-					return TypeArg{n->value};
 				} else {
 					return TypeArg{&node};
 				}
@@ -209,6 +284,8 @@ namespace mdl {
 				return mdl::Atomic{std::atoi(ctx->INTEGER()->getText().c_str())};
 			if (ctx->FLOAT() != nullptr)
 				return mdl::Atomic{std::atof(ctx->FLOAT()->getText().c_str())};
+			if (ctx->BOOL() != nullptr)
+				return mdl::Atomic(ctx->BOOL()->getText() == "true");
 			assert(false); // Invalid case
 		}
 
@@ -218,51 +295,60 @@ namespace mdl {
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
 			const Node* output = nullptr;
+			std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> tparams;
+			std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> params;
 			pushNamespace();
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
-					currentNamespace().put(name, &graph().addHyperparameterNode(dtype));
-					/** \todo register template in FunctionDecl */
+					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype, name)});
+					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
 			}
 			for (auto& param : ctx->param()) {
 				auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
-				currentNamespace().put(name, &graph().addParameterNode(dtype));
-				/** \todo register parameter in FunctionDecl */
+				auto& p = currentNamespace().put(name, Object{&graph().addParameterNode(dtype, name)});
+				params.emplace_back(name, std::get<mdl::ParameterNode>(*std::get<const mdl::Node*>(p)));
 			}
 			if (ctx->expr() != nullptr) {
-				output = std::any_cast<const Node*>(ctx->expr()->accept(this));
+				output = asNode(ctx->expr()->accept(this), ctx->expr()->start);
 			} else {
 				for (auto stmt : ctx->statement()) {
 					auto result = stmt->accept(this);
-					if (result.type() == typeid(const Node*)) {
+					if (result.type() == typeid(const Node*) || result.type() == typeid(Object)) {
 						/** \todo create a descriptive error message; the function has two return statements. **/
 						assert(output == nullptr);
 						// The statement is a return statement; the others return nullopt
-						output = std::any_cast<const Node*>(result);
+						output = asNode(std::move(result), stmt->start);
 					}
 				}
-				/** \todo track output statement **/
+				assert(output != nullptr);
 			}
 			/** \todo create a descriptive error message; the function did not have a return statement. **/
 			assert(output != nullptr);
 			popNamespace();
-			return FunctionDecl{.name = ctx->IDENT()->getText(), .output = *output};
+			auto& obj = currentNamespace().put<mdl::Object>(
+					ctx->IDENT()->getText(), FunctionDecl{
+													 .name = ctx->IDENT()->getText(),
+													 .templateParameters = std::move(tparams),
+													 .parameters = std::move(params),
+													 .output = *output
+											 }
+			);
+			return std::make_pair(ctx->IDENT()->getText(), std::get<FunctionDecl>(obj));
 		}
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
-			auto value = currentNamespace().get<const Node*>(ctx->IDENT()->getText());
+			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
 			if (!value.has_value()) {
-				auto offendingSymbol = ctx->IDENT()->getSymbol();
+				auto* sym = ctx->IDENT()->getSymbol();
 				errorlistener.semanticError(
-						PrettyErrorListener::ErrorLevel::Error, offendingSymbol, offendingSymbol->getLine(),
-						offendingSymbol->getCharPositionInLine(),
+						PrettyErrorListener::ErrorLevel::Error, sym, sym->getLine(), sym->getCharPositionInLine(),
 						std::format("Variable {} not defined", ctx->IDENT()->getText())
 				);
 				return &graph().addErrorNode();
 			}
-			return value.value().get();
+			return value.value().get(); // Returns Object as std::any
 		}
 		virtual std::any visitConstantExpression(mdlParser::ConstantExpressionContext* ctx) override {
 			return &graph().addConstNode(std::any_cast<mdl::Atomic>(ctx->constant()->accept(this)));
@@ -272,10 +358,68 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
-			auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
+			/** \todo this function needs refactoring; e.g., merge the handling of AggregateInstance, ModuleInstance, TensorType, ... to simple getMember lookups **/
+			auto baseObj = asObject(ctx->expr()->accept(this));
+			auto memberName = ctx->IDENT()->getText();
+			auto* memberTok = ctx->IDENT()->getSymbol();
 
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
+			// Struct/aggregate member access.
+			if (auto* agg = std::get_if<AggregateInstance>(&baseObj)) {
+				auto mem = agg->getMember(memberName);
+				if (!mem.has_value()) {
+					errorlistener.semanticError(
+							PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+							memberTok->getCharPositionInLine(), std::format("No member '{}' in struct", memberName)
+					);
+					return &graph().addErrorNode();
+				}
+				return mem.value().get();
+			} else if (auto* mod = std::get_if<ModuleInstance>(&baseObj)) {
+				auto mem = mod->getMember(memberName);
+				if (!mem.has_value()) {
+					errorlistener.semanticError(
+							PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+							memberTok->getCharPositionInLine(), std::format("No member '{}' in struct", memberName)
+					);
+					return &graph().addErrorNode();
+				}
+				return mem.value().get();
+			} else if (
+					auto* nodePtr = std::get_if<const Node*>(&baseObj)
+			) { // Module function access: node of BoundModuleType.
+				if (std::holds_alternative<mdl::ErrorNode>(**nodePtr)) {
+					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
+					return &graph().addErrorNode();
+				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
+					/** \todo bind the instance as the first argument **/
+					/** \todo merge with ModuleInstance implementation above **/
+					auto& funcs = bmt->definition.functions;
+					auto it = funcs.find(memberName);
+					if (it == funcs.end()) {
+						errorlistener.semanticError(
+								PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+								memberTok->getCharPositionInLine(),
+								std::format("No function '{}' in module", memberName)
+						);
+						return &graph().addErrorNode();
+					}
+					return Object{it->second};
+				} else if (auto* tensor = std::get_if<TensorType>(&mdl::getDataType(**nodePtr))) {
+					auto member = mdl::getMember(mdl::Object{*nodePtr}, memberName, {mdl::getDataType(**nodePtr)});
+					if (!member.has_value()) {
+						errorlistener.semanticError(
+								PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+								memberTok->getCharPositionInLine(), std::format("No member '{}' for tensor", memberName)
+						);
+						return &graph().addErrorNode();
+					}
+					// Bind self to the receiver; the caller invokes the returned 0-param FunctionDecl with ().
+					return Object{mdl::bind(graph(), member.value().get(), **nodePtr)};
+				}
+			}
+
+			auto* firsttok = ctx->start;
+			auto* lasttok = ctx->stop;
 			errorlistener.semanticError(
 					PrettyErrorListener::ErrorLevel::Error,
 					{{.linenr = firsttok->getLine(),
@@ -283,42 +427,170 @@ namespace mdl {
 					  .beginMark = firsttok->getCharPositionInLine(),
 					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 					firsttok->getLine(), firsttok->getCharPositionInLine(),
-					"Member access expressions are not yet implemented"
+					"Member access is only supported on struct instances and module objects"
 			);
 			return &graph().addErrorNode();
+		}
+
+		// ---------------------------------------------------------------
+		// Einops helpers
+		// ---------------------------------------------------------------
+
+		static mdl::einops::Atom parseEinopsAtom(mdlParser::Einops_atomContext* ctx) {
+			using mdl::einops::Atom;
+			using mdl::einops::AtomKind;
+			std::string text = ctx->getText();
+			if (text == "...")
+				return Atom{AtomKind::Ellipsis, {}, 0};
+			if (text == "_")
+				return Atom{AtomKind::Anon, {}, 0};
+			// Chunk: starts with '/'
+			if (!text.empty() && text[0] == '/') {
+				int64_t val = std::atoll(text.c_str() + 1);
+				return Atom{AtomKind::Chunk, {}, val};
+			}
+			if (ctx->IDENT() != nullptr)
+				return Atom{AtomKind::Named, ctx->IDENT()->getText(), 0};
+			if (ctx->INTEGER() != nullptr) {
+				int64_t val = std::atoll(ctx->INTEGER()->getText().c_str());
+				return Atom{AtomKind::Literal, {}, val};
+			}
+			// Fallback (shouldn't happen)
+			return Atom{AtomKind::Named, text, 0};
+		}
+
+		static mdl::einops::Spec parseEinopsSpec(mdlParser::Einops_spec_fullContext* specCtx) {
+			using mdl::einops::Spec;
+			using mdl::einops::SpecItem;
+			Spec spec;
+			bool inGroup = false;
+			SpecItem currentGroup{.is_group = true, .atoms = {}};
+
+			for (auto* child : specCtx->children) {
+				auto* term = dynamic_cast<antlr4::tree::TerminalNode*>(child);
+				if (term) {
+					std::string t = term->getText();
+					if (t == "(") {
+						inGroup = true;
+						currentGroup.atoms.clear();
+					} else if (t == ")") {
+						inGroup = false;
+						spec.push_back(std::move(currentGroup));
+						currentGroup = {.is_group = true, .atoms = {}};
+					}
+					continue;
+				}
+				auto* atomCtx = dynamic_cast<mdlParser::Einops_atomContext*>(child);
+				if (!atomCtx)
+					continue;
+				auto atom = parseEinopsAtom(atomCtx);
+				if (inGroup) {
+					currentGroup.atoms.push_back(atom);
+				} else {
+					spec.push_back(SpecItem{.is_group = false, .atoms = {atom}});
+				}
+			}
+			return spec;
 		}
 
 		virtual std::any visitEinopsExpression(mdlParser::EinopsExpressionContext* ctx) override {
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
-			errorlistener.semanticError(
-					PrettyErrorListener::ErrorLevel::Error,
-					{{.linenr = firsttok->getLine(),
-					  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-					  .beginMark = firsttok->getCharPositionInLine(),
-					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
-					firsttok->getLine(), firsttok->getCharPositionInLine(), "Einops expressions are not yet implemented"
-			);
-			return &graph().addErrorNode();
+			// Evaluate the tensor operand.
+			const Node* inputNode = asNode(ctx->expr()->accept(this), ctx->expr()->start);
+			if (std::holds_alternative<ErrorNode>(*inputNode))
+				return &graph().addErrorNode();
+
+			auto* einopsCtx = ctx->einops();
+			auto lhs = parseEinopsSpec(einopsCtx->einops_spec_full(0));
+			auto rhs = parseEinopsSpec(einopsCtx->einops_spec_full(1));
+
+			// Collect key=value bindings.
+			std::map<std::string, const Node*> bindings;
+			for (auto* kv : einopsCtx->keyvalue()) {
+				std::string key = kv->IDENT()->getText();
+				const Node* valNode = asNode(kv->expr()->accept(this), kv->expr()->start);
+				if (std::holds_alternative<ErrorNode>(*valNode))
+					return &graph().addErrorNode();
+				bindings[key] = valNode;
+			}
+
+			auto result = mdl::einops::apply(graph(), *inputNode, lhs, rhs, bindings);
+			if (!result) {
+				auto* tok = ctx->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						std::format("einops error: {}", result.error())
+				);
+				return &graph().addErrorNode();
+			}
+			return static_cast<const Node*>(&result->get());
 		}
 
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
-			errorlistener.semanticError(
-					PrettyErrorListener::ErrorLevel::Error,
-					{{.linenr = firsttok->getLine(),
-					  .line = errorlistener.getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-					  .beginMark = firsttok->getCharPositionInLine(),
-					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
-					firsttok->getLine(), firsttok->getCharPositionInLine(), "Method calls are not yet implemented"
-			);
-			return &graph().addErrorNode();
+			auto calleeObj = asObject(ctx->func->accept(this));
+			if (std::holds_alternative<const Node*>(calleeObj) &&
+				std::holds_alternative<ErrorNode>(*std::get<const Node*>(calleeObj)))
+				return &graph().addErrorNode();
+
+			// Evaluate argument expressions.
+			std::vector<std::reference_wrapper<const Node>> args;
+			bool hasError = false;
+			for (size_t i = 0; i < ctx->args.size(); ++i) {
+				const Node* argNode = asNode(ctx->args[i]->accept(this), ctx->args[i]->start);
+				if (std::holds_alternative<ErrorNode>(*argNode))
+					hasError = true;
+				args.emplace_back(std::cref(*argNode));
+			}
+			if (hasError)
+				return &graph().addErrorNode();
+
+			// Collect argument types for overload resolution.
+			std::vector<DataType> argtypes;
+			for (auto& ref : args)
+				argtypes.push_back(mdl::getDataType(ref.get()));
+
+			// Resolve operator() on the callee object.
+			auto decl = getMember(calleeObj, "operator()", argtypes);
+			if (!decl.has_value()) {
+				auto* tok = ctx->func->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						"Object is not callable with these argument types"
+				);
+				return &graph().addErrorNode();
+			}
+			/** \todo For member function calls (obj.func(...)), obj should be passed as the first ("this") argument.
+			 *  This is not yet implemented. */
+
+			// If the callee is a module instance node, use addModuleInvocationNode so that
+			// each instance (weightQuery, weightKey, ...) gets its own ParameterNodes for
+			// member variables (W, b, gamma, beta) instead of sharing the module type's nodes.
+			std::expected<std::reference_wrapper<const Node>, std::string> resultOrErr = [&]() {
+				if (auto* calleeNodePtr = std::get_if<const Node*>(&calleeObj)) {
+					if (!std::holds_alternative<ErrorNode>(**calleeNodePtr)) {
+						if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**calleeNodePtr))) {
+							std::string instanceName;
+							if (const auto* pn = std::get_if<ParameterNode>(*calleeNodePtr))
+								instanceName = pn->name;
+							return graph().addModuleInvocationNode(*bmt, instanceName, decl.value(), std::move(args));
+						}
+					}
+				}
+				return graph().addInvocationNode(decl.value(), std::move(args));
+			}();
+			if (!resultOrErr.has_value()) {
+				auto* tok = ctx->func->start;
+				errorlistener.semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						resultOrErr.error()
+				);
+				return &graph().addErrorNode();
+			}
+			return &resultOrErr.value().get();
 		}
 
 		virtual std::any visitArithmeticExpression(mdlParser::ArithmeticExpressionContext* ctx) override {
-			const auto* left = std::any_cast<const Node*>(ctx->left->accept(this));
-			const auto* right = std::any_cast<const Node*>(ctx->right->accept(this));
+			const auto* left = asNode(ctx->left->accept(this), ctx->left->start);
+			const auto* right = asNode(ctx->right->accept(this), ctx->right->stop);
 			if (std::holds_alternative<ErrorNode>(*left) || std::holds_alternative<ErrorNode>(*right)) {
 				// If one of the arguments is an error node (invalid subexpression), we won't find the operator to call.
 				// In this case, don't print another error, just propagate the error node so we do not spam the user
@@ -345,7 +617,7 @@ namespace mdl {
 				);
 				return &graph().addErrorNode();
 			}
-			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)});
+			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)}).value().get();
 		}
 
 		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {
@@ -373,9 +645,9 @@ namespace mdl {
 		}
 
 		virtual std::any visitDeclarationStatement(mdlParser::DeclarationStatementContext* ctx) override {
-			const auto node = std::any_cast<const Node*>(ctx->expr()->accept(this));
+			const auto* node = asNode(ctx->expr()->accept(this), ctx->expr()->start);
 			/** \todo check datatype with ctx->type() **/
-			currentNamespace().put(ctx->IDENT()->getText(), node);
+			currentNamespace().put(ctx->IDENT()->getText(), Object{node});
 			return std::nullopt;
 		}
 

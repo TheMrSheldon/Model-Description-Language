@@ -12,15 +12,19 @@ target_sources(mdl
 	PRIVATE
 		mdl/argvals.cpp
 		mdl/backends/tvm/tvm.cpp
+		mdl/backends/tvm/details/pattern_registry.cpp
+		mdl/backends/tvm/details/pipeline.cpp
 		mdl/bindings/generator.cpp
 		mdl/compiler.cpp
 		mdl/computegraph/datatype.cpp
 		mdl/computegraph/graph.cpp
 		mdl/computegraph/node.cpp
+		mdl/computegraph/object.cpp
 		mdl/namespace.cpp
 		mdl/parser.cpp
 		mdl/parser/errorlistener.cpp
 		mdl/utils/utils.cpp
+		mdl/utils/einops.cpp
 )
 
 # The Model Compiler
@@ -82,15 +86,49 @@ target_include_directories(mdl PUBLIC ${ANTLR4CPP_INCLUDE_DIRS} ${ANTLR_mdlparse
 target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 
 # TVM
+# Pick the best available BLAS backend for this platform.
+# Preference order: Intel MKL (AVX-512, cblas_sgemm_batch_strided) > OpenBLAS > none.
+# macOS always uses Accelerate.
+set(_MDL_MKL_HINT "/opt/intel/oneapi/mkl/latest")
+if(APPLE)
+	find_package(BLAS QUIET)
+	# USE_BLAS=apple selects Accelerate; no extra option needed.
+	set(MDL_TVM_BLAS_OPTS "USE_BLAS apple")
+	set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
+elseif(EXISTS "${_MDL_MKL_HINT}/include/mkl.h")
+	message(STATUS "[mdl] Using Intel MKL at ${_MDL_MKL_HINT}")
+	# USE_MKL takes the root path directly; do NOT also set USE_BLAS=mkl (deprecated
+	# and causes TVM to overwrite USE_MKL before it's checked as a directory path).
+	set(MDL_TVM_BLAS_OPTS "USE_MKL ${_MDL_MKL_HINT}")
+	set(MDL_BLAS_LINK_LIBS "${_MDL_MKL_HINT}/lib/libmkl_rt.so")
+else()
+	find_package(BLAS QUIET)
+	if(BLAS_FOUND)
+		set(MDL_TVM_BLAS_OPTS "USE_BLAS openblas")
+		set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
+	else()
+		set(MDL_TVM_BLAS_OPTS "USE_BLAS none")
+		set(MDL_BLAS_LINK_LIBS "")
+	endif()
+endif()
+
 CPMAddPackage(
-	URI "gh:apache/tvm@0.22.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA ON"
+	URI "gh:apache/tvm@0.24.0"
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" ${MDL_TVM_BLAS_OPTS}
 	EXCLUDE_FROM_ALL YES
 )
-target_link_libraries(mdl PUBLIC tvm)
+if(MDL_BLAS_LINK_LIBS)
+	target_link_libraries(mdl PUBLIC tvm_compiler "${MDL_BLAS_LINK_LIBS}")
+else()
+	target_link_libraries(mdl PUBLIC tvm_compiler)
+endif()
 
-get_target_property(LIBA_INCLUDES tvm INCLUDE_DIRECTORIES)
-target_include_directories(mdl PUBLIC ${LIBA_INCLUDES}) # < I don't know why this is necessary
+# tvm_compiler uses directory-scoped include_directories internally,
+# which does not propagate to consumers — add both include roots explicitly.
+target_include_directories(mdl PUBLIC
+    ${tvm_SOURCE_DIR}/include
+    ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include
+)
 
 
 # NVRTC
@@ -109,7 +147,7 @@ target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
 # yaml-cpp
 CPMAddPackage(URI "gh:jbeder/yaml-cpp#0.8.0" EXCLUDE_FROM_ALL YES)
-target_link_libraries(mdl PRIVATE yaml-cpp::yaml-cpp)
+target_link_libraries(mdl PUBLIC yaml-cpp::yaml-cpp)
 
 #-------------------#
 # Compiler Command  #
@@ -121,6 +159,36 @@ target_link_libraries(mdlc CLI11::CLI11)
 # termcolor
 CPMAddPackage(URI "gh:ikalnytskyi/termcolor@2.1.0" EXCLUDE_FROM_ALL YES)
 target_link_libraries(mdl PRIVATE termcolor::termcolor)
+
+# ── IREE backend (optional) ───────────────────────────────────────────────────
+# Enable with: cmake -DMDL_ENABLE_IREE=ON
+#
+# IREE is located in one of two ways (in preference order):
+#   1. find_package — set MDL_IREE_INSTALL_DIR or IREE_INSTALL_DIR (env) to the
+#      prefix used when installing IREE with `cmake --install`.
+#   2. Automatic download — the pre-built release tar for Linux x86_64 is fetched
+#      from GitHub.  Override MDL_IREE_DIST_URL to target a different release or
+#      platform (see https://github.com/iree-org/iree/releases).
+#
+# The downloaded distribution contains libIREECompiler.so and the C API headers;
+# it is placed in the CMake build directory and does NOT require compiling LLVM.
+option(MDL_ENABLE_IREE "Build the IREE backend" OFF)
+set(MDL_IREE_INSTALL_DIR "" CACHE PATH
+    "Path to an installed IREE prefix (sets the find_package hint).")
+set(MDL_IREE_DIST_URL "" CACHE STRING
+    "URL of a pre-built IREE distribution tar. Leave empty to use the default release.")
+
+if(MDL_ENABLE_IREE)
+    # The IREE backend invokes iree-compile as a subprocess to avoid an LLVM
+    # version conflict: libIREECompiler.so embeds LLVM 20 while TVM links
+    # system LLVM 19, which causes a segfault when both are loaded in-process.
+    # No link-time dependency on IREE is needed; iree-compile must be on PATH
+    # (or pointed to via the IREE_COMPILE environment variable at runtime).
+
+    target_sources(mdl PRIVATE mdl/backends/iree/iree_backend.cpp)
+    target_compile_definitions(mdl PUBLIC MDL_IREE_ENABLED)
+    message(STATUS "[mdl] IREE backend enabled (iree-compile subprocess)")
+endif()
 
 #-------------------#
 # mdl-info Command  #

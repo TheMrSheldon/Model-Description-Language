@@ -1,30 +1,19 @@
 #ifndef MDL_COMPUTEGRAPH_FUNCTIONS_HPP
 #define MDL_COMPUTEGRAPH_FUNCTIONS_HPP
 
+#include "./datatype.hpp"
 #include "./graph.hpp"
 #include "./node.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <functional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace mdl {
-	/**
-	 * @brief Represents a function definition.
-	 * @details Each function is associated with a computegraph from which it references nodes.
-	 */
-	struct FunctionDecl final {
-		std::string name; /** \todo possibly don't name the function here but only in members; */
-		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> templateParameters;
-		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
-		std::reference_wrapper<const Node> output;
-
-		const DataType& returnType() const { return mdl::getDataType(output.get()); }
-	};
-
 	template <typename... Args>
 	FunctionDecl bind(Computegraph& graph, const FunctionDecl& decl, Args&&... args) {
 		constexpr size_t N = sizeof...(Args);
@@ -49,7 +38,7 @@ namespace mdl {
 		std::vector<std::reference_wrapper<const Node>> newParamNodes;
 		newParamNodes.reserve(maxPh);
 		for (int k = 0; k < maxPh; ++k)
-			newParamNodes.push_back(graph.addParameterNode(newParamTypes[k]));
+			newParamNodes.push_back(graph.addParameterNode(newParamTypes[k], newParamNames[k]));
 
 		// Build the argument list for calling decl:
 		// bound positions use the supplied node, placeholder positions use the new param node.
@@ -59,18 +48,22 @@ namespace mdl {
 		[&]<size_t... I>(std::index_sequence<I...>) {
 			// Use ArgsTuple (decayed) instead of decltype(argTuple) to avoid
 			// instantiating tuple_element on a reference-to-tuple, which is incomplete.
-			([&] {
-				using Arg = std::tuple_element_t<I, ArgsTuple>;
-				constexpr int ph = std::is_placeholder<Arg>::value;
-				if constexpr (ph > 0) {
-					invocationArgs.push_back(newParamNodes[ph - 1]);
-				} else {
-					invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
-				}
-			}(), ...);
+			(
+					[&] {
+						using Arg = std::tuple_element_t<I, ArgsTuple>;
+						constexpr int ph = std::is_placeholder<Arg>::value;
+						if constexpr (ph > 0) {
+							invocationArgs.push_back(newParamNodes[ph - 1]);
+						} else {
+							invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
+						}
+					}(),
+					...);
 		}(std::make_index_sequence<N>{});
 
-		const Node& outputNode = graph.addInvocationNode(decl, std::move(invocationArgs));
+		auto outputOrErr = graph.addInvocationNode(decl, std::move(invocationArgs));
+		assert(outputOrErr.has_value()); // bind() callers must supply correct arg counts
+		const Node& outputNode = outputOrErr.value().get();
 
 		// Build parameters first; FunctionDecl cannot be default-constructed because
 		// output (reference_wrapper) has no default constructor.
@@ -81,10 +74,10 @@ namespace mdl {
 			parameters.emplace_back(newParamNames[k], std::cref(pn));
 		}
 		return FunctionDecl{
-			.name = decl.name,
-			.templateParameters = decl.templateParameters,
-			.parameters = std::move(parameters),
-			.output = outputNode,
+				.name = decl.name,
+				.templateParameters = decl.templateParameters,
+				.parameters = std::move(parameters),
+				.output = outputNode,
 		};
 	}
 } // namespace mdl

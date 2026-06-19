@@ -18,7 +18,7 @@ namespace mdl::builtins {
 		/** Statistic Functions **/
 		MAX,
 		MIN,
-		AVG,
+		MEAN,
 		SUM,
 		/** Arithmetic Functions **/
 		COS,
@@ -26,6 +26,13 @@ namespace mdl::builtins {
 		TAN,
 		EXP,
 		ERF,
+		SQRT,
+		RSQRT,
+		VAR,
+		/** Einops **/
+		RESHAPE,
+		PERMUTE, /**< Permutes a tensor based on the given permutation **/
+		EXPAND,
 
 		COUNT
 	};

@@ -1,10 +1,13 @@
-FROM mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04
+FROM mcr.microsoft.com/devcontainers/cpp:ubuntu
 
 RUN <<EOF
+set -e
 apt update
 
-apt install -y cmake git cppcheck gdb clang-format-19 clang-tidy-19 openjdk-11-jre
+# Dev Tools
+apt install -y cmake cppcheck clang-format-19 clang-tidy-19 openjdk-11-jre
 
-apt install -y nvidia-cuda-toolkit
+# Dependencies
+apt install -y nvidia-cuda-toolkit libopenblas-dev
 
 EOF

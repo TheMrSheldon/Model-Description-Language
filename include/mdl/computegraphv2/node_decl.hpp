@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace mdl {
 	/**
@@ -32,9 +33,12 @@ namespace mdl {
 	struct HyperparameterNode;
 
 	/**
-     * @brief An atomic value.
-     */
-	using Atomic = std::variant<int, double>;
+	 * @brief An atomic (compile-time constant) value.
+	 * @details Scalars (int, double) and a 1-d integer tensor (permutation indices).
+	 * \todo Replace std::vector<int> with a proper N-d array type (e.g. xt::xarray<int>)
+	 *       and unify scalars as 0-d tensors so int/double become redundant.
+	 */
+	using Atomic = std::variant<int, double, std::vector<int>>;
 
 	/**
      * @brief A node in the compute graph.

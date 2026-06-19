@@ -67,7 +67,49 @@ float[...] softmax(x: float[...]) {
  * @param x 
  * @return 
  */
-float[...] relu(x: float[...]) => max(x, 0);
+// float[...] relu(x: float[...]) => max(x, 0);
+
+/**
+ * @brief Computes the elementwise square root of \p x .
+ * @details \f[(x_i)_{1\leq i \leq n} \mapsto (\sqrt{x_i})_{1\leq i \leq n}.\f]
+ * @ingroup Arithmetic
+ * 
+ * @param x 
+ * @return the square root of each component of \p x .
+ */
+float[...] sqrt(x: float[...]) => __builtin_sqrt(x);
+
+/**
+ * @brief Computes the reciprocal square root for each element in \p x.
+ * @details \f[(x_i)_{1\leq i \leq n} \mapsto \left(\frac{1}{\sqrt{x_i}}\right)_{1\leq i \leq n}.\f]
+ * @ingroup Arithmetic
+ * 
+ * @param x 
+ * @return 
+ */
+float[...] rsqrt(x: float[...]) => __builtin_rsqrt(x);
+
+/**
+ * @brief Variance
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @param dof 
+ * @return 
+ */
+float[...] var(x: float[...], dof: uint /*= 1*/) => __builtin_var(x, dof);
+
+/**
+ * @brief Mean
+ * @details
+ * @ingroup Statistics
+ * 
+ * @param x 
+ * @return 
+ */
+template<N: uint>
+float[...] mean(x: float[..., N]) => __builtin_mean(x);
 
 /**
  * @brief Implements layer normalization as proposed by \cite layernorm.
@@ -76,11 +118,11 @@ module LayerNorm[dim: uint] {
     beta: float[dim]
     gamma: float[dim]
 
-    template<N: uint>
-    float[..., dim, N] forward(x: float[..., dim, N]) {
-        auto numerator = mean(input)[... -> ... 1];
-        auto denominator = rsqrt(var(x[... a b -> ... b a]) + 1e-5);
-        return (numerator * denominator) * gamma + beta;
+    float[..., dim] forward(x: float[..., dim]) {
+        auto mu = mean(x)[... -> ... 1];
+        auto x_c = x - mu;
+        auto sigma = rsqrt(mean(x_c * x_c)[... -> ... 1] + 1e-12);
+        return x_c * sigma * gamma + beta;
     }
 }
 
@@ -88,14 +130,14 @@ module LayerNorm[dim: uint] {
  * @brief Applies a learnable linear transformation with optional bias.
  * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
  */
-module Linear[indim: uint, outdim: uint, bias: bool = false] {
+module Linear[indim: uint, outdim: uint, bias: bool /*= false*/] {
     W: float[outdim, indim]
     b: float[outdim]
 
     float[..., outdim] forward(x: float[..., indim]) =>
-        bias?
-            no => x @ W.T
-            yes => x @ W.T + b;
+        /*bias?
+            no => x @ W.T()
+            yes =>*/ x @ W.T() + b;
 }
 
 struct TransformerConf {
@@ -111,14 +153,14 @@ struct TransformerConf {
 
 module TransformerEncoder[conf: TransformerConf] {
     // Multi-Head Attention
-    weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
-    weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
-    weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value]
-    weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model]
-    weightIntermed: Linear[conf.dims.model, conf.dims.inner]
-    mhaNorm: Linear[conf.dims.model]
+    weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key, true]
+    weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key, true]
+    weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value, true]
+    weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model, true]
+    weightIntermed: Linear[conf.dims.model, conf.dims.inner, true]
+    mhaNorm: LayerNorm[conf.dims.model]
     // FFN
-    weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
+    weightIntermedOut: Linear[conf.dims.inner, conf.dims.model, true]
     ffnNorm: LayerNorm[conf.dims.model]
 
     float[...] bertGELU(x: float[...]) =>
@@ -128,8 +170,8 @@ module TransformerEncoder[conf: TransformerConf] {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto facv = value[... (h d) -> h ... d | h=conf.numAttnHeads];
-        auto prod = facq @ fack.T;
-        auto tmp = softmax(prod / sqrt(conf.dims.key), -1) @ facv;
+        auto prod = facq @ fack.T();
+        auto tmp = softmax(prod / sqrt(conf.dims.key)/*, -1*/) @ facv;
         return tmp[h ... d -> ... (h d)];
     }
     

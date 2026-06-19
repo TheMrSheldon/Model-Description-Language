@@ -29,6 +29,7 @@ type_arg
 constant
       : INTEGER
       | FLOAT
+	  | BOOL
       ;
 
 vardecl
@@ -67,29 +68,30 @@ keyvalue
 // Expressions on the top are given more precedent (matched first).
 expr
       // Primary Expressions
-      : IDENT                                         # VarAccessExpression
-      | constant                                      # ConstantExpression
-      | '(' expr ')'                                  # ParenExpression
+      : IDENT                                              # VarAccessExpression
+      | constant                                           # ConstantExpression
+      | '(' expr ')'                                       # ParenExpression
       // Postfix Expressions
-      | expr '.' IDENT                                # AccessExpression
-      | expr '[' einops ']'                           # EinopsExpression
-      | expr '(' (expr (',' expr)*)? ')'              # MethodcallExpression
+      | expr '.' IDENT                                     # AccessExpression
+      | expr '[' einops ']'                                # EinopsExpression
+      | func=expr '(' (args+=expr (',' args+=expr)*)? ')'  # MethodcallExpression
       // Arithmetic Expressions
-      | left=expr bop=('*' | '/' | '@') right=expr    # ArithmeticExpression
-      | left=expr bop=('+' | '-') right=expr          # ArithmeticExpression
+      | left=expr bop=('*' | '/' | '@') right=expr         # ArithmeticExpression
+      | left=expr bop=('+' | '-') right=expr               # ArithmeticExpression
       // Switch Expression
-      | expr '?' (expr '=>' expr)*                    # SwitchExpression
+      | expr '?' (expr '=>' expr)*                         # SwitchExpression
       ;
 
 statement
-      : expr ';'                                      # ExpressionStatement
-      | (type | 'auto') IDENT '=' expr ';'            # DeclarationStatement
-      | 'return' expr ';'                             # ReturnStatement
+      : expr ';'                                           # ExpressionStatement
+      | (type | 'auto') IDENT '=' expr ';'                 # DeclarationStatement
+      | 'return' expr ';'                                  # ReturnStatement
       ;
 
 
 FLOAT: '-'?[0-9]*'.'[0-9]+ | INTEGER'e'INTEGER;
 INTEGER: '-'?[0-9]+;
+BOOL: 'true' | 'false';
 
 IDENT: [_a-zA-Z]+;
 

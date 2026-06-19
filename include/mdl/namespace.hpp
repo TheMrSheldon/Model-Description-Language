@@ -54,10 +54,10 @@ namespace mdl {
 			assert(inserted);
 			return std::any_cast<const DataType&>(it->second);
 		}
-		const std::optional<DataType> getType(std::string_view name) const {
+		std::optional<std::reference_wrapper<const DataType>> getType(std::string_view name) const {
 			auto it = types.find(std::string{name});
 			if (it != std::end(types))
-				return it->second;
+				return std::cref(it->second);
 			if (parent != nullptr)
 				return parent->getType(name);
 			return std::nullopt;

@@ -7,8 +7,32 @@
 
 namespace mdl {
 	struct CompilationUnit;
+	class ArgVals;
 
-	void compileToFile(const CompilationUnit& unit, const std::filesystem::path& output);
+	enum class Backend {
+		Tvm,  ///< TVM/Relax backend (default) — produces a .so via TVM
+		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
+	};
+
+	struct CompileOptions {
+		/**
+		 * Optimization level string.
+		 *
+		 * ""             — default pipeline (tile+vectorize+FuseOps, fast compile)
+		 * "metaschedule" — MetaSchedule auto-tuning over all operators (slow compile,
+		 *                  near-optimal runtime performance)
+		 */
+		std::string optimization;
+
+		/** Target backend. Defaults to TVM. */
+		Backend backend = Backend::Tvm;
+	};
+
+	void compileToFile(
+			const CompilationUnit& unit,
+			const std::filesystem::path& output,
+			const ArgVals& argvals,
+			const CompileOptions& opts = {});
 
 	/**
 	 * @brief Returns the mangled symbol name for a module member function.

@@ -27,6 +27,7 @@ struct CompileArgs {
 	std::optional<std::filesystem::path> argvals;
 	LoggerConf logConf;
 	std::vector<mdl::bindings::GeneratorFactory> bindingsGenerators;
+	mdl::CompileOptions compileOpts;
 };
 
 static void print(std::string_view name, const mdl::AggregateType& s) { std::cout << "Struct " << name << std::endl; }
@@ -82,7 +83,7 @@ static void print(std::string_view name, const mdl::ModuleType& m) {
 static void runCompileCommand(const CompileArgs& args) {
 	mdl::log::setVerbosity(args.logConf.getVerbosity());
 
-	auto argvals = args.argvals.transform(mdl::ArgVals::fromYAML);
+	mdl::ArgVals argvals = args.argvals.transform(mdl::ArgVals::fromYAML).value_or(mdl::ArgVals{});
 
 	std::filesystem::path output = args.output.value_or("a.o");
 	/** \todo: handle multiple input files */
@@ -102,7 +103,7 @@ static void runCompileCommand(const CompileArgs& args) {
 	}
 	std::cout << "Num Nodes: " << program.graph.getNumNodes() << std::endl;
 
-	mdl::compileToFile(program, output);
+	mdl::compileToFile(program, output, argvals, args.compileOpts);
 
 	for (const auto& factory : args.bindingsGenerators) {
 		auto generator = factory();
@@ -125,6 +126,16 @@ int main(int argc, char* argv[]) {
 			"--generate-bindings", args.bindingsGenerators,
 			"If set, a binding file will be generated for the selected targets."
 	);
+	app.add_option(
+			"-O,--optimize", args.compileOpts.optimization,
+			"Optimization level. Use 'metaschedule' to enable MetaSchedule auto-tuning "
+			"(slow compile, near-optimal runtime)."
+	);
+	app.add_option("--backend", args.compileOpts.backend, "Compiler backend: tvm (default), iree")
+		->transform(CLI::CheckedTransformer(std::map<std::string, mdl::Backend>{
+			{"tvm",  mdl::Backend::Tvm},
+			{"iree", mdl::Backend::Iree},
+		}));
 	//->transform(CLI::CheckedTransformer(mdl::bindings::getGenerators()));
 	app.callback([&args]() { runCompileCommand(args); });
 

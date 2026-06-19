@@ -20,6 +20,8 @@ jobs:
       with:
         cmake: true
         ninja: true
+    - name: Install OpenBLAS
+      run: sudo apt-get install -y libopenblas-dev
     - name: Fetch Tags
       continue-on-error: true
       run: |
