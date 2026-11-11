@@ -1,4 +1,6 @@
 #include <mdl/utils/einops.hpp>
+#include <mdl/exports.hpp>
+#include "mdl/argvals.hpp"
 #include <mdl/computegraphv2/builtins.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
 #include <mdl/computegraphv2/graph.hpp>
@@ -38,6 +40,15 @@ static SpecItem group(std::initializer_list<std::string> names) {
 	return item;
 }
 
+/// The value of a statically known dimension (a literal or a constant expression in the graph).
+static std::optional<int64_t> staticDim(const TensorType::Shape::value_type& dim) {
+	if (const auto* u = std::get_if<unsigned>(&dim))
+		return *u;
+	if (const auto* n = std::get_if<const Node*>(&dim))
+		return evalConstant(**n, ArgVals{});
+	return std::nullopt;
+}
+
 /// Make a static TensorType with known integer dims.
 static TensorType tensorType(PrimitiveType elem, std::initializer_list<unsigned> dims) {
 	TensorType::Shape shape;
@@ -65,9 +76,12 @@ TEST_CASE("einops pure permute emits PERMUTE node", "[einops][permute]") {
 	REQUIRE(std::holds_alternative<InvocationNode>(out));
 	const auto& inv = std::get<InvocationNode>(out);
 	REQUIRE(inv.id == builtins::FunctionIDs::PERMUTE);
-	// First arg is the input; then permutation indices [1, 0, 2]
-	REQUIRE(inv.arguments.size() == 4);
+	// Arguments: the input and the permutation [1, 0, 2] as one constant vector.
+	REQUIRE(inv.arguments.size() == 2);
 	REQUIRE(&inv.arguments[0].get() == &input);
+	const auto* perm = std::get_if<ConstNode>(&inv.arguments[1].get());
+	REQUIRE(perm != nullptr);
+	REQUIRE(std::get<std::vector<int>>(perm->value) == std::vector<int>{1, 0, 2});
 }
 
 TEST_CASE("einops identity permute emits no PERMUTE node", "[einops][permute]") {
@@ -203,7 +217,7 @@ TEST_CASE("einops infers b from merged size and a=2 binding", "[einops][inferenc
 	REQUIRE(inv.id == builtins::FunctionIDs::RESHAPE);
 	const auto& outType = std::get<TensorType>(inv.type);
 	REQUIRE(outType.shape.size() == 2);
-	REQUIRE(std::get<unsigned>(outType.shape[1]) == 12u); // b inferred as 24/2
+	REQUIRE(staticDim(outType.shape[1]) == 12); // b inferred as 24/2
 }
 
 TEST_CASE("einops infers a from merged size and b=3 binding", "[einops][inference]") {
@@ -223,7 +237,7 @@ TEST_CASE("einops infers a from merged size and b=3 binding", "[einops][inferenc
 	REQUIRE(inv.id == builtins::FunctionIDs::RESHAPE);
 	const auto& outType = std::get<TensorType>(inv.type);
 	REQUIRE(outType.shape.size() == 2);
-	REQUIRE(std::get<unsigned>(outType.shape[0]) == 4u); // a inferred as 12/3
+	REQUIRE(staticDim(outType.shape[0]) == 4); // a inferred as 12/3
 }
 
 TEST_CASE("einops infers b from RHS literal: (a b) -> 2 b", "[einops][inference]") {

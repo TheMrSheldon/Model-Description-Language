@@ -185,8 +185,13 @@ static std::expected<DimSizeMap, std::string> buildDimSizes(
 		const TensorType& inputType,
 		const std::map<std::string, const Node*>& bindings) {
 	DimSizeMap sizes;
-	for (auto& [name, node] : bindings)
-		sizes[name] = node;
+	for (auto& [name, node] : bindings) {
+		// Constant bindings (e.g. `h=2`) are folded so that the sizes of their peers in a group can be inferred.
+		if (const auto* cn = std::get_if<ConstNode>(node); cn && std::holds_alternative<int>(cn->value))
+			sizes[name] = static_cast<int64_t>(std::get<int>(cn->value));
+		else
+			sizes[name] = node;
+	}
 
 	// Pre-pass: use RHS literals to bind absent LHS group atoms before the
 	// main loop, so that the inference step below can see them.

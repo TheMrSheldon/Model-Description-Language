@@ -172,9 +172,14 @@ void PrettyErrorListener::printError(
 }
 
 void PrettyErrorListener::printSummary() const {
+	if (numErrors == 0 && numWarnings == 0)
+		return;
 	std::cerr << "Encountered ";
 	if (numErrors > 0)
-		std::cerr << termcolor::red << numErrors << " error(s)" << termcolor::reset << std::endl;
+		std::cerr << termcolor::red << numErrors << " error(s)" << termcolor::reset;
+	if (numErrors > 0 && numWarnings > 0)
+		std::cerr << " and ";
 	if (numWarnings > 0)
-		std::cerr << termcolor::yellow << numWarnings << " warning(s)" << termcolor::reset << std::endl;
+		std::cerr << termcolor::yellow << numWarnings << " warning(s)" << termcolor::reset;
+	std::cerr << std::endl;
 }

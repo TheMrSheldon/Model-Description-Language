@@ -2,8 +2,10 @@
 
 #include <filesystem>
 
+#include <vector>
+
 namespace mdl {
-struct CompilationUnit;
+struct ExportedFunction;
 class ArgVals;
 struct CompileOptions;
 } // namespace mdl
@@ -20,7 +22,7 @@ namespace mdl::backends::iree {
  * The IREE runtime is required to load and execute the resulting file.
  */
 void compileToFile(
-    const mdl::CompilationUnit& unit,
+    const std::vector<mdl::ExportedFunction>& exports,
     const std::filesystem::path& output,
     const mdl::ArgVals& argvals,
     const mdl::CompileOptions& opts);

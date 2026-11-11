@@ -26,9 +26,9 @@ namespace ph = std::placeholders;
  * unchanged (no new node created).
  */
 static FunctionDecl makeDecl(Computegraph& graph) {
-	const Node& paramX = graph.addParameterNode(PrimitiveType::integer);
-	const Node& paramY = graph.addParameterNode(PrimitiveType::floating);
-	const Node& paramZ = graph.addParameterNode(PrimitiveType::integer);
+	const Node& paramX = graph.addInputNode(PrimitiveType::integer);
+	const Node& paramY = graph.addInputNode(PrimitiveType::floating);
+	const Node& paramZ = graph.addInputNode(PrimitiveType::integer);
 	// output: TENSOR_ADD(x, y)  [z is intentionally unused in the output]
 	const Node& output = graph.addInvocationNode(
 			builtins::FunctionIDs::TENSOR_ADD, DataType{PrimitiveType::integer}, {std::cref(paramX), std::cref(paramY)}
@@ -39,11 +39,11 @@ static FunctionDecl makeDecl(Computegraph& graph) {
 			.templateParameters = {},
 			.parameters =
 					{
-							{"x", std::cref(std::get<ParameterNode>(paramX))},
-							{"y", std::cref(std::get<ParameterNode>(paramY))},
-							{"z", std::cref(std::get<ParameterNode>(paramZ))},
+							{"x", std::cref(std::get<InputNode>(paramX))},
+							{"y", std::cref(std::get<InputNode>(paramY))},
+							{"z", std::cref(std::get<InputNode>(paramZ))},
 					},
-			.output = output,
+			.outputs = {output},
 	};
 }
 
@@ -82,7 +82,7 @@ TEST_CASE("bind output is an InvocationNode", "[bind]") {
 	FunctionDecl result = mdl::bind(graph, decl, bound, std::placeholders::_1, std::placeholders::_2);
 
 	// Inlining TENSOR_ADD(x, y) with x=bound, y=newParam produces a new InvocationNode.
-	REQUIRE(std::holds_alternative<InvocationNode>(result.output.get()));
+	REQUIRE(std::holds_alternative<InvocationNode>(result.outputs[0].get()));
 }
 
 TEST_CASE("bind invocation reflects the arity of the output op (TENSOR_ADD = 2 args)", "[bind]") {
@@ -92,7 +92,7 @@ TEST_CASE("bind invocation reflects the arity of the output op (TENSOR_ADD = 2 a
 	const Node& bound = graph.addConstNode(Atomic{0});
 	FunctionDecl result = mdl::bind(graph, decl, std::placeholders::_1, bound, std::placeholders::_2);
 
-	const auto& inv = std::get<InvocationNode>(result.output.get());
+	const auto& inv = std::get<InvocationNode>(result.outputs[0].get());
 	// The inlined InvocationNode mirrors the original builtin call (2 operands), not the
 	// number of parameters of the FunctionDecl being bound (3).
 	REQUIRE(inv.arguments.size() == 2);
@@ -211,7 +211,7 @@ TEST_CASE("bind wires bound node into invocation at correct position", "[bind]")
 
 	// Inlining TENSOR_ADD(x, y) with x=boundA, y=newParamY, z=boundC:
 	// → new InvocationNode(TENSOR_ADD, [boundA, newParamY])
-	const auto& inv = std::get<InvocationNode>(result.output.get());
+	const auto& inv = std::get<InvocationNode>(result.outputs[0].get());
 	REQUIRE(inv.arguments.size() == 2);		   // TENSOR_ADD arity
 	CHECK(&inv.arguments[0].get() == &boundA); // x operand ← boundA
 }
@@ -225,13 +225,13 @@ TEST_CASE("bind wires new ParameterNode into invocation at placeholder position"
 
 	// Inlining TENSOR_ADD(x, y) with x=bound, y=newParamY, z=newParamZ:
 	// → new InvocationNode(TENSOR_ADD, [bound, newParamY])
-	const auto& inv = std::get<InvocationNode>(result.output.get());
+	const auto& inv = std::get<InvocationNode>(result.outputs[0].get());
 	REQUIRE(result.parameters.size() == 2);
 
 	// result.parameters[0] = ("y", newParamY)  [_1 → y, index 1 in original params]
 	// The y operand (inv.arguments[1]) must point to the same ParameterNode.
-	const ParameterNode& newParamY = result.parameters[0].second.get();
-	CHECK(&std::get<ParameterNode>(inv.arguments[1].get()) == &newParamY);
+	const InputNode& newParamY = result.parameters[0].second.get();
+	CHECK(&std::get<InputNode>(inv.arguments[1].get()) == &newParamY);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,13 +274,13 @@ TEST_CASE("bind on a zero-parameter function with no args returns a ConstNode ou
 	Computegraph graph;
 	const Node& output = graph.addConstNode(Atomic{0});
 
-	FunctionDecl decl{.name = "constant", .output = output};
+	FunctionDecl decl{.name = "constant", .outputs = {output}};
 
 	FunctionDecl result = mdl::bind(graph, decl);
 
 	// Inlining a ConstNode output with an empty substitution map returns the same
 	// ConstNode directly — no new node is added and the output is not an InvocationNode.
 	CHECK(result.parameters.empty());
-	CHECK(std::holds_alternative<ConstNode>(result.output.get()));
-	CHECK(&result.output.get() == &output);
+	CHECK(std::holds_alternative<ConstNode>(result.outputs[0].get()));
+	CHECK(&result.outputs[0].get() == &output);
 }

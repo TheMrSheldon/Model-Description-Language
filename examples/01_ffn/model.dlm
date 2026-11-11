@@ -1,11 +1,11 @@
+import std;
 
-module Linear[indim: uint, outdim: uint, bias: bool] {
-    W: float[8,3]/*[outdim, indim]*/
-    b: float[3]/*[outdim]*/
+/**
+ * @brief A single fully connected layer: computes x W^T + b.
+ */
+module FFN[indim: uint, outdim: uint] {
+    W: float[outdim, indim]
+    b: float[outdim]
 
-    float[..., 3] forward(x: float[1,8] /*float[..., indim]*/) =>
-        x @ W + b
-        /*bias?
-            no => x @ W.T
-            yes => x @ W.T + b*/;
+    float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
 }

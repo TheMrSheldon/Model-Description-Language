@@ -7,12 +7,15 @@ add_executable(tests
     mdl/computegraph/function.cpp
     mdl/computegraph/object.cpp
     mdl/computegraph/einops.cpp
+    mdl/parser/parser.cpp
+    mdl/parser/imports.cpp
+    mdl/backends/tvm_patterns.cpp
 )
 
 target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl)
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_features(tests PRIVATE cxx_std_23)
 
-add_test(NAME tirextrackertest COMMAND tests
+add_test(NAME unit_tests COMMAND tests
 	#WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/testfiles
 )

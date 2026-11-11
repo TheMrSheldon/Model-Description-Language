@@ -28,6 +28,8 @@ namespace mdl::builtins {
 		ERF,
 		SQRT,
 		RSQRT,
+		LOG,
+		TANH,
 		VAR,
 		/** Einops **/
 		RESHAPE,

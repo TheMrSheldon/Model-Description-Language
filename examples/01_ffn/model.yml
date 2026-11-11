@@ -1,4 +1,3 @@
-Linear:
-  indim: 3
-  outdim: 8
-  bias: false
+FFN:
+  indim: 8
+  outdim: 3

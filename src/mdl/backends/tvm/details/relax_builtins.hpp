@@ -75,6 +75,15 @@ static inline ::tvm::relax::Expr makeFloatConst(float val) {
     return ::tvm::relax::Constant(data);
 }
 
+/** The size of the last dimension as a float divisor (a constant if static, else the symbolic size). */
+static inline ::tvm::relax::Expr lastDimDivisor(const ::tvm::relax::Expr& x) {
+    auto shape = tensorShape(x);
+    assert(!shape.empty() && "reduction over a tensor without dimensions");
+    if (const auto* imm = shape.back().template as<::tvm::IntImmNode>())
+        return makeFloatConst(static_cast<float>(imm->value));
+    return ::tvm::relax::PrimValue(::tvm::cast(::tvm::DataType::Float(32), shape.back()));
+}
+
 /** Emit a value into the BlockBuilder and return the bound Var. */
 static inline ::tvm::relax::Var emitAs(
     ::tvm::relax::BlockBuilder& bb,
@@ -98,28 +107,9 @@ relaxFunctions{
     },
     /** TENSOR_DOT **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-        // Use relax.op.matmul for any rank ≥ 2 — it handles batched matmul natively
-        // and can be legalized to CBLAS (sgemm or sgemm loop over batch dims).
-        // einsum is avoided entirely: it does not get CBLAS dispatch.
-        const auto& A = ts[0];
-        const auto& B = ts[1];
-        int rA = tensorNdim(A);
-        int rB = tensorNdim(B);
-        if (rA >= 2 && rB >= 2) {
-            ::tvm::ffi::Optional<::tvm::DataType> out_dtype;
-            return callRelaxOp("relax.op.matmul", A, B, out_dtype);
-        }
-        // Fallback for unusual ranks (should not occur in practice)
-        int nBatch = std::max(rA, rB) - 2;
-        std::string lhs, rhs, out;
-        for (int b = 0; b < nBatch; ++b) {
-            char c = static_cast<char>('a' + b);
-            lhs += c; rhs += c; out += c;
-        }
-        lhs += "ij"; rhs += "jk"; out += "ik";
-        std::string subscript = lhs + "," + rhs + "->" + out;
-        ::tvm::relax::Tuple operandsTuple(::tvm::ffi::Array<::tvm::relax::Expr>{A, B});
-        return callRelaxOp("relax.op.einsum", operandsTuple, subscript);
+        // relax.matmul has NumPy semantics (batched, broadcasting, 1-D operands as vectors).
+        ::tvm::ffi::Optional<::tvm::DataType> out_dtype;
+        return callRelaxOp("relax.op.matmul", ts[0], ts[1], out_dtype);
     },
     /** TENSOR_PROD **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
@@ -143,14 +133,8 @@ relaxFunctions{
      *  (relax.op.mean generates a B1-sized intermediate that LLVM codegen can't stack-alloc). **/
     [](auto& bb, auto ts) -> ::tvm::relax::Expr {
         const auto& x = ts[0];
-        auto shape = tensorShape(x);
         auto s = emitAs(bb, reduceLastAxis("relax.op.sum", x, /*keepdims=*/false), "sum");
-        float n_val = 1.0f;
-        if (!shape.empty()) {
-            if (const auto* imm = shape.back().template as<::tvm::IntImmNode>())
-                n_val = static_cast<float>(imm->value);
-        }
-        return callRelaxOp("relax.op.divide", s, makeFloatConst(n_val));
+        return callRelaxOp("relax.op.divide", s, lastDimDivisor(x));
     },
     /** SUM — keepdims=true **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
@@ -165,18 +149,14 @@ relaxFunctions{
     /** ERF **/[](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.erf", ts[0]); },
     /** SQRT **/[](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.sqrt", ts[0]); },
     /** RSQRT **/[](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.rsqrt", ts[0]); },
+    /** LOG **/[](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.log", ts[0]); },
+    /** TANH **/[](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.tanh", ts[0]); },
 
     // ── VAR = E[x²] − E[x]² ─────────────────────────────────────────────────
     /** VAR — uses sum/N instead of relax.op.mean to avoid symbolic intermediate buffer **/
     [](auto& bb, auto ts) -> ::tvm::relax::Expr {
         const auto& x = ts[0];
-        auto shape = tensorShape(x);
-        float n_val = 1.0f;
-        if (!shape.empty()) {
-            if (const auto* imm = shape.back().template as<::tvm::IntImmNode>())
-                n_val = static_cast<float>(imm->value);
-        }
-        auto n_const = makeFloatConst(n_val);
+        auto n_const = lastDimDivisor(x);
 
         auto x2  = emitAs(bb, callRelaxOp("relax.op.multiply", x, x), "sq");
         auto sx  = emitAs(bb, reduceLastAxis("relax.op.sum", x,  /*keepdims=*/false), "sum");

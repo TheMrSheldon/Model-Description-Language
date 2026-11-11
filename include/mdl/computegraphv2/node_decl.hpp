@@ -24,7 +24,12 @@ namespace mdl {
      */
 	struct ErrorNode;
 	/**
-     * @brief "Parameter nodes" represent member variables.
+     * @brief "Input nodes" represent function arguments (runtime inputs of a function).
+     */
+	struct InputNode;
+	/**
+     * @brief "Parameter nodes" represent module member variables (weights). Their name is the fully qualified path of
+     * the weight relative to the module whose function owns them (e.g., `layers.3.weightQuery.W`).
      */
 	struct ParameterNode;
 	/**
@@ -43,8 +48,9 @@ namespace mdl {
 	/**
      * @brief A node in the compute graph.
      */
-	using Node = std::variant<ConstNode, InvocationNode, ErrorNode, ParameterNode, HyperparameterNode>;
+	using Node = std::variant<ConstNode, InvocationNode, ErrorNode, InputNode, ParameterNode, HyperparameterNode>;
 
+	const std::string& getName(const InputNode& node);
 	const std::string& getName(const ParameterNode& node);
 	const std::string& getName(const HyperparameterNode& node);
 	std::expected<std::reference_wrapper<const std::string>, bool> getName(const Node& node);

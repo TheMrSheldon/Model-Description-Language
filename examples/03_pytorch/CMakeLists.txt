@@ -1,8 +1,2 @@
-enable_language(MDL)
-
-add_library(03_pytorch SHARED
-    model.dlm
-)
-
-# This is usually not required but since we are also responsible for compiling the compiler here, we will add it as a dependency
-add_dependencies(03_pytorch mdlc)
+# Builds a shared library plus PyTorch bindings (model_pytorch.py) that main.py loads via tvm_ffi.
+mdl_add_model(03_pytorch SOURCE model.dlm CONFIG model.yaml SHARED BINDINGS python-torch)

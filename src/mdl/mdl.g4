@@ -1,7 +1,12 @@
 grammar mdl;
 
 program
-      : (module_def | struct_def | funcdef)* EOF
+      : (import_stmt | module_def | struct_def | funcdef)* EOF
+      ;
+
+// `import a.b;` imports the definitions of `a/b.dlm` or, if `a/b` is a directory, of all files in it.
+import_stmt
+      : 'import' path+=IDENT ('.' path+=IDENT)* ';'
       ;
 
 struct_def
@@ -37,8 +42,14 @@ vardecl
       ;
 
 funcdef
-      : templatespec? type IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
-      | templatespec? type IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
+      : templatespec? rettype IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
+      | templatespec? rettype IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
+      ;
+
+// A function returns one value or (in parentheses) multiple values.
+rettype
+      : type
+      | '(' type (',' type)* ')'
       ;
 
 templatespec
@@ -75,6 +86,8 @@ expr
       | expr '.' IDENT                                     # AccessExpression
       | expr '[' einops ']'                                # EinopsExpression
       | func=expr '(' (args+=expr (',' args+=expr)*)? ')'  # MethodcallExpression
+      // Prefix Expressions
+      | '-' expr                                           # NegateExpression
       // Arithmetic Expressions
       | left=expr bop=('*' | '/' | '@') right=expr         # ArithmeticExpression
       | left=expr bop=('+' | '-') right=expr               # ArithmeticExpression
@@ -84,16 +97,18 @@ expr
 
 statement
       : expr ';'                                           # ExpressionStatement
-      | (type | 'auto') IDENT '=' expr ';'                 # DeclarationStatement
-      | 'return' expr ';'                                  # ReturnStatement
+      | (type | 'auto') names+=IDENT (',' names+=IDENT)* '=' expr ';' # DeclarationStatement
+      | 'return' values+=expr (',' values+=expr)* ';'       # ReturnStatement
       ;
 
 
-FLOAT: '-'?[0-9]*'.'[0-9]+ | INTEGER'e'INTEGER;
-INTEGER: '-'?[0-9]+;
+// Note: literals are unsigned; negative numbers are parsed as NegateExpression (so that `x-1` is a subtraction).
+FLOAT: [0-9]* '.' [0-9]+ EXPONENT? | [0-9]+ EXPONENT;
+fragment EXPONENT: [eE] [+-]? [0-9]+;
+INTEGER: [0-9]+;
 BOOL: 'true' | 'false';
 
-IDENT: [_a-zA-Z]+;
+IDENT: [_a-zA-Z][_a-zA-Z0-9]*;
 
 BLOCKCOMMENT : '/*' .*? '*/' -> channel(HIDDEN);
 LINECOMMENT : '//' ~[\r\n]* -> channel(HIDDEN);

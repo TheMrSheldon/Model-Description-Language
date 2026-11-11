@@ -49,6 +49,11 @@ namespace mdl {
 			return (parent != nullptr) ? parent->get<T>(name) : std::nullopt;
 		}
 
+		/** @brief Whether an object or type named @p name is defined in this namespace itself (not in a parent). */
+		bool definesLocally(std::string_view name) const {
+			return objects.contains(std::string{name}) || types.contains(std::string{name});
+		}
+
 		const DataType& putType(std::string_view name, DataType&& type) {
 			auto [it, inserted] = types.emplace(std::string{name}, std::move(type));
 			assert(inserted);

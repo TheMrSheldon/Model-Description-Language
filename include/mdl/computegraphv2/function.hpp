@@ -24,7 +24,7 @@ namespace mdl {
 		std::array<int, N> phIdx = {std::is_placeholder<std::decay_t<Args>>::value...};
 		int maxPh = N > 0 ? *std::max_element(phIdx.begin(), phIdx.end()) : 0;
 
-		// Create new ParameterNodes for each placeholder slot.
+		// Create new InputNodes for each placeholder slot.
 		// placeholder _k at arg position i gets the DataType of decl.parameters[i].
 		std::vector<std::string> newParamNames(maxPh);
 		std::vector<DataType> newParamTypes(maxPh, PrimitiveType::error);
@@ -38,7 +38,7 @@ namespace mdl {
 		std::vector<std::reference_wrapper<const Node>> newParamNodes;
 		newParamNodes.reserve(maxPh);
 		for (int k = 0; k < maxPh; ++k)
-			newParamNodes.push_back(graph.addParameterNode(newParamTypes[k], newParamNames[k]));
+			newParamNodes.push_back(graph.addInputNode(newParamTypes[k], newParamNames[k]));
 
 		// Build the argument list for calling decl:
 		// bound positions use the supplied node, placeholder positions use the new param node.
@@ -61,23 +61,20 @@ namespace mdl {
 					...);
 		}(std::make_index_sequence<N>{});
 
-		auto outputOrErr = graph.addInvocationNode(decl, std::move(invocationArgs));
-		assert(outputOrErr.has_value()); // bind() callers must supply correct arg counts
-		const Node& outputNode = outputOrErr.value().get();
+		auto outputsOrErr = graph.addInvocationNode(decl, std::move(invocationArgs));
+		assert(outputsOrErr.has_value()); // bind() callers must supply correct arg counts
 
-		// Build parameters first; FunctionDecl cannot be default-constructed because
-		// output (reference_wrapper) has no default constructor.
-		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
+		std::vector<std::pair<std::string, std::reference_wrapper<const InputNode>>> parameters;
 		parameters.reserve(maxPh);
 		for (int k = 0; k < maxPh; ++k) {
-			const ParameterNode& pn = std::get<ParameterNode>(newParamNodes[k].get());
+			const InputNode& pn = std::get<InputNode>(newParamNodes[k].get());
 			parameters.emplace_back(newParamNames[k], std::cref(pn));
 		}
 		return FunctionDecl{
 				.name = decl.name,
 				.templateParameters = decl.templateParameters,
 				.parameters = std::move(parameters),
-				.output = outputNode,
+				.outputs = std::move(outputsOrErr.value()),
 		};
 	}
 } // namespace mdl

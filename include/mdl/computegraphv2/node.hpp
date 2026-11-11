@@ -83,7 +83,27 @@ namespace mdl {
 		bool isConsteval() const { return true; }
 	};
 	/**
-     * @brief "Parameter nodes" represent member variables.
+     * @brief "Input nodes" represent function arguments, i.e., runtime inputs that are passed when calling a function.
+     */
+	struct InputNode {
+		DataType type;
+		std::string name;
+
+		/**
+		 * @brief Get the data type of this node.
+		 */
+		const DataType& datatype() const { return type; }
+
+		/**
+		 * @brief Function arguments are only known at runtime.
+		 */
+		bool isConsteval() const { return false; }
+	};
+	/**
+     * @brief "Parameter nodes" represent module member variables (weights).
+     * @details The name is the fully qualified path of the weight relative to the module whose function references it
+     * (e.g., `weightQuery.W` inside `TransformerEncoder`, or `layers.3.weightQuery.W` inside a model that contains
+     * a stack of encoders).
      */
 	struct ParameterNode {
 		DataType type;
@@ -122,6 +142,7 @@ namespace mdl {
 	const mdl::DataType& getDataType(const mdl::ConstNode& node);
 	const mdl::DataType& getDataType(const mdl::InvocationNode& node);
 	const mdl::DataType& getDataType(const mdl::ErrorNode& node);
+	const mdl::DataType& getDataType(const mdl::InputNode& node);
 	const mdl::DataType& getDataType(const mdl::ParameterNode& node);
 	const mdl::DataType& getDataType(const mdl::HyperparameterNode& node);
 	/**

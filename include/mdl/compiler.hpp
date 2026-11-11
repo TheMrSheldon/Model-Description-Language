@@ -4,14 +4,21 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace mdl {
-	struct CompilationUnit;
+	struct ExportedFunction;
 	class ArgVals;
 
 	enum class Backend {
 		Tvm,  ///< TVM/Relax backend (default) — produces a .so via TVM
 		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
+	};
+
+	/** Which kernels the backend may call for recognized subgraphs (matmul, softmax, layer norm, ...). */
+	enum class Kernels {
+		OneDnn, ///< Vendor kernels of the mdl_kernels library (oneDNN); the model must be linked against mdl_kernels
+		Tvm,	///< Only TVM-generated kernels; the model has no dependency on mdl_kernels
 	};
 
 	struct CompileOptions {
@@ -26,10 +33,20 @@ namespace mdl {
 
 		/** Target backend. Defaults to TVM. */
 		Backend backend = Backend::Tvm;
+
+		/** Kernels that the backend may call. */
+		Kernels kernels = Kernels::OneDnn;
+
+		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
+		bool fastMath = false;
+
+		/** Directory for intermediate debug artifacts (IR dumps); empty to disable. */
+		std::filesystem::path dumpDir;
 	};
 
+	/** @brief Compiles the exported functions (see mdl::exportedFunctions) into @p output. */
 	void compileToFile(
-			const CompilationUnit& unit,
+			const std::vector<ExportedFunction>& exports,
 			const std::filesystem::path& output,
 			const ArgVals& argvals,
 			const CompileOptions& opts = {});

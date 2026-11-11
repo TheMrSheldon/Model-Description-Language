@@ -4,6 +4,7 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
+#include <mdl/exports.hpp>
 #include <mdl/utils/overload.hpp>
 
 #include <string>
@@ -53,43 +54,12 @@ namespace mdl::bindings::detail {
 		);
 	}
 
-	/// C++ parameter type for the TVM FFI: tensors become NDArray, scalars their C++ equivalents.
-	inline std::string cppParamType(const mdl::DataType& dt) {
-		return std::visit(
-				mdl::overloaded{
-						[](const mdl::PrimitiveType& p) -> std::string {
-							switch (p) {
-							case mdl::PrimitiveType::floating:
-								return std::string{"float"};
-							case mdl::PrimitiveType::integer:
-								return std::string{"std::int32_t"};
-							case mdl::PrimitiveType::uint:
-								return std::string{"std::uint32_t"};
-							case mdl::PrimitiveType::boolean:
-								return std::string{"bool"};
-							default:
-								return std::string{"void*"};
-							}
-						},
-						[](const mdl::TensorType&) { return std::string{"tvm::runtime::NDArray"}; },
-						[](const mdl::AggregateType&) { return std::string{"void*"}; },
-						[](const mdl::ModuleType&) { return std::string{"void*"}; },
-						[](const mdl::BoundModuleType&) { return std::string{"void*"}; },
-				},
-				dt
-		);
-	}
-
-	inline std::string funcSignatureStr(const mdl::FunctionDecl& func) {
-		std::string sig = func.name + "(";
-		bool first = true;
-		for (const auto& [pname, pnode] : func.parameters) {
-			if (!first)
-				sig += ", ";
-			sig += pname + ": " + dtypeStr(mdl::getDataType(pnode.get()));
-			first = false;
-		}
-		return sig + ") -> " + dtypeStr(mdl::getDataType(func.output.get()));
+	/// Shape of an exported tensor, e.g. `float[B, 768]` (`B` marks dimensions only known at runtime).
+	inline std::string shapeStr(const mdl::TensorSignature& sig) {
+		std::string s = primTypeStr(sig.dtype) + "[";
+		for (size_t i = 0; i < sig.shape.size(); ++i)
+			s += (i > 0 ? ", " : "") + (sig.shape[i] < 0 ? std::string{"B"} : std::to_string(sig.shape[i]));
+		return s + "]";
 	}
 
 } // namespace mdl::bindings::detail

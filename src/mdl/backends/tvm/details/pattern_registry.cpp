@@ -1,6 +1,7 @@
 #include "./pattern_registry.hpp"
 #include "../../../logging.hpp"
 
+#include <tvm/relax/analysis.h>
 #include <tvm/relax/dataflow_matcher.h>
 #include <tvm/relax/expr.h>
 
@@ -20,7 +21,13 @@ namespace mdl::backend::tvm {
 
             ::tvm::relax::Function func = ::tvm::Downcast<::tvm::relax::Function>(fn_obj);
             try {
-                auto new_fn = ::tvm::relax::RewriteCall(entry.pattern, entry.rewriter, func);
+                auto bindings = ::tvm::relax::AnalyzeVar2Value(func);
+                auto rewriter = ::tvm::ffi::TypedFunction<::tvm::relax::Expr(
+                    ::tvm::relax::Expr, ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr>)>(
+                    [&](::tvm::relax::Expr call, ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr> m) {
+                        return entry.rewriter(call, m, bindings);
+                    });
+                auto new_fn = ::tvm::relax::RewriteCall(entry.pattern, rewriter, func);
                 if (!new_fn.same_as(func)) {
                     mod->Update(gv, new_fn);
                     ++nRewrites;

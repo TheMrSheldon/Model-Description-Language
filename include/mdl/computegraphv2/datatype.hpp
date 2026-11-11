@@ -31,13 +31,19 @@ namespace mdl {
 
 	/**
 	 * @brief Represents a function definition.
-	 * @details Each function is associated with a computegraph from which it references nodes.
+	 * @details Each function is associated with a computegraph from which it references nodes. A function may have
+	 * multiple outputs; each output is a separate node of the graph.
 	 */
 	struct FunctionDecl final {
 		std::string name; /** \todo possibly don't name the function here but only in members; */
 		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> templateParameters;
-		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> parameters;
-		std::reference_wrapper<const Node> output;
+		std::vector<std::pair<std::string, std::reference_wrapper<const InputNode>>> parameters;
+		std::vector<std::reference_wrapper<const Node>> outputs;
+		/**
+		 * @brief The declared return types (one per output). Defines the exported ABI.
+		 * @details Functions return tensors or scalars only.
+		 */
+		std::vector<std::variant<PrimitiveType, TensorType>> returnTypes = {};
 	};
 
 	struct ModuleType final {
@@ -89,6 +95,14 @@ namespace mdl {
 
 	std::optional<std::reference_wrapper<const FunctionDecl>>
 	getMember(const FunctionDecl& decl, std::string_view name, const std::vector<DataType>& argtypes);
+
+	/**
+	 * @brief Lists the fully qualified paths of all weights (tensor-typed member variables) of a module, including the
+	 * weights of its submodules, in declaration order (depth first).
+	 * @details This is the canonical (stable) order in which backends and binding generators expose weights.
+	 * E.g., for `module A[] { x: float[2]  lin: Linear[...] }` this returns `{"x", "lin.W", "lin.b"}`.
+	 */
+	std::vector<std::string> weightPaths(const ModuleType& mod);
 } // namespace mdl
 
 #endif

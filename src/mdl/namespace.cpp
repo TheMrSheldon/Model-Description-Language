@@ -5,224 +5,66 @@
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/object.hpp>
 
-using namespace std::literals;
+#include <utility>
+#include <vector>
 
 using mdl::DataType;
 using mdl::Namespace;
 using mdl::PrimitiveType;
 
+/**
+ * @brief Creates the `__builtin_*` functions that expose builtin operations (FunctionIDs) to the language.
+ * @details Each builtin takes a float tensor `x` (plus optional scalar arguments that are not forwarded to the builtin
+ * operation) and returns the result of the operation.
+ */
 static std::map<std::string, std::any> initBuiltins() {
+	using mdl::builtins::FunctionIDs;
 	static mdl::Computegraph graph;
+
+	struct Builtin {
+		const char* name;
+		FunctionIDs id;
+		std::vector<std::pair<const char*, DataType>> extraParams = {}; ///< Parameters after `x`
+	};
+	/** \todo template the base type? **/
+	const auto tensor = mdl::TensorType{.type = PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
+	const Builtin table[] = {
+			{"__builtin_max", FunctionIDs::MAX},
+			{"__builtin_min", FunctionIDs::MIN},
+			{"__builtin_mean", FunctionIDs::MEAN},
+			{"__builtin_sum", FunctionIDs::SUM},
+			{"__builtin_cos", FunctionIDs::COS},
+			{"__builtin_sin", FunctionIDs::SIN},
+			{"__builtin_tan", FunctionIDs::TAN},
+			{"__builtin_exp", FunctionIDs::EXP},
+			{"__builtin_erf", FunctionIDs::ERF},
+			{"__builtin_sqrt", FunctionIDs::SQRT},
+			{"__builtin_rsqrt", FunctionIDs::RSQRT},
+			{"__builtin_log", FunctionIDs::LOG},
+			{"__builtin_tanh", FunctionIDs::TANH},
+			{"__builtin_var", FunctionIDs::VAR, {{"dof", PrimitiveType::uint}}},
+	};
+
 	std::map<std::string, std::any> builtins;
-
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::MAX, dtype, {std::cref(param)});
+	for (const auto& builtin : table) {
+		const auto& x = graph.addInputNode(tensor, "x");
+		std::vector<std::pair<std::string, std::reference_wrapper<const mdl::InputNode>>> params{
+				{"x", std::cref(std::get<mdl::InputNode>(x))}
+		};
+		for (const auto& [pname, ptype] : builtin.extraParams)
+			params.emplace_back(pname, std::cref(std::get<mdl::InputNode>(graph.addInputNode(ptype, pname))));
+		const auto& output = graph.addInvocationNode(builtin.id, tensor, {std::cref(x)});
 		builtins.emplace(
-				"__builtin_max",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_max",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
+				builtin.name, mdl::Object(
+									  mdl::FunctionDecl{
+											  .name = builtin.name,
+											  .templateParameters = {},
+											  .parameters = std::move(params),
+											  .outputs = {std::cref(output)}
+									  }
+							  )
 		);
 	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::MIN, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_min",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_min",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::MEAN, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_mean",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_mean",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::SUM, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_sum",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_sum",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::COS, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_cos",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_cos",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::SIN, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_sin",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_sin",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::TAN, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_tan",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_tan",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::EXP, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_exp",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_exp",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::ERF, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_erf",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_erf",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::SQRT, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_sqrt",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_sqrt",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::RSQRT, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_rsqrt",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_rsqrt",
-								.templateParameters = {},
-								.parameters = {std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-	{
-		/** \todo template the base type? **/
-		auto dtype = mdl::TensorType{.type = mdl::PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
-		auto& param = graph.addParameterNode(dtype, "x");
-		auto& dofParam = graph.addParameterNode(mdl::PrimitiveType::uint, "dof");
-		auto& output = graph.addInvocationNode(mdl::builtins::FunctionIDs::VAR, dtype, {std::cref(param)});
-		builtins.emplace(
-				"__builtin_var",
-				mdl::Object(
-						mdl::FunctionDecl{
-								.name = "__builtin_var",
-								.templateParameters = {},
-								.parameters =
-										{std::pair{"x"s, std::cref(std::get<mdl::ParameterNode>(param))},
-										 std::pair{"dof"s, std::cref(std::get<mdl::ParameterNode>(dofParam))}},
-								.output = std::cref(output)
-						}
-				)
-		);
-	}
-
 	return builtins;
 }
 

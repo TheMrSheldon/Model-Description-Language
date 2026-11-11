@@ -4,8 +4,11 @@
 
 #include <cassert>
 #include <format>
+#include <functional>
+#include <mdl/utils/overload.hpp>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace mdl;
@@ -33,21 +36,37 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 			return getDataType(args[0].get());
 		if (args.size() >= 2 && getTensor(args[1].get()))
 			return getDataType(args[1].get());
+		// Scalar arithmetic (e.g., on hyperparameters): the result is a scalar, floating if any operand is floating.
+		if (!args.empty()) {
+			for (const auto& arg : args)
+				if (const auto* p = std::get_if<PrimitiveType>(&getDataType(arg.get()));
+					p && *p == PrimitiveType::floating)
+					return PrimitiveType::floating;
+			return getDataType(args[0].get());
+		}
 		return fallback();
 
-	// Matrix multiply: A[..., m, k] @ B[..., k, n] -> [..., m, n]
-	// Replace the last dim of lhs with the last dim of rhs.
+	// Matrix multiply with NumPy semantics: A[..., m, k] @ B[..., k, n] -> [..., m, n]; a 1-D operand is a vector
+	// (A[..., m, k] @ v[k] -> [..., m] and v[k] @ B[..., k, n] -> [..., n]).
 	case FunctionIDs::TENSOR_DOT:
 		if (args.size() >= 2) {
 			const auto* lhsT = getTensor(args[0].get());
 			const auto* rhsT = getTensor(args[1].get());
-			if (lhsT && rhsT && lhsT->shape.size() >= 2 && !rhsT->shape.empty()) {
+			if (lhsT && rhsT && !lhsT->shape.empty() && !rhsT->shape.empty()) {
+				if (rhsT->shape.size() == 1) {
+					TensorType::Shape s = lhsT->shape;
+					s.pop_back();
+					return TensorType{lhsT->type, std::move(s)};
+				}
+				if (lhsT->shape.size() == 1) {
+					TensorType::Shape s = rhsT->shape;
+					s.erase(s.end() - 2);
+					return TensorType{rhsT->type, std::move(s)};
+				}
 				TensorType::Shape s = lhsT->shape;
 				s.back() = rhsT->shape.back();
 				return TensorType{lhsT->type, std::move(s)};
 			}
-			if (lhsT && !lhsT->shape.empty())
-				return *lhsT;
 		}
 		return fallback();
 
@@ -76,6 +95,8 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 	case FunctionIDs::ERF:
 	case FunctionIDs::SQRT:
 	case FunctionIDs::RSQRT:
+	case FunctionIDs::LOG:
+	case FunctionIDs::TANH:
 		if (!args.empty()) {
 			if (getTensor(args[0].get()))
 				return getDataType(args[0].get());
@@ -136,9 +157,7 @@ const Node& Computegraph::addConstNode(Atomic&& value) {
 	return nodes.back();
 }
 
-const Node& Computegraph::addInvocationNode(
-		FunctionIDs func, DataType dtype, std::vector<std::reference_wrapper<const Node>>&& args
-) {
+const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, std::vector<NodeRef>&& args) {
 	bool constevalable = std::all_of(args.begin(), args.end(), isCompiletimeEvalable);
 
 	return nodes.emplace_back(
@@ -151,117 +170,175 @@ const Node& Computegraph::addInvocationNode(
 	);
 }
 
-/**
- * @brief Recursively inlines a node from a function template into @p graph, substituting
- * ParameterNodes with the corresponding actual argument nodes.
- */
-static const Node& inlineNode(
-		Computegraph& graph, const Node& templateNode, const std::unordered_map<const ParameterNode*, const Node*>& subs
-) {
-	if (const auto* pn = std::get_if<ParameterNode>(&templateNode)) {
-		auto it = subs.find(pn);
-		if (it == subs.end())
-			return templateNode; // concrete parameter from outer scope; keep as-is
-		return *it->second;
-	} else if (std::get_if<ConstNode>(&templateNode)) {
-		return templateNode;
-	} else if (const auto* invn = std::get_if<InvocationNode>(&templateNode)) {
-		std::vector<std::reference_wrapper<const Node>> newArgs;
-		newArgs.reserve(invn->arguments.size());
-		for (const auto& arg : invn->arguments)
-			newArgs.push_back(std::cref(inlineNode(graph, arg.get(), subs)));
-		// RESHAPE and EXPAND carry precise output shapes set by the einops layer.
-		// inferOutputType returns a 1-D fallback for these ops, which would lose
-		// the split/merge shape information computed during einops processing.
-		DataType outType = (invn->id == FunctionIDs::RESHAPE || invn->id == FunctionIDs::EXPAND)
-			? invn->type
-			: inferOutputType(invn->id, newArgs);
-		return graph.addInvocationNode(invn->id, std::move(outType), std::move(newArgs));
-	} else if (
-			std::holds_alternative<ErrorNode>(templateNode) || std::holds_alternative<ConstNode>(templateNode) ||
-			std::holds_alternative<HyperparameterNode>(templateNode)
-	)
-		return templateNode;
-}
+namespace {
+	/**
+	 * @brief Clones the subgraph of a function template into the graph while substituting nodes.
+	 * @details Every template node is cloned at most once (memoization), so shared subexpressions of the template stay
+	 * shared in the clone. Nodes that do not (transitively) depend on a substituted node are not cloned at all but
+	 * reused.
+	 */
+	class Inliner final {
+	public:
+		/** Maps a weight of the template onto the weight to use in the clone (or nullptr to keep it). */
+		using WeightMap = std::function<const Node*(const ParameterNode&)>;
 
-std::expected<std::reference_wrapper<const Node>, std::string> Computegraph::addInvocationNode(
-		const FunctionDecl& func, std::vector<std::reference_wrapper<const Node>>&& arguments,
-		std::vector<std::reference_wrapper<const Node>>&& templateArguments
-) {
-	if (func.parameters.empty())
-		return std::cref(func.output.get());
-	if (func.parameters.size() != arguments.size())
-		return std::unexpected(
-				std::format(
-						"'{}' expects {} argument(s) but got {}", func.name, func.parameters.size(), arguments.size()
-				)
-		);
+		Inliner(Computegraph& graph, WeightMap weightMap = nullptr) : graph(graph), weightMap(std::move(weightMap)) {}
 
-	std::unordered_map<const ParameterNode*, const Node*> subs;
-	for (size_t i = 0; i < func.parameters.size(); ++i)
-		subs[&func.parameters[i].second.get()] = &arguments[i].get();
-
-	return std::cref(inlineNode(*this, func.output.get(), subs));
-}
-
-std::expected<std::reference_wrapper<const Node>, std::string> Computegraph::addModuleInvocationNode(
-		const BoundModuleType& boundModule, const std::string& instanceName, const FunctionDecl& func,
-		std::vector<std::reference_wrapper<const Node>>&& arguments
-) {
-	if (func.parameters.size() != arguments.size())
-		return std::unexpected(
-				std::format(
-						"'{}' expects {} argument(s) but got {}", func.name, func.parameters.size(), arguments.size()
-				)
-		);
-
-	// Build hyperparameter substitution: module HyperparameterNode* → bound value Node*
-	std::unordered_map<const HyperparameterNode*, const Node*> hpSubs;
-	const auto& mod = boundModule.definition;
-	for (size_t i = 0; i < mod.typeargs.size(); ++i) {
-		const auto& [name, hnRef] = mod.typeargs[i];
-		auto it = boundModule.hyperparamValues.find(name);
-		if (it != boundModule.hyperparamValues.end())
-			hpSubs[&hnRef.get()] = it->second;
-	}
-
-	// Resolve a TensorType's shape by substituting module HyperparameterNode references
-	// with the concrete bound value nodes from the outer scope.
-	auto resolveType = [&](const DataType& dtype) -> DataType {
-		const auto* tt = std::get_if<TensorType>(&dtype);
-		if (!tt)
-			return dtype;
-		TensorType resolved{tt->type, {}};
-		for (const auto& dim : tt->shape) {
-			auto newDim = dim;
-			if (const auto* nodePtr = std::get_if<const Node*>(&dim)) {
-				if (const auto* hn = std::get_if<HyperparameterNode>(*nodePtr)) {
-					auto it = hpSubs.find(hn);
-					if (it != hpSubs.end())
-						newDim = TensorType::Shape::value_type{it->second};
-				}
-			}
-			resolved.shape.push_back(newDim);
+		/**
+		 * @brief Substitutes a function argument or template/module hyperparameter by @p to.
+		 * @details FunctionDecl and ModuleType reference the node alternatives (e.g., `const InputNode&`) rather than
+		 * the Node variants, so leaf substitutions are keyed by the address of the alternative.
+		 */
+		template <typename Leaf>
+		void substitute(const Leaf& from, const Node& to) {
+			leafSubs[static_cast<const void*>(&from)] = &to;
 		}
-		return resolved;
+
+		const Node& clone(const Node& node) {
+			if (auto it = memo.find(&node); it != memo.end())
+				return *it->second;
+			auto leaf = [&](const auto& alt) -> const Node& {
+				auto it = leafSubs.find(static_cast<const void*>(&alt));
+				return it == leafSubs.end() ? node : *it->second;
+			};
+			const Node& result = std::visit(
+					overloaded{
+							[&](const InvocationNode& invn) -> const Node& { return cloneInvocation(node, invn); },
+							[&](const ParameterNode& pn) -> const Node& {
+								if (weightMap)
+									if (const Node* mapped = weightMap(pn))
+										return *mapped;
+								return node;
+							},
+							[&](const InputNode& in) -> const Node& { return leaf(in); },
+							[&](const HyperparameterNode& hn) -> const Node& { return leaf(hn); },
+							// Constants and errors are kept as they are.
+							[&](const auto&) -> const Node& { return node; },
+					},
+					node
+			);
+			memo[&node] = &result;
+			return result;
+		}
+
+		/** @brief Substitutes nodes that are referenced by symbolic dimensions of a (tensor) type. */
+		DataType cloneType(const DataType& dtype) {
+			const auto* tt = std::get_if<TensorType>(&dtype);
+			if (tt == nullptr)
+				return dtype;
+			TensorType result{tt->type, {}};
+			result.shape.reserve(tt->shape.size());
+			for (const auto& dim : tt->shape) {
+				if (const auto* nodePtr = std::get_if<const Node*>(&dim))
+					result.shape.emplace_back(&clone(**nodePtr));
+				else
+					result.shape.push_back(dim);
+			}
+			return result;
+		}
+
+	private:
+		Computegraph& graph;
+		WeightMap weightMap;
+		std::unordered_map<const Node*, const Node*> memo;
+		std::unordered_map<const void*, const Node*> leafSubs;
+
+		const Node& cloneInvocation(const Node& node, const InvocationNode& invn) {
+			std::vector<Computegraph::NodeRef> newArgs;
+			newArgs.reserve(invn.arguments.size());
+			bool changed = false;
+			for (const auto& arg : invn.arguments) {
+				const Node& newArg = clone(arg.get());
+				changed |= (&newArg != &arg.get());
+				newArgs.push_back(std::cref(newArg));
+			}
+			// RESHAPE and EXPAND carry precise output shapes set by the einops layer. inferOutputType returns a 1-D
+			// fallback for these ops, which would lose the split/merge shape information.
+			const bool keepsType = invn.id == FunctionIDs::RESHAPE || invn.id == FunctionIDs::EXPAND;
+			if (keepsType) {
+				DataType outType = cloneType(invn.type);
+				if (!changed && !shapeNodesDiffer(invn.type, outType))
+					return node; // Independent of all substitutions: reuse the template node.
+				return graph.addInvocationNode(invn.id, std::move(outType), std::move(newArgs));
+			}
+			if (!changed)
+				return node; // Independent of all substitutions: reuse the template node.
+			DataType outType = inferOutputType(invn.id, newArgs);
+			return graph.addInvocationNode(invn.id, std::move(outType), std::move(newArgs));
+		}
+
+		static bool shapeNodesDiffer(const DataType& a, const DataType& b) {
+			const auto* ta = std::get_if<TensorType>(&a);
+			const auto* tb = std::get_if<TensorType>(&b);
+			if (ta == nullptr || tb == nullptr || ta->shape.size() != tb->shape.size())
+				return ta != nullptr || tb != nullptr;
+			for (size_t i = 0; i < ta->shape.size(); ++i) {
+				const auto* na = std::get_if<const Node*>(&ta->shape[i]);
+				const auto* nb = std::get_if<const Node*>(&tb->shape[i]);
+				if (na != nullptr && nb != nullptr && *na != *nb)
+					return true;
+			}
+			return false;
+		}
 	};
 
-	std::unordered_map<const ParameterNode*, const Node*> subs;
-
-	// Function parameter substitutions.
-	for (size_t i = 0; i < func.parameters.size(); ++i)
-		subs[&func.parameters[i].second.get()] = &arguments[i].get();
-
-	// Create per-instance ParameterNodes for each module variable and add to subs.
-	// This ensures weightQuery.W, weightKey.W, etc. become distinct runtime arguments
-	// instead of all sharing the single W ParameterNode from the Linear type definition.
-	for (const auto& [varName, varNodeRef] : mod.variables) {
-		const DataType resolvedType = resolveType(varNodeRef.get().type);
-		const Node& instanceNode = addParameterNode(resolvedType, instanceName + "." + varName);
-		subs[&varNodeRef.get()] = &instanceNode;
+	Computegraph::Outputs cloneOutputs(Inliner& inliner, const FunctionDecl& func) {
+		Computegraph::Outputs outputs;
+		outputs.reserve(func.outputs.size());
+		for (const auto& output : func.outputs)
+			outputs.push_back(std::cref(inliner.clone(output.get())));
+		return outputs;
 	}
 
-	return std::cref(inlineNode(*this, func.output.get(), subs));
+	std::expected<void, std::string> checkArity(const FunctionDecl& func, size_t numArgs) {
+		if (func.parameters.size() != numArgs)
+			return std::unexpected(
+					std::format("'{}' expects {} argument(s) but got {}", func.name, func.parameters.size(), numArgs)
+			);
+		return {};
+	}
+} // namespace
+
+std::expected<Computegraph::Outputs, std::string> Computegraph::addInvocationNode(
+		const FunctionDecl& func, std::vector<NodeRef>&& arguments, std::vector<NodeRef>&& templateArguments
+) {
+	if (auto ok = checkArity(func, arguments.size()); !ok)
+		return std::unexpected(ok.error());
+	if (func.parameters.empty() && templateArguments.empty())
+		return Outputs{func.outputs.begin(), func.outputs.end()};
+
+	Inliner inliner{*this};
+	for (size_t i = 0; i < func.parameters.size(); ++i)
+		inliner.substitute(func.parameters[i].second.get(), arguments[i].get());
+	for (size_t i = 0; i < std::min(func.templateParameters.size(), templateArguments.size()); ++i)
+		inliner.substitute(func.templateParameters[i].second.get(), templateArguments[i].get());
+	return cloneOutputs(inliner, func);
+}
+
+std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocationNode(
+		const BoundModuleType& boundModule, const std::string& scope, const std::string& instanceName,
+		const FunctionDecl& func, std::vector<NodeRef>&& arguments
+) {
+	if (auto ok = checkArity(func, arguments.size()); !ok)
+		return std::unexpected(ok.error());
+
+	// Every weight referenced by a member function of the module is a weight of the instance: map `w` onto the
+	// caller-scope weight `instanceName.w`. Its type may depend on the module's hyperparameters, which are
+	// substituted by the bound values.
+	Inliner* self = nullptr;
+	Inliner inliner{*this, [&](const ParameterNode& weight) -> const Node* {
+						const std::string path = instanceName.empty() ? weight.name : instanceName + "." + weight.name;
+						return &getOrAddParameterNode(scope, path, self->cloneType(weight.type));
+					}};
+	self = &inliner;
+
+	const auto& mod = boundModule.definition;
+	for (const auto& [name, hn] : mod.typeargs)
+		if (auto it = boundModule.hyperparamValues.find(name); it != boundModule.hyperparamValues.end())
+			inliner.substitute(hn.get(), *it->second);
+	for (size_t i = 0; i < func.parameters.size(); ++i)
+		inliner.substitute(func.parameters[i].second.get(), arguments[i].get());
+	return cloneOutputs(inliner, func);
 }
 
 const Node& Computegraph::addErrorNode() {
@@ -269,8 +346,19 @@ const Node& Computegraph::addErrorNode() {
 	return nodes.back();
 }
 
+const Node& Computegraph::addInputNode(DataType dtype, std::string name) {
+	return nodes.emplace_back(InputNode{.type = std::move(dtype), .name = std::move(name)});
+}
+
 const Node& Computegraph::addParameterNode(DataType dtype, std::string name) {
 	return nodes.emplace_back(ParameterNode{.type = std::move(dtype), .constevalable = false, .name = std::move(name)});
+}
+
+const Node& Computegraph::getOrAddParameterNode(const std::string& scope, const std::string& path, DataType dtype) {
+	auto [it, inserted] = weights.try_emplace({scope, path}, nullptr);
+	if (inserted)
+		it->second = &addParameterNode(std::move(dtype), path);
+	return *it->second;
 }
 
 const Node& Computegraph::addHyperparameterNode(DataType dtype, std::string name) {
@@ -279,4 +367,4 @@ const Node& Computegraph::addHyperparameterNode(DataType dtype, std::string name
 	);
 }
 
-size_t Computegraph::getNumNodes() { return nodes.size(); }
+size_t Computegraph::getNumNodes() const { return nodes.size(); }

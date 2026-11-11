@@ -91,17 +91,17 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		DataType ttype = TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}}};
 
 		auto makeOp = [&](std::string opName, FunctionIDs id) {
-			const Node& lhs = graph.addParameterNode(ttype, "lhs");
-			const Node& rhs = graph.addParameterNode(ttype, "rhs");
+			const Node& lhs = graph.addInputNode(ttype, "lhs");
+			const Node& rhs = graph.addInputNode(ttype, "rhs");
 			const Node& out = graph.addInvocationNode(id, ttype, {std::cref(lhs), std::cref(rhs)});
 			m.emplace(
 					std::move(opName), FunctionDecl{
 											   .name = opName,
 											   .templateParameters = {},
 											   .parameters =
-													   {{"lhs", std::cref(std::get<ParameterNode>(lhs))},
-														{"rhs", std::cref(std::get<ParameterNode>(rhs))}},
-											   .output = std::cref(out),
+													   {{"lhs", std::cref(std::get<InputNode>(lhs))},
+														{"rhs", std::cref(std::get<InputNode>(rhs))}},
+											   .outputs = {std::cref(out)},
 									   }
 			);
 		};
@@ -114,15 +114,15 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 
 		// T() — swap last two dimensions via PERMUTE with trailing perm {-1, -2}
 		{
-			const Node& self = graph.addParameterNode(ttype, "self");
+			const Node& self = graph.addInputNode(ttype, "self");
 			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
 			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, ttype, {std::cref(self), std::cref(permNode)});
 			m.emplace(
 					"T", FunctionDecl{
 								 .name = "T",
 								 .templateParameters = {},
-								 .parameters = {{"self", std::cref(std::get<ParameterNode>(self))}},
-								 .output = std::cref(out),
+								 .parameters = {{"self", std::cref(std::get<InputNode>(self))}},
+								 .outputs = {std::cref(out)},
 						 }
 			);
 		}
@@ -158,4 +158,35 @@ mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataT
 			},
 			obj
 	);
+}
+
+static void aggregatePaths(const AggregateType& agg, const std::string& prefix, std::vector<std::string>& paths) {
+	for (const auto& [member, type] : agg.members) {
+		if (const auto* sub = std::get_if<AggregateType>(&type))
+			aggregatePaths(*sub, prefix + "." + member, paths);
+		else
+			paths.push_back(prefix + "." + member);
+	}
+}
+
+std::vector<std::string> mdl::weightPaths(const ModuleType& mod) {
+	std::vector<std::string> paths;
+	for (const auto& [name, node] : mod.variables) {
+		std::visit(
+				overloaded{
+						[&](const AggregateType& agg) { aggregatePaths(agg, name, paths); },
+						[&](const BoundModuleType& sub) {
+							for (auto& path : weightPaths(sub.definition))
+								paths.push_back(name + "." + path);
+						},
+						[&](const ModuleType& sub) {
+							for (auto& path : weightPaths(sub))
+								paths.push_back(name + "." + path);
+						},
+						[&](const auto&) { paths.push_back(name); },
+				},
+				node.get().type
+		);
+	}
+	return paths;
 }

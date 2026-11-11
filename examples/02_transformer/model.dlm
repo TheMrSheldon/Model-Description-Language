@@ -1,144 +1,4 @@
-// TODO: implement imports
-// import std;
-
-/**
- * @brief Computes the elementwise \p x -th power of e.
- * @details \f[(x_i)_{1\leq i \leq n} \mapsto (e^{x_i})_{1\leq i \leq n}.\f]
- * @ingroup Arithmetic
- * 
- * @param x
- * @return the \p x -th power of e for  each component of \p x .
- */
-float[...] exp(x: float[...]) => __builtin_exp(x);
-
-/**
- * @brief Sum
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-template<N: uint>
-float[...] sum(x: float[..., N]) => __builtin_sum(x);
-
-/**
- * @brief Maximum
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-template<N: uint>
-float[...] max(x: float[..., N]) => __builtin_max(x);
-
-/**
- * @brief (Gauss) Error Function
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-float[...] erf(x: float[...]) => __builtin_erf(x);
-
-/**
- * @brief Computes the softmax function of the input vector.
- * @details Let \f(x \in \mathbb R^n\f) be a vector, the softmax is defined as
- * \f[
- * 	\text{softmax}\colon \mathbb R^n \to \mathbb R^n
- * 	~\text{via}~ x\mapsto \left(\frac{e^{x_i}}{\sum_{j=1}^n e^{x_j}}\right)_{1\leq i\leq n}.
- * \f]
- * 
- * @param x the input tensor.
- * @return The softmax of \p x .
- */
-float[...] softmax(x: float[...]) {
-    auto power = exp(x - max(x));
-    return power / sum(power);
-}
-
-/**
- * @brief Recitifed Linear Unit
- * @details
- * \f[\text{ReLU}(x) := \max(0, x)\f]
- * 
- * @param x 
- * @return 
- */
-// float[...] relu(x: float[...]) => max(x, 0);
-
-/**
- * @brief Computes the elementwise square root of \p x .
- * @details \f[(x_i)_{1\leq i \leq n} \mapsto (\sqrt{x_i})_{1\leq i \leq n}.\f]
- * @ingroup Arithmetic
- * 
- * @param x 
- * @return the square root of each component of \p x .
- */
-float[...] sqrt(x: float[...]) => __builtin_sqrt(x);
-
-/**
- * @brief Computes the reciprocal square root for each element in \p x.
- * @details \f[(x_i)_{1\leq i \leq n} \mapsto \left(\frac{1}{\sqrt{x_i}}\right)_{1\leq i \leq n}.\f]
- * @ingroup Arithmetic
- * 
- * @param x 
- * @return 
- */
-float[...] rsqrt(x: float[...]) => __builtin_rsqrt(x);
-
-/**
- * @brief Variance
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @param dof 
- * @return 
- */
-float[...] var(x: float[...], dof: uint /*= 1*/) => __builtin_var(x, dof);
-
-/**
- * @brief Mean
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-template<N: uint>
-float[...] mean(x: float[..., N]) => __builtin_mean(x);
-
-/**
- * @brief Implements layer normalization as proposed by \cite layernorm.
- */
-module LayerNorm[dim: uint] {
-    beta: float[dim]
-    gamma: float[dim]
-
-    float[..., dim] forward(x: float[..., dim]) {
-        auto mu = mean(x)[... -> ... 1];
-        auto x_c = x - mu;
-        auto sigma = rsqrt(mean(x_c * x_c)[... -> ... 1] + 1e-12);
-        return x_c * sigma * gamma + beta;
-    }
-}
-
-/**
- * @brief Applies a learnable linear transformation with optional bias.
- * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
- */
-module Linear[indim: uint, outdim: uint, bias: bool /*= false*/] {
-    W: float[outdim, indim]
-    b: float[outdim]
-
-    float[..., outdim] forward(x: float[..., indim]) =>
-        /*bias?
-            no => x @ W.T()
-            yes =>*/ x @ W.T() + b;
-}
+import std;
 
 struct TransformerConf {
     dims: struct {
@@ -163,9 +23,6 @@ module TransformerEncoder[conf: TransformerConf] {
     weightIntermedOut: Linear[conf.dims.inner, conf.dims.model, true]
     ffnNorm: LayerNorm[conf.dims.model]
 
-    float[...] bertGELU(x: float[...]) =>
-        x * 0.5 * (1 + erf(x / sqrt(2)));
-
     float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
@@ -180,7 +37,7 @@ module TransformerEncoder[conf: TransformerConf] {
 
     float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
         auto attn = mhaNorm(mha(weightQuery(x), weightKey(x), weightValue(x)) + x);
-        auto intermed = bertGELU(weightIntermed(attn));
+        auto intermed = gelu(weightIntermed(attn));
         return ffnNorm(weightIntermedOut(intermed) + attn);
     }
 }

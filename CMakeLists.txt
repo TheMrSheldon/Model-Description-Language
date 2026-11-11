@@ -7,7 +7,9 @@ cmake_minimum_required(VERSION 3.14...3.22)
 include(FeatureSummary)
 
 option(MDL_BUILD_TESTS "Build the tests" OFF)
-add_feature_info(tests MDL_BUILD_TESTS "Build TIREx tracker tests")
+add_feature_info(tests MDL_BUILD_TESTS "Build the MDL tests")
+option(MDL_BUILD_EXAMPLES "Build the examples" OFF)
+add_feature_info(examples MDL_BUILD_EXAMPLES "Build the MDL examples")
 
 
 ##########################################################################################
@@ -51,6 +53,12 @@ set(MDL_VERSION "${MDL_VER_MAJOR}.${MDL_VER_MINOR}.${MDL_VER_PATCH}")
 ##########################################################################################
 project(mdl VERSION ${MDL_VERSION} LANGUAGES C CXX)
 
+# CMake >= 4 rejects dependencies that still declare cmake_minimum_required(VERSION < 3.5)
+# (e.g., yaml-cpp 0.8.0). Allow them to configure with the 3.5 policy set.
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+	set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 # Load CPM
 set(CPM_DOWNLOAD_VERSION 0.42.0)
 set(CPM_HASH_SUM "2020b4fc42dba44817983e06342e682ecfc3d2f484a581f11cc5731fbe4dce8a")
@@ -83,13 +91,18 @@ add_subdirectory(src)
 # Examples
 ##########################################################################################
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
-# add_subdirectory(examples)
+include(MDL)
+if (MDL_BUILD_TESTS OR MDL_BUILD_EXAMPLES)
+	enable_testing()  # before add_subdirectory(examples) so that the examples' tests are registered
+endif()
+if (MDL_BUILD_EXAMPLES)
+	add_subdirectory(examples)
+endif()
 
 
 ##########################################################################################
 # Tests
 ##########################################################################################
 if (MDL_BUILD_TESTS)
-	enable_testing()
 	add_subdirectory(tests)
 endif()

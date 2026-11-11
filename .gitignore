@@ -564,3 +564,7 @@ FodyWeavers.xsd
 # Additional files built by Visual Studio
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudio,visualstudiocode,codeblocks,macos,linux,windows,vim,c++,cmake
+### MDL ###
+# Debug artifacts written next to compiler outputs (e.g., a.o.irmod.json, a.o.build_helper.py)
+*.o.*
+build_check/

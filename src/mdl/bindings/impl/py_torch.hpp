@@ -13,19 +13,9 @@ namespace mdl::bindings {
 		}
 
 	protected:
-		std::string imports() const override {
-			return "import torch\n"
-				   "import tvm.nd\n"
-				   "import tvm.runtime\n";
-		}
-
-		std::string tensorInputType() const override { return "torch.Tensor"; }
-		std::string tensorOutputType() const override { return "torch.Tensor"; }
-
-		std::string toTvmArg(const std::string& paramName) const override {
-			// torch.Tensor supports the DLPack protocol; tvm.nd.from_dlpack accepts it directly.
-			return "tvm.nd.from_dlpack(" + paramName + ")";
-		}
+		std::string imports() const override { return "import torch\n"; }
+		// torch.Tensor implements the DLPack protocol, which tvm_ffi accepts directly.
+		std::string tensorType() const override { return "torch.Tensor"; }
 	};
 
 } // namespace mdl::bindings

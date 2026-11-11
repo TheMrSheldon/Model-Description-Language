@@ -12,10 +12,15 @@ target_sources(mdl
 	PRIVATE
 		mdl/argvals.cpp
 		mdl/backends/tvm/tvm.cpp
+		mdl/backends/tvm/details/aot.cpp
+		mdl/backends/tvm/details/legalize.cpp
 		mdl/backends/tvm/details/pattern_registry.cpp
+		mdl/backends/tvm/details/patterns.cpp
 		mdl/backends/tvm/details/pipeline.cpp
 		mdl/bindings/generator.cpp
 		mdl/compiler.cpp
+		mdl/exports.cpp
+		mdl/logging.cpp
 		mdl/computegraph/datatype.cpp
 		mdl/computegraph/graph.cpp
 		mdl/computegraph/node.cpp
@@ -35,11 +40,12 @@ target_sources(
     mdlc
     PRIVATE
         main.cpp
-		mdl/logging.cpp
 )
 
 target_link_libraries(mdlc mdl)
 target_compile_features(mdl PUBLIC cxx_std_23)
+# Location of the standard library (`import std;`) when running from the build tree.
+target_compile_definitions(mdl PRIVATE MDL_DEFAULT_STDLIB_DIR="${PROJECT_SOURCE_DIR}/std")
 
 # The mdl-info command
 add_executable(mdl-info)
@@ -47,7 +53,6 @@ target_sources(
     mdl-info
     PRIVATE
         commands/mdl-info.cpp
-		mdl/logging.cpp
 )
 target_link_libraries(mdl-info mdl)
 
@@ -86,42 +91,17 @@ target_include_directories(mdl PUBLIC ${ANTLR4CPP_INCLUDE_DIRS} ${ANTLR_mdlparse
 target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 
 # TVM
-# Pick the best available BLAS backend for this platform.
-# Preference order: Intel MKL (AVX-512, cblas_sgemm_batch_strided) > OpenBLAS > none.
-# macOS always uses Accelerate.
-set(_MDL_MKL_HINT "/opt/intel/oneapi/mkl/latest")
-if(APPLE)
-	find_package(BLAS QUIET)
-	# USE_BLAS=apple selects Accelerate; no extra option needed.
-	set(MDL_TVM_BLAS_OPTS "USE_BLAS apple")
-	set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
-elseif(EXISTS "${_MDL_MKL_HINT}/include/mkl.h")
-	message(STATUS "[mdl] Using Intel MKL at ${_MDL_MKL_HINT}")
-	# USE_MKL takes the root path directly; do NOT also set USE_BLAS=mkl (deprecated
-	# and causes TVM to overwrite USE_MKL before it's checked as a directory path).
-	set(MDL_TVM_BLAS_OPTS "USE_MKL ${_MDL_MKL_HINT}")
-	set(MDL_BLAS_LINK_LIBS "${_MDL_MKL_HINT}/lib/libmkl_rt.so")
-else()
-	find_package(BLAS QUIET)
-	if(BLAS_FOUND)
-		set(MDL_TVM_BLAS_OPTS "USE_BLAS openblas")
-		set(MDL_BLAS_LINK_LIBS ${BLAS_LIBRARIES})
-	else()
-		set(MDL_TVM_BLAS_OPTS "USE_BLAS none")
-		set(MDL_BLAS_LINK_LIBS "")
-	endif()
-endif()
-
+# - Vendor kernels (GEMM, softmax, layer norm, ...) are provided by oneDNN through the mdl_kernels library (see below),
+#   so TVM's BLAS contrib is not needed.
+# - TVM's parallel loops use OpenMP so that TVM-generated kernels and oneDNN share one thread pool (no oversubscription).
+# - Pinned to 0.24: TVM 0.25+ replaces Relax StructInfo by a new type system and removes TIR buffer maps, which requires
+#   porting the whole backend (planned as a separate upgrade).
 CPMAddPackage(
 	URI "gh:apache/tvm@0.24.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" ${MDL_TVM_BLAS_OPTS}
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu"
 	EXCLUDE_FROM_ALL YES
 )
-if(MDL_BLAS_LINK_LIBS)
-	target_link_libraries(mdl PUBLIC tvm_compiler "${MDL_BLAS_LINK_LIBS}")
-else()
-	target_link_libraries(mdl PUBLIC tvm_compiler)
-endif()
+target_link_libraries(mdl PUBLIC tvm_compiler)
 
 # tvm_compiler uses directory-scoped include_directories internally,
 # which does not propagate to consumers — add both include roots explicitly.
@@ -130,6 +110,48 @@ target_include_directories(mdl PUBLIC
     ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include
 )
 
+
+# ── Runtime helpers (mdl_runtime) ────────────────────────────────────────────
+# Header-only helpers for programs that call compiled models (include/mdl/runtime.hpp) plus the TVM runtime that
+# compiled models depend on (thread pool, workspace allocation, FFI).
+add_library(mdl_runtime INTERFACE)
+target_include_directories(mdl_runtime INTERFACE ${CMAKE_CURRENT_LIST_DIR}/../include)
+target_compile_features(mdl_runtime INTERFACE cxx_std_20)
+target_link_libraries(mdl_runtime INTERFACE tvm_runtime)
+
+# ── Vendor kernels (mdl_kernels) ─────────────────────────────────────────────
+# Runtime library that compiled models link against: it implements the extern kernels the TVM backend emits calls to
+# (see include/mdl/runtime/kernels.h). It is not linked into the compiler itself.
+option(MDL_ENABLE_ONEDNN "Build the oneDNN-based vendor kernels (mdl_kernels)" ON)
+add_library(mdl_kernels STATIC)
+target_include_directories(mdl_kernels PUBLIC ${CMAKE_CURRENT_LIST_DIR}/../include)
+target_compile_features(mdl_kernels PUBLIC cxx_std_20)
+set_property(TARGET mdl_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(MDL_ENABLE_ONEDNN)
+	# Only build the primitive kinds that mdl_kernels uses (forward and backward) to keep the build short.
+	set(DNNL_ENABLE_PRIMITIVE "MATMUL;SOFTMAX;ELTWISE;LAYER_NORMALIZATION;REORDER" CACHE STRING "" FORCE)
+	CPMAddPackage(
+		NAME oneDNN
+		GITHUB_REPOSITORY uxlfoundation/oneDNN
+		GIT_TAG v3.13.4
+		OPTIONS
+			"DNNL_LIBRARY_TYPE STATIC"
+			"DNNL_CPU_RUNTIME OMP"
+			"DNNL_BUILD_TESTS OFF"
+			"DNNL_BUILD_EXAMPLES OFF"
+			"ONEDNN_BUILD_GRAPH OFF"
+			"DNNL_ENABLE_JIT_PROFILING OFF"
+		EXCLUDE_FROM_ALL YES
+	)
+	target_sources(mdl_kernels PRIVATE mdl/runtime/kernels/onednn.cpp)
+	# The static oneDNN library uses OpenMP (DNNL_CPU_RUNTIME OMP) but does not propagate it to consumers.
+	find_package(OpenMP REQUIRED COMPONENTS CXX)
+	target_link_libraries(mdl_kernels PUBLIC dnnl OpenMP::OpenMP_CXX)
+	target_compile_definitions(mdl_kernels PUBLIC MDL_KERNELS_ONEDNN)
+else()
+	# Without vendor kernels the backend lowers everything to TVM-generated kernels; the library stays empty.
+	target_sources(mdl_kernels PRIVATE mdl/runtime/kernels/none.cpp)
+endif()
 
 # NVRTC
 # find_package(CUDAToolkit REQUIRED)
@@ -146,7 +168,7 @@ set_property(TARGET spdlog PROPERTY POSITION_INDEPENDENT_CODE ON)  # Is this nee
 target_link_libraries(mdl PUBLIC spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 
 # yaml-cpp
-CPMAddPackage(URI "gh:jbeder/yaml-cpp#0.8.0" EXCLUDE_FROM_ALL YES)
+CPMAddPackage(URI "gh:jbeder/yaml-cpp#yaml-cpp-0.9.0" EXCLUDE_FROM_ALL YES)
 target_link_libraries(mdl PUBLIC yaml-cpp::yaml-cpp)
 
 #-------------------#
