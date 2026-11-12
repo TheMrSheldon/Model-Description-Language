@@ -289,7 +289,10 @@ namespace mdl {
 			auto outerDir = std::exchange(currentDir, dir);
 			bool outerRecord = std::exchange(recordDefinitions, main);
 			const size_t errorsBefore = file.errors->getNumErrors();
-			file.parser->program()->accept(this);
+			auto* program = file.parser->program();
+			// A tree with syntax errors has missing children (null contexts): only report the syntax errors.
+			if (file.parser->getNumberOfSyntaxErrors() == 0)
+				program->accept(this);
 			errorlistener = outerErrors;
 			currentDir = std::move(outerDir);
 			recordDefinitions = outerRecord;
@@ -974,6 +977,18 @@ namespace mdl {
 		}
 
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
+			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
+			// `instance(...)`. Without this, the function would reference the module's unqualified weights.
+			const Node* receiver = nullptr;
+			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func)) {
+				auto baseObj = asObject(access->expr()->accept(this), access->expr()->start);
+				if (auto* base = std::get_if<const Node*>(&baseObj)) {
+					if (std::holds_alternative<ErrorNode>(**base))
+						return &graph().addErrorNode(); // already reported
+					if (std::holds_alternative<BoundModuleType>(mdl::getDataType(**base)))
+						receiver = *base;
+				}
+			}
 			auto calleeObj = asObject(ctx->func->accept(this), ctx->func->start);
 			if (std::holds_alternative<const Node*>(calleeObj) &&
 				std::holds_alternative<ErrorNode>(*std::get<const Node*>(calleeObj)))
@@ -1013,6 +1028,15 @@ namespace mdl {
 			// weightKey, ...) gets its own weights (with fully qualified paths, e.g. `weightQuery.W`) instead of sharing
 			// the module type's nodes.
 			auto resultOrErr = [&]() {
+				if (receiver != nullptr) {
+					std::string instanceName;
+					if (const auto* pn = std::get_if<ParameterNode>(receiver))
+						instanceName = pn->name;
+					return graph().addModuleInvocationNode(
+							std::get<BoundModuleType>(mdl::getDataType(*receiver)), scope, instanceName, decl.value(),
+							std::move(args)
+					);
+				}
 				if (auto* calleeNodePtr = std::get_if<const Node*>(&calleeObj)) {
 					if (!std::holds_alternative<ErrorNode>(**calleeNodePtr)) {
 						if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**calleeNodePtr))) {

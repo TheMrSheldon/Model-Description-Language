@@ -25,6 +25,7 @@ static std::map<std::string, std::any> initBuiltins() {
 		const char* name;
 		FunctionIDs id;
 		std::vector<std::pair<const char*, DataType>> extraParams = {}; ///< Parameters after `x`
+		bool extraParamsAreArguments = false; ///< Whether the extra parameters are arguments of the builtin
 	};
 	/** \todo template the base type? **/
 	const auto tensor = mdl::TensorType{.type = PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
@@ -43,6 +44,9 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_log", FunctionIDs::LOG},
 			{"__builtin_tanh", FunctionIDs::TANH},
 			{"__builtin_var", FunctionIDs::VAR, {{"dof", PrimitiveType::uint}}},
+			{"__builtin_sum_like", FunctionIDs::COLLAPSE_SUM_LIKE, {{"like", tensor}}, true},
+			{"__builtin_broadcast_like", FunctionIDs::BROADCAST_LIKE, {{"like", tensor}}, true},
+			{"__builtin_stop_gradient", FunctionIDs::STOP_GRADIENT},
 	};
 
 	std::map<std::string, std::any> builtins;
@@ -51,9 +55,14 @@ static std::map<std::string, std::any> initBuiltins() {
 		std::vector<std::pair<std::string, std::reference_wrapper<const mdl::InputNode>>> params{
 				{"x", std::cref(std::get<mdl::InputNode>(x))}
 		};
-		for (const auto& [pname, ptype] : builtin.extraParams)
-			params.emplace_back(pname, std::cref(std::get<mdl::InputNode>(graph.addInputNode(ptype, pname))));
-		const auto& output = graph.addInvocationNode(builtin.id, tensor, {std::cref(x)});
+		std::vector<std::reference_wrapper<const mdl::Node>> arguments{std::cref(x)};
+		for (const auto& [pname, ptype] : builtin.extraParams) {
+			const auto& param = graph.addInputNode(ptype, pname);
+			params.emplace_back(pname, std::cref(std::get<mdl::InputNode>(param)));
+			if (builtin.extraParamsAreArguments)
+				arguments.push_back(std::cref(param));
+		}
+		const auto& output = graph.addInvocationNode(builtin.id, tensor, std::move(arguments));
 		builtins.emplace(
 				builtin.name, mdl::Object(
 									  mdl::FunctionDecl{

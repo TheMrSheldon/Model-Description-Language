@@ -73,6 +73,35 @@ The declared types of the arguments and return values define the signature of co
 signature denote the same runtime dimensions; how many is chosen when compiling (`mdlc --ellipsis-rank N`, default 1).
 E.g., `float[..., 768] forward(x: float[..., 768])` compiled with `--ellipsis-rank 2` takes `[batch, seq, 768]`.
 
+Multiple return values can only be returned from a block body (`return a, b;`), not with the `=>` shorthand.
+
+Member functions of a submodule instance are called on the instance (`norm.gradient(x, dy)`) and use its weights.
+
+## Custom gradients
+A member function named `gradient` is the gradient of `forward` (for another member function `f`: `f_gradient`). It
+is an ordinary function; only the gradient pass (`mdlc --grad`) gives it this meaning. If it is defined, it is used
+instead of differentiating `forward`; otherwise the gradient is derived automatically.
+
+Signature: the arguments of `forward` followed by one cotangent per output of `forward`; the results are one
+cotangent per argument followed by one gradient per weight of the module in declaration order (including the weights
+of submodules, depth first). A mismatch is a compile error once the gradient is needed.
+```dlm
+module LayerNorm[dim: uint] {
+    beta: float[dim]
+    gamma: float[dim]
+    float[..., dim] forward(x: float[..., dim]) { ... }
+    (float[..., dim], float[dim], float[dim]) gradient(x: float[..., dim], dy: float[..., dim]) {
+        auto mu = mean(x)[... -> ... 1];  // recomputed; shared with forward's identical node
+        ...
+        return dx, sum_like(dy, beta), sum_like(dy * xhat, gamma);
+    }
+}
+```
+`gradient` cannot see the local variables of `forward`; intermediates are recomputed, and identical subexpressions are
+shared with the forward pass (the computegraph interns nodes), so this costs nothing. Results that are not needed
+(frozen weights, inputs without gradient) are dropped. `std.autodiff` provides `sum_like`, `broadcast_like` and
+`nograd` (stops gradients).
+
 
 # Structs
 - Represent POD datatypes: structs contain members that are either themselves structs or atomics.

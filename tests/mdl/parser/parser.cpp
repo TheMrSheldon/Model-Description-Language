@@ -377,3 +377,9 @@ TEST_CASE("loop bounds must be compile-time constants", "[parser][loops]") {
 	)")
 						.has_value());
 }
+
+TEST_CASE("syntax errors are reported without translating the broken tree", "[parser]") {
+	std::istringstream stream{"module M[] { (float[4], float[4]) f(x: float[4]) => x, x; }"};
+	auto unit = mdl::parser::parse(stream, "<test>");
+	CHECK_FALSE(unit.has_value());
+}

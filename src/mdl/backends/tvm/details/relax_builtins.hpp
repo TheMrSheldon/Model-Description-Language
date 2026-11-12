@@ -341,6 +341,8 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         auto eq = emitAs(bb, callRelaxOp("relax.op.equal", ts[0], ts[1]), "eq");
         return callRelaxOp("relax.op.astype", eq, ::tvm::DataType::Float(32));
     },
+    /** STOP_GRADIENT — identity (only meaningful to the gradient pass) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
 });
 
 // Every builtin needs a translation (the table is positional).

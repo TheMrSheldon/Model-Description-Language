@@ -7,12 +7,39 @@
 #include <expected>
 #include <list>
 #include <map>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace mdl {
 	struct FunctionDecl;
+	struct ModuleType;
+
+	/**
+	 * @brief Side-table annotation: the nodes produced by one call of a member function of a module instance.
+	 * @details The graph stays flat; this records which nodes a module call consumed and produced, so that passes can
+	 * treat the call as a unit (e.g. the gradient pass uses a custom `gradient` function of the module). Only passes
+	 * that need it read it; backends ignore it.
+	 */
+	struct ModuleCall final {
+		/** @brief The scope of the weights (see Computegraph::getOrAddParameterNode). */
+		std::string scope;
+		/** @brief The path of the instance within the scope (e.g. `layers.3.norm1`); empty for the scope's module. */
+		std::string path;
+		/** @brief The (instantiated) module. */
+		std::shared_ptr<const ModuleType> module;
+		/** @brief The values bound to the module's hyperparameters. */
+		std::map<std::string, const Node*> hyperparameters;
+		/** @brief The name of the called member function. */
+		std::string function;
+		std::vector<const Node*> inputs;
+		std::vector<const Node*> outputs;
+
+		/** @brief The fully qualified path of the instance's weight @p weight (a path relative to the module). */
+		std::string weightPath(const std::string& weight) const { return path.empty() ? weight : path + "." + weight; }
+	};
 
 	class Computegraph final {
 	private:
@@ -28,6 +55,11 @@ namespace mdl {
 		Computegraph(Computegraph&&);
 		Computegraph& operator=(Computegraph&&);
 
+		/**
+		 * @brief Returns the constant node with @p value, creating it on first use.
+		 * @details Constants are interned (hash-consed): equal values (compared bitwise for floating point) yield the same
+		 * node.
+		 */
 		const Node& addConstNode(Atomic&& value);
 
 		/**
@@ -56,6 +88,12 @@ namespace mdl {
 				const FunctionDecl& func, std::vector<NodeRef>&& arguments
 		);
 
+		/**
+		 * @brief Returns the node that applies the builtin @p func to @p arguments, creating it on first use.
+		 * @details Builtins are pure, so invocations are interned (hash-consed): the same builtin applied to the same
+		 * argument nodes with the same result type yields the same node. This is common subexpression elimination by
+		 * construction; e.g. a subexpression that a gradient function recomputes is shared with the forward pass.
+		 */
 		const Node& addInvocationNode(builtins::FunctionIDs func, DataType dtype, std::vector<NodeRef>&& arguments);
 
 		/**
@@ -84,7 +122,19 @@ namespace mdl {
 
 		const Node& addHyperparameterNode(DataType dtype, std::string name = "");
 
+		/** @brief The weight with the fully qualified @p path within @p scope, if it was created. */
+		const Node* findParameterNode(const std::string& scope, const std::string& path) const;
+
+		/** @brief Records a module call (see ModuleCall); equal records are stored once. */
+		void addModuleCall(ModuleCall call);
+
+		/** @brief The recorded module calls that produced @p node as one of their outputs. */
+		std::vector<const ModuleCall*> moduleCallsProducing(const Node& node) const;
+
 		size_t getNumNodes() const;
+
+		/** @brief The number of node creations that were answered with an existing node (see addInvocationNode). */
+		size_t getNumReusedNodes() const { return numReused; }
 
 	private:
 		/**
@@ -97,6 +147,14 @@ namespace mdl {
 
 		/** @brief Weights by (scope, fully qualified path); see getOrAddParameterNode. */
 		std::map<std::pair<std::string, std::string>, const Node*> weights;
+
+		/** @brief Module calls (side table; see ModuleCall); std::list for reference stability. */
+		std::list<ModuleCall> moduleCalls;
+		std::unordered_map<const Node*, std::vector<const ModuleCall*>> moduleCallsByOutput;
+
+		/** @brief Interned constants and builtin invocations by structural key (hash-consing). */
+		std::unordered_map<std::string, const Node*> interned;
+		size_t numReused = 0;
 	};
 } // namespace mdl
 

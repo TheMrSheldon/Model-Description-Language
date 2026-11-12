@@ -7,6 +7,7 @@ add_executable(tests
     mdl/computegraph/function.cpp
     mdl/computegraph/object.cpp
     mdl/computegraph/einops.cpp
+    mdl/computegraph/graph.cpp
     mdl/parser/parser.cpp
     mdl/parser/imports.cpp
     mdl/backends/tvm_patterns.cpp

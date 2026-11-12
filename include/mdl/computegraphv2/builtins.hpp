@@ -53,6 +53,8 @@ namespace mdl::builtins {
 		RESHAPE_LIKE,	   /**< (g, ref): reshapes g to ref's shape */
 		PERMUTE_INVERSE,   /**< (g, perm): permutes g by the inverse of the PERMUTE permutation perm */
 		EQUAL_MASK,		   /**< (a, b): 1 where a == b (broadcasting), 0 elsewhere */
+		/** Differentiation **/
+		STOP_GRADIENT, /**< (x): x; no gradient flows through it (std `nograd`) */
 
 		COUNT
 	};

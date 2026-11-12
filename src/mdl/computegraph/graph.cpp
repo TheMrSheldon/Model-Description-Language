@@ -7,6 +7,7 @@
 #include <functional>
 #include <mdl/utils/overload.hpp>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -105,6 +106,19 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 		}
 		return fallback();
 
+	// The *_LIKE builtins produce a tensor of the shape of their reference argument.
+	case FunctionIDs::COLLAPSE_SUM_LIKE:
+	case FunctionIDs::BROADCAST_LIKE:
+	case FunctionIDs::RESHAPE_LIKE:
+		if (args.size() >= 2)
+			return getDataType(args[1].get());
+		return fallback();
+
+	case FunctionIDs::STOP_GRADIENT:
+		if (!args.empty())
+			return getDataType(args[0].get());
+		return fallback();
+
 	// VAR returns a scalar of the same element type.
 	case FunctionIDs::VAR:
 		if (!args.empty()) {
@@ -152,15 +166,79 @@ Computegraph::Computegraph() = default;
 Computegraph::Computegraph(Computegraph&&) = default;
 Computegraph& Computegraph::operator=(Computegraph&&) = default;
 
+namespace {
+	/** @brief Appends the bytes of @p value to the structural key @p key. */
+	template <typename T>
+	void appendKey(std::string& key, const T& value) {
+		static_assert(std::is_trivially_copyable_v<T>);
+		key.append(reinterpret_cast<const char*>(&value), sizeof(T));
+	}
+
+	/**
+	 * @brief Appends an encoding of @p type; returns false for types that are never interned (aggregates, modules).
+	 */
+	bool appendTypeKey(std::string& key, const DataType& type) {
+		if (const auto* prim = std::get_if<PrimitiveType>(&type)) {
+			appendKey(key, char{'p'});
+			appendKey(key, *prim);
+			return true;
+		}
+		const auto* tensor = std::get_if<TensorType>(&type);
+		if (tensor == nullptr)
+			return false;
+		appendKey(key, char{'t'});
+		appendKey(key, tensor->type);
+		appendKey(key, tensor->shape.size());
+		for (const auto& dim : tensor->shape) {
+			appendKey(key, static_cast<char>(dim.index()));
+			if (const auto* u = std::get_if<unsigned>(&dim))
+				appendKey(key, *u);
+			else if (const auto* n = std::get_if<const Node*>(&dim))
+				appendKey(key, *n);
+		}
+		return true;
+	}
+} // namespace
+
 const Node& Computegraph::addConstNode(Atomic&& value) {
-	nodes.emplace_back(ConstNode{.value = std::move(value)});
-	return nodes.back();
+	std::string key = "c";
+	appendKey(key, static_cast<char>(value.index()));
+	std::visit(
+			overloaded{
+					[&](int v) { appendKey(key, v); },
+					[&](double v) { appendKey(key, v); }, // bitwise: distinguishes -0.0 and NaN payloads
+					[&](const std::vector<int>& v) {
+						appendKey(key, v.size());
+						for (int i : v)
+							appendKey(key, i);
+					},
+			},
+			value
+	);
+	auto [it, inserted] = interned.try_emplace(std::move(key), nullptr);
+	if (!inserted) {
+		++numReused;
+		return *it->second;
+	}
+	it->second = &nodes.emplace_back(ConstNode{.value = std::move(value)});
+	return *it->second;
 }
 
 const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, std::vector<NodeRef>&& args) {
-	bool constevalable = std::all_of(args.begin(), args.end(), isCompiletimeEvalable);
+	std::string key = "i";
+	appendKey(key, func);
+	appendKey(key, args.size());
+	for (const auto& arg : args)
+		appendKey(key, &arg.get());
+	const bool internable = appendTypeKey(key, dtype);
+	if (internable)
+		if (auto it = interned.find(key); it != interned.end()) {
+			++numReused;
+			return *it->second;
+		}
 
-	return nodes.emplace_back(
+	bool constevalable = std::all_of(args.begin(), args.end(), isCompiletimeEvalable);
+	const Node& node = nodes.emplace_back(
 			InvocationNode{
 					.type = std::move(dtype),
 					.constevalable = constevalable,
@@ -168,6 +246,9 @@ const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, st
 					.arguments = std::move(args),
 			}
 	);
+	if (internable)
+		interned.emplace(std::move(key), &node);
+	return node;
 }
 
 namespace {
@@ -221,6 +302,30 @@ namespace {
 			return result;
 		}
 
+		/**
+		 * @brief Records the module calls within the inlined subgraph for the clone (see ModuleCall).
+		 * @details Must be called after cloning. @p rescope adapts the weight scope and instance path of each call (e.g.
+		 * prefixes the instance name of an inlined module).
+		 */
+		void propagateModuleCalls(const std::function<void(ModuleCall&)>& rescope) {
+			std::vector<const ModuleCall*> calls;
+			for (const auto& [from, to] : memo)
+				for (const ModuleCall* call : graph.moduleCallsProducing(*from))
+					if (std::find(calls.begin(), calls.end(), call) == calls.end())
+						calls.push_back(call);
+			for (const ModuleCall* call : calls) {
+				ModuleCall copy = *call;
+				for (auto* nodes : {&copy.inputs, &copy.outputs})
+					for (auto& node : *nodes)
+						node = &clone(*node);
+				for (auto& [name, value] : copy.hyperparameters)
+					value = &clone(*value);
+				if (rescope)
+					rescope(copy);
+				graph.addModuleCall(std::move(copy));
+			}
+		}
+
 		/** @brief Substitutes nodes that are referenced by symbolic dimensions of a (tensor) type. */
 		DataType cloneType(const DataType& dtype) {
 			const auto* tt = std::get_if<TensorType>(&dtype);
@@ -254,11 +359,9 @@ namespace {
 			}
 			// RESHAPE and EXPAND carry precise output shapes set by the einops layer. inferOutputType returns a 1-D
 			// fallback for these ops, which would lose the split/merge shape information.
-			// The adjoint builtins (created by the gradient pass with explicit types) also keep their type.
+			// PERMUTE_INVERSE and EQUAL_MASK (created by the gradient pass with explicit types) also keep their type.
 			const bool keepsType = invn.id == FunctionIDs::RESHAPE || invn.id == FunctionIDs::EXPAND ||
-								   invn.id == FunctionIDs::COLLAPSE_SUM_LIKE || invn.id == FunctionIDs::BROADCAST_LIKE ||
-								   invn.id == FunctionIDs::RESHAPE_LIKE || invn.id == FunctionIDs::PERMUTE_INVERSE ||
-								   invn.id == FunctionIDs::EQUAL_MASK;
+								   invn.id == FunctionIDs::PERMUTE_INVERSE || invn.id == FunctionIDs::EQUAL_MASK;
 			if (keepsType) {
 				DataType outType = cloneType(invn.type);
 				if (!changed && !shapeNodesDiffer(invn.type, outType))
@@ -316,7 +419,9 @@ std::expected<Computegraph::Outputs, std::string> Computegraph::addInvocationNod
 		inliner.substitute(func.parameters[i].second.get(), arguments[i].get());
 	for (size_t i = 0; i < std::min(func.templateParameters.size(), templateArguments.size()); ++i)
 		inliner.substitute(func.templateParameters[i].second.get(), templateArguments[i].get());
-	return cloneOutputs(inliner, func);
+	auto outputs = cloneOutputs(inliner, func);
+	inliner.propagateModuleCalls(nullptr); // same weight scope: the instance paths are unchanged
+	return outputs;
 }
 
 std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocationNode(
@@ -342,7 +447,56 @@ std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocat
 			inliner.substitute(hn.get(), *it->second);
 	for (size_t i = 0; i < func.parameters.size(); ++i)
 		inliner.substitute(func.parameters[i].second.get(), arguments[i].get());
-	return cloneOutputs(inliner, func);
+	auto outputs = cloneOutputs(inliner, func);
+
+	// Module calls within the callee now belong to the instance: `inner` becomes `instanceName.inner` in `scope`.
+	inliner.propagateModuleCalls([&](ModuleCall& call) {
+		call.scope = scope;
+		if (!instanceName.empty())
+			call.path = call.path.empty() ? instanceName : instanceName + "." + call.path;
+	});
+
+	ModuleCall call{
+			.scope = scope,
+			.path = instanceName,
+			.module = std::make_shared<const ModuleType>(boundModule.definition),
+			.hyperparameters = boundModule.hyperparamValues,
+			.function = func.name,
+			.inputs = {},
+			.outputs = {},
+	};
+	for (const auto& arg : arguments)
+		call.inputs.push_back(&arg.get());
+	for (const auto& output : outputs)
+		call.outputs.push_back(&output.get());
+	addModuleCall(std::move(call));
+	return outputs;
+}
+
+const Node* Computegraph::findParameterNode(const std::string& scope, const std::string& path) const {
+	auto it = weights.find({scope, path});
+	return it == weights.end() ? nullptr : it->second;
+}
+
+void Computegraph::addModuleCall(ModuleCall call) {
+	if (call.outputs.empty())
+		return;
+	auto& producing = moduleCallsByOutput[call.outputs.front()];
+	for (const ModuleCall* existing : producing)
+		if (existing->scope == call.scope && existing->path == call.path && existing->function == call.function &&
+			existing->inputs == call.inputs && existing->outputs == call.outputs)
+			return;
+	const ModuleCall& stored = moduleCalls.emplace_back(std::move(call));
+	for (const Node* output : stored.outputs) {
+		auto& list = moduleCallsByOutput[output];
+		if (std::find(list.begin(), list.end(), &stored) == list.end())
+			list.push_back(&stored);
+	}
+}
+
+std::vector<const ModuleCall*> Computegraph::moduleCallsProducing(const Node& node) const {
+	auto it = moduleCallsByOutput.find(&node);
+	return it == moduleCallsByOutput.end() ? std::vector<const ModuleCall*>{} : it->second;
 }
 
 const Node& Computegraph::addErrorNode() {

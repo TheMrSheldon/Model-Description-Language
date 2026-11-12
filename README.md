@@ -42,6 +42,21 @@ mdlc model.dlm -a model.yml -o model.o --binding cpp=model.hpp --grad forward --
 computed on the computegraph; the backend only sees an ordinary function). `--trainable` takes gitignore-style patterns
 over weight paths (all weights by default); `--input-grads` adds gradients with respect to the inputs.
 
+A module can provide its own gradient as an ordinary member function named `gradient` (for `forward`; other member
+functions use `<name>_gradient`). It takes the inputs followed by one cotangent per output and returns one cotangent
+per input followed by one gradient per weight (in declaration order). If it is not defined, the gradient is derived
+automatically. Intermediates are simply recomputed: identical subexpressions are shared with the forward pass.
+```dlm
+module Scale[dim: uint] {
+    s: float[dim]
+    float[..., dim] forward(x: float[..., dim]) => x * s;
+    (float[..., dim], float[dim]) gradient(x: float[..., dim], dy: float[..., dim]) {
+        return dy * s, sum_like(dy * x, s);
+    }
+}
+```
+`std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`.
+
 ## CMake
 ```cmake
 include(MDL)

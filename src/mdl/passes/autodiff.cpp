@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -199,9 +200,45 @@ namespace mdl::autodiff {
 				return arg == 0;
 			case FIDs::EQUAL_MASK:
 				return false; // piecewise constant
+			case FIDs::STOP_GRADIENT:
+				return false;
 			default:
 				return true;
 			}
+		}
+
+		/** @brief The name of the custom gradient function of the member function @p function. */
+		std::string customGradientName(const std::string& function) {
+			return function == "forward" || function == "operator()" ? "gradient" : function + "_gradient";
+		}
+
+		/** @brief A module call whose module provides a custom gradient function. */
+		struct CustomCall {
+			const ModuleCall* call;
+			const FunctionDecl* gradient;
+		};
+
+		/**
+		 * @brief The module call with a custom gradient that produced @p node, if any. If calls are nested (an inner
+		 * call's output is also an output of the enclosing call), the outermost one (shortest instance path) wins.
+		 */
+		std::optional<CustomCall> customCallProducing(const Computegraph& graph, const Node& node) {
+			std::optional<CustomCall> best;
+			for (const ModuleCall* call : graph.moduleCallsProducing(node)) {
+				if (call->module == nullptr)
+					continue;
+				auto fn = call->module->functions.find(customGradientName(call->function));
+				if (fn == call->module->functions.end())
+					continue;
+				// A call that returns one of its inputs unchanged cannot be treated as a unit.
+				if (std::any_of(call->outputs.begin(), call->outputs.end(), [&](const Node* out) {
+						return std::find(call->inputs.begin(), call->inputs.end(), out) != call->inputs.end();
+					}))
+					continue;
+				if (!best || call->path.size() < best->call->path.size())
+					best = CustomCall{call, &fn->second};
+			}
+			return best;
 		}
 
 		std::string identifier(const std::string& path) {
@@ -209,25 +246,105 @@ namespace mdl::autodiff {
 			std::replace(id.begin(), id.end(), '.', '_');
 			return id;
 		}
+		/**
+		 * @brief Inlines the custom gradient function of a module call and accumulates its results onto the call's
+		 * inputs and weights.
+		 * @details The gradient function takes the call's inputs followed by one cotangent per output and returns one
+		 * cotangent per input followed by one per weight of the module (in declaration order, see mdl::weightPaths).
+		 */
+		template <typename Accumulate>
+		std::expected<void, std::string> applyCustomGradient(
+				Computegraph& graph, Builder& b, const CustomCall& custom, const std::vector<const Node*>& weights,
+				const std::unordered_map<const Node*, const Node*>& adjoint,
+				const std::unordered_set<const Node*>& dependsOnTarget, Accumulate&& accumulate
+		) {
+			const ModuleCall& call = *custom.call;
+			const FunctionDecl& gradient = *custom.gradient;
+			const auto where = std::format(
+					"custom gradient '{}' of '{}'", gradient.name, call.path.empty() ? call.scope : call.path
+			);
+			if (gradient.parameters.size() != call.inputs.size() + call.outputs.size())
+				return std::unexpected(std::format(
+						"{} must take {} argument(s) ({} input(s) of '{}' and one cotangent per output) but takes {}",
+						where, call.inputs.size() + call.outputs.size(), call.inputs.size(), call.function,
+						gradient.parameters.size()
+				));
+			if (gradient.outputs.size() != call.inputs.size() + weights.size())
+				return std::unexpected(std::format(
+						"{} must return {} value(s) (one per input of '{}', then one per weight) but returns {}", where,
+						call.inputs.size() + weights.size(), call.function, gradient.outputs.size()
+				));
+
+			bool needed = false;
+			std::vector<NodeRef> arguments;
+			for (const Node* input : call.inputs)
+				arguments.push_back(std::cref(*input));
+			for (const Node* output : call.outputs) {
+				auto adj = adjoint.find(output);
+				needed |= adj != adjoint.end();
+				arguments.push_back(std::cref(adj != adjoint.end() ? *adj->second : b.zerosLike(*output)));
+			}
+			if (!needed)
+				return {};
+
+			BoundModuleType bound{.definition = *call.module, .hyperparamValues = call.hyperparameters};
+			auto results = graph.addModuleInvocationNode(bound, call.scope, call.path, gradient, std::move(arguments));
+			if (!results)
+				return std::unexpected(where + ": " + results.error());
+			for (size_t i = 0; i < call.inputs.size(); ++i)
+				if (dependsOnTarget.contains(call.inputs[i]))
+					accumulate(*call.inputs[i], (*results)[i].get());
+			for (size_t i = 0; i < weights.size(); ++i)
+				if (weights[i] != nullptr && dependsOnTarget.contains(weights[i]))
+					accumulate(*weights[i], (*results)[call.inputs.size() + i].get());
+			return {};
+		}
 	} // namespace
 
 	std::expected<FunctionDecl, std::string> vjp(
 			Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
 			const Options& options
 	) {
-		// Topological order (post-order) of all nodes reachable from the outputs.
+		// Topological order (post-order) of all nodes reachable from the outputs. A module call with a custom gradient
+		// is one step: its outputs are not differentiated through, but its inputs and weights are visited.
+		struct Step {
+			const Node* node = nullptr;
+			std::optional<CustomCall> custom;
+		};
+		std::vector<Step> steps;
 		std::vector<const Node*> order;
 		std::unordered_set<const Node*> visited;
+		std::unordered_set<const ModuleCall*> visitedCalls;
 		std::function<void(const Node&)> visit = [&](const Node& node) {
 			if (!visited.insert(&node).second)
 				return;
+			if (auto custom = customCallProducing(graph, node)) {
+				if (!visitedCalls.insert(custom->call).second)
+					return;
+				for (const Node* input : custom->call->inputs)
+					visit(*input);
+				for (const auto& path : weightPaths(*custom->call->module))
+					if (const Node* w = graph.findParameterNode(custom->call->scope, custom->call->weightPath(path)))
+						visit(*w);
+				steps.push_back(Step{.node = nullptr, .custom = custom});
+				return;
+			}
 			if (const auto* inv = std::get_if<InvocationNode>(&node))
 				for (const auto& arg : inv->arguments)
 					visit(arg.get());
+			steps.push_back(Step{.node = &node, .custom = std::nullopt});
 			order.push_back(&node);
 		};
 		for (const auto& output : func.outputs)
 			visit(output.get());
+
+		// The weights of a module call with custom gradient, in the order of its gradient's results.
+		auto callWeights = [&](const ModuleCall& call) {
+			std::vector<const Node*> result;
+			for (const auto& path : weightPaths(*call.module))
+				result.push_back(graph.findParameterNode(call.scope, call.weightPath(path)));
+			return result;
+		};
 
 		// The differentiation targets: selected weights and (optionally) the inputs.
 		std::map<std::string, const Node*> weights;
@@ -242,7 +359,19 @@ namespace mdl::autodiff {
 			return options.trainable.empty() || options.trainable.selects(path);
 		};
 		std::unordered_set<const Node*> dependsOnTarget;
-		for (const auto* node : order) {
+		for (const auto& step : steps) {
+			if (step.custom) {
+				const ModuleCall& call = *step.custom->call;
+				bool target = std::any_of(call.inputs.begin(), call.inputs.end(), [&](const Node* in) {
+					return dependsOnTarget.contains(in);
+				});
+				for (const Node* w : callWeights(call))
+					target |= w != nullptr && dependsOnTarget.contains(w);
+				if (target)
+					dependsOnTarget.insert(call.outputs.begin(), call.outputs.end());
+				continue;
+			}
+			const Node* node = step.node;
 			bool target = false;
 			if (const auto* pn = std::get_if<ParameterNode>(node))
 				target = selected(pn->name);
@@ -287,15 +416,22 @@ namespace mdl::autodiff {
 
 		// Backward sweep in reverse topological order.
 		try {
-			for (auto it = order.rbegin(); it != order.rend(); ++it) {
-				const auto* inv = std::get_if<InvocationNode>(*it);
-				auto adj = adjoint.find(*it);
+			for (auto it = steps.rbegin(); it != steps.rend(); ++it) {
+				if (it->custom) {
+					if (auto ok = applyCustomGradient(graph, b, *it->custom, callWeights(*it->custom->call), adjoint,
+													  dependsOnTarget, accumulate);
+						!ok)
+						return std::unexpected(func.name + ": " + ok.error());
+					continue;
+				}
+				const auto* inv = std::get_if<InvocationNode>(it->node);
+				auto adj = adjoint.find(it->node);
 				if (inv == nullptr || adj == adjoint.end())
 					continue;
 				for (size_t i = 0; i < inv->arguments.size(); ++i) {
 					const Node& arg = inv->arguments[i].get();
 					if (differentiableArgument(inv->id, i) && dependsOnTarget.contains(&arg))
-						accumulate(arg, rule(b, graph, **it, *inv, i, *adj->second));
+						accumulate(arg, rule(b, graph, *it->node, *inv, i, *adj->second));
 				}
 			}
 		} catch (const NoGradientRule& e) {
