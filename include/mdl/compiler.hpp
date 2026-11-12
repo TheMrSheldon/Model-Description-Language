@@ -37,6 +37,12 @@ namespace mdl {
 		/** Kernels that the backend may call. */
 		Kernels kernels = Kernels::OneDnn;
 
+		/**
+		 * Number of dimensions that `...` stands for in the signatures of compiled functions (e.g. 2 for `[B, S, D]`
+		 * inputs of a function declared with `float[..., D]`). All `...` of a function denote the same dimensions.
+		 */
+		unsigned ellipsisRank = 1;
+
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;
 

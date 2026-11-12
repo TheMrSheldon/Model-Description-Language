@@ -193,7 +193,29 @@ TEST_CASE("einops ellipsis permute emits PERMUTE with negative indices", "[einop
 	REQUIRE(std::holds_alternative<InvocationNode>(out));
 	const auto& inv = std::get<InvocationNode>(out);
 	REQUIRE(inv.id == builtins::FunctionIDs::PERMUTE);
-	// Permutation indices should include negative values for post-batch dims
+	// The (possibly multi-dimensional) ellipsis is marked; post-ellipsis dims use negative indices.
+	const auto& perm = std::get<std::vector<int>>(std::get<ConstNode>(inv.arguments[1].get()).value);
+	REQUIRE(perm == std::vector<int>{builtins::kEllipsisPermMarker, -1, -2});
+}
+
+TEST_CASE("einops splits after an ellipsis mark the ellipsis group in the reshape", "[einops][ellipsis]") {
+	Computegraph graph;
+	const Node& input = graph.addParameterNode(TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}, 768u}});
+	Spec lhs = {ellipsis(), group({"h", "d"})};
+	Spec rhs = {named("h"), ellipsis(), named("d")};
+	const Node& heads = graph.addConstNode(Atomic{12});
+	auto result = apply(graph, input, lhs, rhs, {{"h", &heads}});
+	REQUIRE(result.has_value());
+
+	// PERMUTE(RESHAPE(x, {0, 1}, 12, 64), [h, ..., d])
+	const auto& permute = std::get<InvocationNode>(result->get());
+	REQUIRE(permute.id == builtins::FunctionIDs::PERMUTE);
+	const auto& perm = std::get<std::vector<int>>(std::get<ConstNode>(permute.arguments[1].get()).value);
+	REQUIRE(perm == std::vector<int>{-2, builtins::kEllipsisPermMarker, -1});
+	const auto& reshape = std::get<InvocationNode>(permute.arguments[0].get());
+	REQUIRE(reshape.id == builtins::FunctionIDs::RESHAPE);
+	// The ellipsis group: no input dims before it, one (the merged `(h d)`) after it.
+	REQUIRE(std::get<std::vector<int>>(std::get<ConstNode>(reshape.arguments[1].get()).value) == std::vector<int>{0, 1});
 }
 
 // ---------------------------------------------------------------------------

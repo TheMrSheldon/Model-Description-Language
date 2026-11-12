@@ -321,12 +321,19 @@ static std::expected<std::pair<const Node*, std::vector<Atom>>, std::string> app
 	std::vector<std::reference_wrapper<const Node>> shapeArgs;
 	shapeArgs.emplace_back(std::cref(input));
 
+	// The ellipsis group covers the input dims between the LHS items before and after it (one input dim per item).
+	auto ellipsisAt = std::find_if(lhs.begin(), lhs.end(), [](const SpecItem& item) {
+		return !item.is_group && item.atoms.front().kind == AtomKind::Ellipsis;
+	});
+	const int ellipsisBefore = static_cast<int>(ellipsisAt - lhs.begin());
+	const int ellipsisAfter = ellipsisAt == lhs.end() ? 0 : static_cast<int>(lhs.end() - ellipsisAt - 1);
+
 	TensorType::Shape newShape;
 	for (auto& item : lhs) {
 		for (auto& atom : item.atoms) {
 			if (atom.kind == AtomKind::Ellipsis) {
 				newShape.push_back(Elipsis{});
-				shapeArgs.emplace_back(constNode(graph, -1)); // sentinel: "keep ellipsis"
+				shapeArgs.emplace_back(std::cref(graph.addConstNode(Atomic{std::vector<int>{ellipsisBefore, ellipsisAfter}})));
 			} else if (atom.kind == AtomKind::Named) {
 				auto it = sizes.find(atom.name);
 				if (it == sizes.end()) {
@@ -403,7 +410,7 @@ static std::vector<int> computePermutation(
 
 	for (auto& atom : flatRhs) {
 		if (atom.kind == AtomKind::Ellipsis) {
-			perm.push_back(ellipsisFlatIdx); // represents all batch dims
+			perm.push_back(builtins::kEllipsisPermMarker); // stands for all (batch) dims of the ellipsis
 		} else if (atom.kind == AtomKind::Named) {
 			auto it = lhsIndex.find(atom.name);
 			if (it != lhsIndex.end()) {
@@ -602,6 +609,19 @@ static std::expected<const Node*, std::string> applyRemerge(
 	if (!needReshape)
 		return &input;
 
+	// The input dims are the flat RHS atoms that exist in the input (all but new literal dims); the ellipsis group
+	// covers the input dims between those before and after it.
+	int ellipsisBefore = 0, ellipsisAfter = 0;
+	{
+		bool seen = false;
+		for (const auto& atom : flattenSpec(rhs)) {
+			if (atom.kind == AtomKind::Ellipsis)
+				seen = true;
+			else if (atom.kind != AtomKind::Literal)
+				++(seen ? ellipsisAfter : ellipsisBefore);
+		}
+	}
+
 	TensorType::Shape newShape;
 	std::vector<std::reference_wrapper<const Node>> shapeArgs;
 	shapeArgs.emplace_back(std::cref(input));
@@ -637,7 +657,7 @@ static std::expected<const Node*, std::string> applyRemerge(
 				shapeArgs.emplace_back(constNode(graph, atom.value));
 			} else if (atom.kind == AtomKind::Ellipsis) {
 				newShape.push_back(Elipsis{});
-				shapeArgs.emplace_back(constNode(graph, -1));
+				shapeArgs.emplace_back(std::cref(graph.addConstNode(Atomic{std::vector<int>{ellipsisBefore, ellipsisAfter}})));
 			} else if (atom.kind == AtomKind::Anon) {
 				newShape.push_back(Elipsis{});
 				shapeArgs.emplace_back(constNode(graph, -1));

@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -17,7 +19,10 @@ namespace mdl {
 	struct TensorSignature {
 		std::string name;
 		PrimitiveType dtype;
-		/** @brief Concrete shape; -1 marks a dimension that is only known at runtime. */
+		/**
+		 * @brief Concrete shape; -1 marks a dimension that is only known at runtime. Each `...` contributes
+		 * ellipsisRank such dimensions (the same ones in all tensors of the function).
+		 */
 		std::vector<int64_t> shape;
 		/** @brief The graph node (nullptr for an argument that the function does not use). */
 		const Node* node;
@@ -39,13 +44,19 @@ namespace mdl {
 		std::vector<TensorSignature> outputs;
 		/** @brief All weights of the module (not only those used by this function) in canonical order. */
 		std::vector<std::string> moduleWeights;
+		/**
+		 * @brief The hyperparameter values the module was compiled with, by path (e.g. `conf.numEncoders`), in
+		 * declaration order.
+		 */
+		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameters;
 	};
 
 	/**
 	 * @brief Lists the functions that are compiled: all non-template member functions of modules whose
 	 * hyperparameters are all given in @p argvals.
 	 */
-	std::vector<ExportedFunction> exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals);
+	std::vector<ExportedFunction>
+	exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1);
 
 	/**
 	 * @brief Evaluates a compile-time constant (integer) expression, looking up hyperparameters in @p argvals.

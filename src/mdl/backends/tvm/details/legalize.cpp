@@ -270,7 +270,7 @@ namespace mdl::backend::tvm {
 			outShape.push_back(N);
 			auto k = te::reduce_axis(::tvm::Range(0, K), "k");
 			const auto dtype = a->dtype;
-			return te::compute(
+			te::Tensor product = te::compute(
 					outShape,
 					[&](const Array<tirx::Var>& idx) {
 						auto batchIndex = [&](const te::Tensor& t, size_t rank) {
@@ -294,14 +294,24 @@ namespace mdl::backend::tvm {
 							bi.push_back(k);
 							bi.push_back(idx[batchRank + 1]);
 						}
-						PrimExpr acc = ::tvm::sum(a(ai) * b(bi), {k});
-						if (alpha != 1.0)
-							acc = acc * ::tvm::tirx::make_const(dtype, alpha);
-						if (bias)
-							acc = acc + (*bias)(Array<PrimExpr>{idx[batchRank + 1]});
-						return acc;
+						return ::tvm::sum(a(ai) * b(bi), {k});
 					},
 					"T_matmul", "opaque"
+			);
+			if (alpha == 1.0 && !bias)
+				return product;
+			// Epilogue as a separate stage (a reduction must be the top-level expression of a compute).
+			return te::compute(
+					outShape,
+					[&](const Array<tirx::Var>& idx) {
+						PrimExpr v = product(Array<PrimExpr>{idx.begin(), idx.end()});
+						if (alpha != 1.0)
+							v = v * ::tvm::tirx::make_const(dtype, alpha);
+						if (bias)
+							v = v + (*bias)(Array<PrimExpr>{idx[batchRank + 1]});
+						return v;
+					},
+					"T_matmul_epilogue", topi::kElementWise
 			);
 		}
 

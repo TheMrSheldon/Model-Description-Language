@@ -70,7 +70,8 @@ float[...] f(x: float[...]) {
 ```
 
 The declared types of the arguments and return values define the signature of compiled functions. All `...` in a
-signature currently denote the same (single) runtime dimension.
+signature denote the same runtime dimensions; how many is chosen when compiling (`mdlc --ellipsis-rank N`, default 1).
+E.g., `float[..., 768] forward(x: float[..., 768])` compiled with `--ellipsis-rank 2` takes `[batch, seq, 768]`.
 
 
 # Structs

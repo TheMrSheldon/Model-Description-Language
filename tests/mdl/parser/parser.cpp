@@ -266,3 +266,114 @@ TEST_CASE("destructuring with the wrong number of names is an error", "[parser][
 	)")
 						.has_value());
 }
+
+// ---------------------------------------------------------------------------
+// Module templates, loops, and module arrays
+// ---------------------------------------------------------------------------
+
+static const char* layerStack = R"(
+	module Layer[dim: uint] {
+		W: float[dim, dim]
+		float[..., dim] forward(x: float[..., dim]) => x @ W;
+	}
+	module Stack[depth: uint, dim: uint] {
+		layers: [Layer[dim] for i in 0..depth]
+		float[..., dim] forward(x: float[..., dim]) {
+			auto h = x;
+			for (i in 0..depth) {
+				h = layers[i](h);
+			}
+			return h;
+		}
+	}
+	module Model[] {
+		stack: Stack[3, 4]
+		float[..., 4] forward(x: float[..., 4]) => stack(x);
+	}
+)";
+
+TEST_CASE("loops over module arrays are unrolled with per-layer weights", "[parser][loops]") {
+	auto unit = parseSource(layerStack);
+	REQUIRE(unit.has_value());
+	const auto& f = moduleFunction(*unit, "Model", "forward");
+	CHECK(countOps(f, builtins::FunctionIDs::TENSOR_DOT) == 3);
+	CHECK(weightNames(f) == std::vector<std::string>{"stack.layers.0.W", "stack.layers.1.W", "stack.layers.2.W"});
+	CHECK(weightPaths(std::get<ModuleType>(unit->definitions.at("Model"))) ==
+		  std::vector<std::string>{"stack.layers.0.W", "stack.layers.1.W", "stack.layers.2.W"});
+}
+
+TEST_CASE("modules are expanded per instantiation (hyperparameter loop bounds)", "[parser][loops]") {
+	auto unit = parseSource(layerStack);
+	REQUIRE(unit.has_value());
+	auto value = [&](int v) { return Object{&unit->graph().addConstNode(Atomic{v})}; };
+	auto deep = unit->instantiate("Stack", {{"depth", value(5)}, {"dim", value(8)}});
+	REQUIRE(deep.has_value());
+	CHECK(countOps(deep->get().functions.at("forward"), builtins::FunctionIDs::TENSOR_DOT) == 5);
+	auto shallow = unit->instantiate("Stack", {{"depth", value(2)}, {"dim", value(8)}});
+	REQUIRE(shallow.has_value());
+	CHECK(countOps(shallow->get().functions.at("forward"), builtins::FunctionIDs::TENSOR_DOT) == 2);
+}
+
+TEST_CASE("structs can be passed as module hyperparameters", "[parser][templates]") {
+	auto unit = parseSource(R"(
+		struct Conf {
+			dim: uint
+			depth: uint
+		}
+		module Layer[dim: uint] {
+			W: float[dim, dim]
+			float[..., dim] forward(x: float[..., dim]) => x @ W;
+		}
+		module Net[conf: Conf] {
+			layers: [Layer[conf.dim] for i in 0..conf.depth]
+			float[..., conf.dim] forward(x: float[..., conf.dim]) {
+				auto h = x;
+				for (i in 0..conf.depth) { h = layers[i](h); }
+				return h;
+			}
+		}
+		module Outer[conf: Conf] {
+			net: Net[conf]
+			float[..., conf.dim] forward(x: float[..., conf.dim]) => net(x);
+		}
+	)");
+	REQUIRE(unit.has_value());
+	auto conf = AggregateInstance::create(
+			std::get<AggregateType>(unit->definitions.at("Conf")),
+			{{"dim", Object{&unit->graph().addConstNode(Atomic{4})}},
+			 {"depth", Object{&unit->graph().addConstNode(Atomic{2})}}}
+	);
+	REQUIRE(conf.has_value());
+	auto outer = unit->instantiate("Outer", {{"conf", Object{*conf}}});
+	REQUIRE(outer.has_value());
+	CHECK(weightNames(outer->get().functions.at("forward")) == std::vector<std::string>{"net.layers.0.W", "net.layers.1.W"});
+}
+
+TEST_CASE("assigning an undeclared variable is an error", "[parser][loops]") {
+	CHECK_FALSE(parseSource("float[...] f(x: float[...]) { y = x; return x; }").has_value());
+}
+
+TEST_CASE("indexing a module array out of bounds is an error", "[parser][loops]") {
+	CHECK_FALSE(parseSource(R"(
+		module Layer[] {
+			W: float[2, 2]
+			float[..., 2] forward(x: float[..., 2]) => x @ W;
+		}
+		module Stack[] {
+			layers: [Layer[] for i in 0..2]
+			float[..., 2] forward(x: float[..., 2]) => layers[2](x);
+		}
+	)")
+						.has_value());
+}
+
+TEST_CASE("loop bounds must be compile-time constants", "[parser][loops]") {
+	CHECK_FALSE(parseSource(R"(
+		float[...] f(x: float[...]) {
+			auto h = x;
+			for (i in 0..x) { h = h + x; }
+			return h;
+		}
+	)")
+						.has_value());
+}

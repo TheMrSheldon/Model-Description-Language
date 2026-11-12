@@ -30,6 +30,10 @@ namespace mdl {
 		create(AggregateType type, std::map<std::string, Object> values);
 
 		std::optional<std::reference_wrapper<const Object>> getMember(std::string_view name) const;
+
+		const AggregateType& getType() const { return type; }
+		/** @brief The member values, in the (alphabetical) order of AggregateType::members. */
+		const std::vector<Object>& getMembers() const { return members; }
 	};
 
 	/**
@@ -49,6 +53,13 @@ namespace mdl {
 		create(BoundModuleType type, std::map<std::string, Object> values);
 
 		std::optional<std::reference_wrapper<const Object>> getMember(std::string_view name) const;
+	};
+
+	/**
+	 * @brief An array of objects, e.g., the module instances of `layers: [Encoder[conf] for i in 0..12]`.
+	 */
+	struct ArrayInstance {
+		std::vector<Object> elements;
 	};
 
 	std::optional<std::reference_wrapper<const FunctionDecl>>

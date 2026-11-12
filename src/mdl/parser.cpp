@@ -22,10 +22,41 @@
 #include <utility>
 
 namespace mdl {
+	class TranslatingVisitor;
+
+	/** @brief A parsed source file; kept alive so that module templates can be expanded after parsing. */
+	struct ParsedFile {
+		std::unique_ptr<PrettyErrorListener> errors; // destroyed last (the parser refers to it)
+		std::unique_ptr<antlr4::ANTLRInputStream> input;
+		std::unique_ptr<antlr4::mdlLexer> lexer;
+		std::unique_ptr<antlr4::CommonTokenStream> tokens;
+		std::unique_ptr<antlr4::mdlParser> parser;
+	};
+
+	/** @brief The definition of a module, from which instances are expanded with concrete hyperparameter values. */
+	struct ModuleTemplate {
+		std::string name;
+		antlr4::mdlParser::Module_defContext* ctx;
+		Namespace* scope;			 ///< The namespace the module is defined in
+		PrettyErrorListener* errors; ///< Error listener of the defining file
+	};
+
+	struct parser::FrontendState {
+		Computegraph graph;
+		std::vector<std::unique_ptr<ParsedFile>> files;
+		std::unique_ptr<TranslatingVisitor> visitor; // destroyed first
+	};
+
 	class TranslatingVisitor : public antlr4::mdlBaseVisitor {
 	private:
-		CompilationUnit& unit;
-		const parser::ParseOptions& options;
+		parser::FrontendState& state;
+		parser::ParseOptions options;
+		/** @brief Definitions of the main file. */
+		std::map<std::string, CompilationUnit::Member> definitions;
+		/** @brief All translated files. */
+		std::vector<std::filesystem::path> sources;
+		/** @brief Expanded module instances by template and hyperparameter values. */
+		std::map<std::pair<const ModuleTemplate*, std::string>, ModuleType> instances;
 		/** @brief The error listener of the file that is currently translated. */
 		PrettyErrorListener* errorlistener = nullptr;
 		/** @brief Directory of the file that is currently translated (first search path for its imports). */
@@ -101,6 +132,13 @@ namespace mdl {
 								errorlistener->semanticError(
 										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
 										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got a module"
+								);
+								return &graph().addErrorNode();
+							},
+							[&](const ArrayInstance&) -> const Node* {
+								errorlistener->semanticError(
+										PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+										tok->getCharPositionInLine(), "Expected a scalar/tensor value, got an array"
 								);
 								return &graph().addErrorNode();
 							}
@@ -202,36 +240,60 @@ namespace mdl {
 		}
 
 	public:
-		TranslatingVisitor(CompilationUnit& unit, const parser::ParseOptions& options) : unit(unit), options(options) {
-			pushGraph(&unit.graph);
+		TranslatingVisitor(parser::FrontendState& state, parser::ParseOptions options)
+				: state(state), options(std::move(options)) {
+			pushGraph(&state.graph);
 			nsstack.push(mdl::Namespace::baseNamespace());
 		}
 
 		size_t getNumErrors() const { return numErrors; }
+		std::map<std::string, CompilationUnit::Member>& getDefinitions() { return definitions; }
+		std::vector<std::filesystem::path>& getSources() { return sources; }
+
+		/** @brief Instantiates the module named @p name (see CompilationUnit::instantiate). */
+		std::expected<std::reference_wrapper<const ModuleType>, std::string>
+		instantiateByName(const std::string& name, const std::map<std::string, Object>& values) {
+			auto type = nsstack.top().getType(name);
+			const auto* mod = type ? std::get_if<ModuleType>(&type.value().get()) : nullptr;
+			if (mod == nullptr || mod->templ == nullptr)
+				return std::unexpected(std::format("{} is not a module", name));
+			std::vector<Object> ordered;
+			for (const auto& [pname, _] : mod->typeargs) {
+				auto it = values.find(pname);
+				if (it == values.end())
+					return std::unexpected(std::format("no value for hyperparameter {}.{}", name, pname));
+				ordered.push_back(it->second);
+			}
+			return instantiate(*mod, ordered);
+		}
 
 		/**
 		 * @brief Translates the program read from @p stream into the compilation unit.
 		 * @param main whether the definitions are added to CompilationUnit::definitions (false for imported files).
 		 */
 		void translate(std::istream& stream, const std::string& sourcename, const std::filesystem::path& dir, bool main) {
-			antlr4::ANTLRInputStream input{stream};
-			antlr4::mdlLexer lexer(&input);
-			antlr4::CommonTokenStream tokens(&lexer);
-			antlr4::mdlParser parser(&tokens);
-			parser.removeErrorListeners();
-			PrettyErrorListener fileErrors(sourcename);
-			parser.addErrorListener(&fileErrors);
+			// The parse tree stays alive (owned by the frontend state) so that module templates defined in this file
+			// can be expanded later.
+			auto& file = *state.files.emplace_back(std::make_unique<ParsedFile>());
+			file.errors = std::make_unique<PrettyErrorListener>(sourcename);
+			file.input = std::make_unique<antlr4::ANTLRInputStream>(stream);
+			file.lexer = std::make_unique<antlr4::mdlLexer>(file.input.get());
+			file.tokens = std::make_unique<antlr4::CommonTokenStream>(file.lexer.get());
+			file.parser = std::make_unique<antlr4::mdlParser>(file.tokens.get());
+			file.parser->removeErrorListeners();
+			file.parser->addErrorListener(file.errors.get());
 
-			auto* outerErrors = std::exchange(errorlistener, &fileErrors);
+			auto* outerErrors = std::exchange(errorlistener, file.errors.get());
 			auto outerDir = std::exchange(currentDir, dir);
 			bool outerRecord = std::exchange(recordDefinitions, main);
-			parser.program()->accept(this);
+			const size_t errorsBefore = file.errors->getNumErrors();
+			file.parser->program()->accept(this);
 			errorlistener = outerErrors;
 			currentDir = std::move(outerDir);
 			recordDefinitions = outerRecord;
 
-			fileErrors.printSummary();
-			numErrors += fileErrors.getNumErrors();
+			file.errors->printSummary();
+			numErrors += file.errors->getNumErrors() - errorsBefore;
 		}
 
 		void translateFile(const std::filesystem::path& file, bool main) {
@@ -239,7 +301,7 @@ namespace mdl {
 			auto canonical = std::filesystem::weakly_canonical(file, ec);
 			if (!translatedFiles.insert(ec ? file : canonical).second)
 				return; // Already imported (or currently being imported).
-			unit.sources.push_back(ec ? file : canonical);
+			sources.push_back(ec ? file : canonical);
 			std::ifstream stream{file};
 			if (!stream) {
 				std::cerr << "error: cannot read " << file.string() << std::endl;
@@ -255,7 +317,7 @@ namespace mdl {
 				importDefinitions(import);
 			auto record = [&](std::string name, CompilationUnit::Member member) {
 				if (recordDefinitions)
-					unit.definitions.try_emplace(std::move(name), std::move(member));
+					definitions.try_emplace(std::move(name), std::move(member));
 			};
 			// Parse Structs first (no matter where they are in the file)
 			// Does this make sense? Only if Structs can not have instances of modules as members.
@@ -306,51 +368,193 @@ namespace mdl {
 			return std::make_pair(name, s);
 		}
 
+		/**
+		 * @brief Registers a module template. Modules without hyperparameters are expanded immediately; all others
+		 * when they are instantiated (see instantiate()).
+		 */
 		virtual std::any visitModule_def(mdlParser::Module_defContext* ctx) override {
 			ModuleType m;
 			auto name = ctx->IDENT()->getText();
-			const std::string outerScope = std::exchange(scope, name);
-			pushNamespace();
 			for (auto& param : ctx->param()) {
 				const auto [pname, dtype] = std::any_cast<ModuleParam>(param->accept(this));
-				const std::string qualifiedName = name + "." + pname;
-				const Node& node = graph().addHyperparameterNode(dtype, qualifiedName);
+				// The hyperparameter nodes only document the types; the bodies are expanded with concrete values.
+				const Node& node = graph().addHyperparameterNode(dtype, name + "." + pname);
 				m.typeargs.emplace_back(pname, std::cref(std::get<HyperparameterNode>(node)));
-				if (auto* agg = std::get_if<AggregateType>(&dtype))
-					currentNamespace().put(
-							pname, makeAggregateObject(*agg, qualifiedName, [&](DataType t, std::string n) -> const Node& {
-								return graph().addHyperparameterNode(std::move(t), std::move(n));
-							})
-					);
-				else
-					currentNamespace().put(pname, Object{&node});
 			}
-			for (auto& var : ctx->vardecl()) {
-				const auto [vname, dtype] = std::any_cast<VarDecl>(var->accept(this));
-				// Weights are registered in the module's scope so that all functions of the module share them.
-				const Node& node = graph().getOrAddParameterNode(scope, vname, dtype);
-				m.variables.emplace_back(vname, std::cref(std::get<ParameterNode>(node)));
-				if (auto* agg = std::get_if<AggregateType>(&dtype))
-					currentNamespace().put(
-							vname, makeAggregateObject(*agg, vname, [&](DataType t, std::string path) -> const Node& {
-								return graph().getOrAddParameterNode(scope, path, std::move(t));
-							})
-					);
-				else
-					currentNamespace().put(vname, Object{&node});
-			}
-			for (auto& func : ctx->funcdef()) {
-				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
-				auto [_, inserted] = m.functions.insert_or_assign(std::move(name), std::move(decl));
-				if (!inserted) {
-					/** \todo output a helpful warning message that this definition shadows another member, which is undefined behavior **/
-				}
-			}
-			popNamespace();
-			scope = outerScope;
+			m.templ = std::make_shared<const ModuleTemplate>(
+					ModuleTemplate{.name = name, .ctx = ctx, .scope = &currentNamespace(), .errors = errorlistener}
+			);
+			if (m.typeargs.empty())
+				if (auto instance = instantiate(m, {}))
+					m = instance.value().get();
 			if (!checkRedefinition(ctx->IDENT()))
 				currentNamespace().putType(name, DataType{m});
 			return std::make_pair(name, m);
+		}
+
+		/** @brief Evaluates a compile-time integer or floating-point expression over constants. */
+		static std::optional<Atomic> foldConstant(const Node& node) {
+			using FIDs = builtins::FunctionIDs;
+			if (const auto* cn = std::get_if<ConstNode>(&node)) {
+				if (std::holds_alternative<std::vector<int>>(cn->value))
+					return std::nullopt;
+				return cn->value;
+			}
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr || inv->arguments.size() != 2)
+				return std::nullopt;
+			auto lhs = foldConstant(inv->arguments[0].get());
+			auto rhs = foldConstant(inv->arguments[1].get());
+			if (!lhs || !rhs)
+				return std::nullopt;
+			if (std::holds_alternative<int>(*lhs) && std::holds_alternative<int>(*rhs)) {
+				int a = std::get<int>(*lhs), b = std::get<int>(*rhs);
+				switch (inv->id) {
+				case FIDs::TENSOR_ADD:
+					return Atomic{a + b};
+				case FIDs::TENSOR_SUB:
+					return Atomic{a - b};
+				case FIDs::TENSOR_PROD:
+					return Atomic{a * b};
+				case FIDs::TENSOR_DIV:
+					return b != 0 ? std::optional<Atomic>{Atomic{a / b}} : std::nullopt;
+				default:
+					return std::nullopt;
+				}
+			}
+			auto toDouble = [](const Atomic& v) {
+				return std::holds_alternative<int>(v) ? static_cast<double>(std::get<int>(v)) : std::get<double>(v);
+			};
+			double a = toDouble(*lhs), b = toDouble(*rhs);
+			switch (inv->id) {
+			case FIDs::TENSOR_ADD:
+				return Atomic{a + b};
+			case FIDs::TENSOR_SUB:
+				return Atomic{a - b};
+			case FIDs::TENSOR_PROD:
+				return Atomic{a * b};
+			case FIDs::TENSOR_DIV:
+				return Atomic{a / b};
+			default:
+				return std::nullopt;
+			}
+		}
+
+		/** @brief Evaluates a compile-time integer (e.g. a loop bound or an index); reports an error otherwise. */
+		std::optional<int> constantInt(mdlParser::ExprContext* expr) {
+			const Node* node = asNode(expr->accept(this), expr->start);
+			if (std::holds_alternative<ErrorNode>(*node))
+				return std::nullopt;
+			if (auto value = foldConstant(*node); value && std::holds_alternative<int>(*value))
+				return std::get<int>(*value);
+			errorlistener->semanticError(
+					PrettyErrorListener::ErrorLevel::Error, expr->start, expr->start->getLine(),
+					expr->start->getCharPositionInLine(), "Expected a compile-time integer"
+			);
+			return std::nullopt;
+		}
+
+		/** @brief A string identifying a (concrete) hyperparameter value; used to cache module instances. */
+		static std::string valueKey(const Object& value) {
+			return std::visit(
+					overloaded{
+							[](const Node* node) -> std::string {
+								if (auto v = foldConstant(*node))
+									return std::visit([](auto x) { return std::format("{}", x); }, *v);
+								return "?";
+							},
+							[](const AggregateInstance& agg) -> std::string {
+								std::string key = "{";
+								for (const auto& member : agg.getMembers())
+									key += valueKey(member) + ",";
+								return key + "}";
+							},
+							[](const auto&) -> std::string { return "?"; },
+					},
+					value
+			);
+		}
+
+		/**
+		 * @brief Expands the module @p def with the given hyperparameter values (in the order of its typeargs).
+		 * @details Each distinct instantiation is expanded once. The members are elaborated in the namespace the
+		 * module was defined in, with the hyperparameters bound to their values; weights are registered in a scope
+		 * that identifies the instantiation.
+		 */
+		std::expected<std::reference_wrapper<const ModuleType>, std::string>
+		instantiate(const ModuleType& def, const std::vector<Object>& values) {
+			const auto& t = *def.templ;
+			std::string key = t.name + "[";
+			for (size_t i = 0; i < values.size(); ++i)
+				key += (i > 0 ? "," : "") + valueKey(values[i]);
+			key += "]";
+			if (auto it = instances.find({&t, key}); it != instances.end())
+				return std::cref(it->second);
+
+			ModuleType m;
+			m.typeargs = def.typeargs;
+			m.templ = def.templ;
+			m.instantiated = true;
+
+			const size_t errorsBefore = t.errors->getNumErrors();
+			const std::string outerScope = std::exchange(scope, key);
+			auto* outerErrors = std::exchange(errorlistener, t.errors);
+			nsstack.push(t.scope->createSubnamespace());
+			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i)
+				currentNamespace().put(def.typeargs[i].first, Object{values[i]});
+
+			for (auto* var : t.ctx->vardecl())
+				declareMember(m, var);
+			for (auto& func : t.ctx->funcdef()) {
+				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
+				m.functions.insert_or_assign(std::move(name), std::move(decl));
+			}
+
+			nsstack.pop();
+			errorlistener = outerErrors;
+			scope = outerScope;
+			const size_t newErrors = t.errors->getNumErrors() - errorsBefore;
+			numErrors += newErrors;
+			if (newErrors > 0)
+				return std::unexpected(std::format("{} error(s) while instantiating {}", newErrors, key));
+			return std::cref(instances.emplace(std::pair{&t, key}, std::move(m)).first->second);
+		}
+
+		/** @brief Declares a member variable (weight, submodule, or array of them) of a module being expanded. */
+		void declareMember(ModuleType& m, mdlParser::VardeclContext* var) {
+			const auto vname = var->IDENT()->getText();
+			auto addVariable = [&](const std::string& path, const DataType& dtype) -> const Node& {
+				// Weights are registered in the instance's scope so that all functions of the module share them.
+				const Node& node = graph().getOrAddParameterNode(scope, path, dtype);
+				m.variables.emplace_back(path, std::cref(std::get<ParameterNode>(node)));
+				return node;
+			};
+
+			if (auto* comp = dynamic_cast<mdlParser::ComprehensionTypeContext*>(var->type())) {
+				// `name: [T for i in lo..hi]` declares the members name.lo, ..., name.(hi-1).
+				auto lo = constantInt(comp->lo), hi = constantInt(comp->hi);
+				ArrayInstance array;
+				for (int i = lo.value_or(0); lo && hi && i < *hi; ++i) {
+					pushNamespace();
+					currentNamespace().put(comp->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+					auto dtype = std::any_cast<DataType>(comp->element->accept(this));
+					popNamespace();
+					array.elements.push_back(Object{&addVariable(vname + "." + std::to_string(i), dtype)});
+				}
+				currentNamespace().put(vname, Object{std::move(array)});
+				return;
+			}
+
+			const auto [_, dtype] = std::any_cast<VarDecl>(var->accept(this));
+			const Node& node = addVariable(vname, dtype);
+			if (auto* agg = std::get_if<AggregateType>(&dtype))
+				currentNamespace().put(
+						vname, makeAggregateObject(*agg, vname, [&](DataType t, std::string path) -> const Node& {
+							return graph().getOrAddParameterNode(scope, path, std::move(t));
+						})
+				);
+			else
+				currentNamespace().put(vname, Object{&node});
 		}
 
 		virtual std::any visitParam(mdlParser::ParamContext* ctx) override {
@@ -380,9 +584,50 @@ namespace mdl {
 				);
 				return mdl::DataType{mdl::PrimitiveType::error};
 			} else {
-				// Module types are always bound (also without arguments, e.g. `Inner[]`), so that arity errors are
-				// reported and instances are callable.
-				if (ctx->type_arg().size() != 0 || std::holds_alternative<ModuleType>(dtype.value().get())) {
+				if (const auto* mod = std::get_if<ModuleType>(&dtype.value().get()); mod && mod->templ) {
+					// Module instantiation: the arguments must be compile-time values.
+					auto* tok = ctx->typename_;
+					if (ctx->type_arg().size() != mod->typeargs.size()) {
+						errorlistener->semanticError(
+								PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+								std::format(
+										"{} expects {} hyperparameter(s) but got {}", tok->getText(), mod->typeargs.size(),
+										ctx->type_arg().size()
+								)
+						);
+						return DataType{PrimitiveType::error};
+					}
+					std::vector<Object> values;
+					for (auto* arg : ctx->type_arg()) {
+						if (arg->expr() == nullptr) {
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error, arg->start, arg->start->getLine(),
+									arg->start->getCharPositionInLine(), "`...` is not a module hyperparameter"
+							);
+							return DataType{PrimitiveType::error};
+						}
+						Object value = asObject(arg->expr()->accept(this), arg->expr()->start);
+						if (const auto* node = std::get_if<const Node*>(&value)) {
+							auto folded = foldConstant(**node);
+							if (!folded) {
+								if (!std::holds_alternative<ErrorNode>(**node))
+									errorlistener->semanticError(
+											PrettyErrorListener::ErrorLevel::Error, arg->start, arg->start->getLine(),
+											arg->start->getCharPositionInLine(),
+											"Module hyperparameters must be compile-time constants"
+									);
+								return DataType{PrimitiveType::error};
+							}
+							value = Object{&graph().addConstNode(Atomic{*folded})};
+						}
+						values.push_back(std::move(value));
+					}
+					auto instance = instantiate(*mod, values);
+					if (!instance)
+						return DataType{PrimitiveType::error};
+					return DataType{BoundModuleType{.definition = instance.value().get(), .hyperparamValues = {}}};
+				}
+				if (ctx->type_arg().size() != 0) {
 					std::vector<TypeArg> args;
 					for (auto arg : ctx->type_arg()) {
 						args.emplace_back(std::any_cast<TypeArg>(arg->accept(this)));
@@ -897,6 +1142,64 @@ namespace mdl {
 			return std::nullopt;
 		}
 
+		virtual std::any visitAssignStatement(mdlParser::AssignStatementContext* ctx) override {
+			auto value = asObject(ctx->expr()->accept(this), ctx->expr()->start);
+			if (!currentNamespace().assign(ctx->name->getText(), std::move(value)))
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, ctx->name, ctx->name->getLine(),
+						ctx->name->getCharPositionInLine(),
+						std::format("Variable {} is not defined (declare it with `auto {} = ...;`)", ctx->name->getText(),
+									ctx->name->getText())
+				);
+			return std::nullopt;
+		}
+
+		virtual std::any visitForStatement(mdlParser::ForStatementContext* ctx) override {
+			auto lo = constantInt(ctx->lo), hi = constantInt(ctx->hi);
+			if (!lo || !hi)
+				return std::nullopt;
+			for (int i = *lo; i < *hi; ++i) {
+				pushNamespace();
+				currentNamespace().put(ctx->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+				for (auto* stmt : ctx->statement()) {
+					auto result = stmt->accept(this);
+					if (std::any_cast<MultiValue>(&result) != nullptr)
+						errorlistener->semanticError(
+								PrettyErrorListener::ErrorLevel::Error, stmt->start, stmt->start->getLine(),
+								stmt->start->getCharPositionInLine(), "Return statements are not allowed in loops"
+						);
+				}
+				popNamespace();
+			}
+			return std::nullopt;
+		}
+
+		virtual std::any visitIndexExpression(mdlParser::IndexExpressionContext* ctx) override {
+			auto base = asObject(ctx->base->accept(this), ctx->base->start);
+			auto index = constantInt(ctx->index);
+			if (!index)
+				return &graph().addErrorNode();
+			if (const auto* array = std::get_if<ArrayInstance>(&base)) {
+				if (*index < 0 || *index >= static_cast<int>(array->elements.size())) {
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, ctx->index->start, ctx->index->start->getLine(),
+							ctx->index->start->getCharPositionInLine(),
+							std::format("Index {} is out of bounds (array of {} elements)", *index, array->elements.size())
+					);
+					return &graph().addErrorNode();
+				}
+				return array->elements[*index];
+			}
+			if (const auto* node = std::get_if<const Node*>(&base); node && std::holds_alternative<ErrorNode>(**node))
+				return &graph().addErrorNode();
+			errorlistener->semanticError(
+					PrettyErrorListener::ErrorLevel::Error, ctx->base->start, ctx->base->start->getLine(),
+					ctx->base->start->getCharPositionInLine(),
+					"Only arrays can be indexed (indexing tensors is not yet supported)"
+			);
+			return &graph().addErrorNode();
+		}
+
 		virtual std::any visitReturnStatement(mdlParser::ReturnStatementContext* ctx) override {
 			MultiValue result;
 			for (auto* value : ctx->values)
@@ -923,21 +1226,37 @@ std::vector<std::filesystem::path> mdl::parser::defaultStdlibDirs() {
 	return dirs;
 }
 
+namespace {
+	std::optional<mdl::CompilationUnit> finish(std::shared_ptr<mdl::parser::FrontendState> state) {
+		auto& visitor = *state->visitor;
+		if (visitor.getNumErrors() > 0)
+			return std::nullopt;
+		mdl::CompilationUnit unit;
+		unit.definitions = std::move(visitor.getDefinitions());
+		unit.sources = std::move(visitor.getSources());
+		unit.state = std::move(state);
+		return unit;
+	}
+} // namespace
+
 std::optional<mdl::CompilationUnit>
 mdl::parser::parse(std::istream& stream, std::string_view sourcename, const ParseOptions& options) {
-	CompilationUnit unit;
-	TranslatingVisitor visitor{unit, options};
-	visitor.translate(stream, std::string{sourcename}, std::filesystem::current_path(), /*main=*/true);
-	if (visitor.getNumErrors() > 0)
-		return std::nullopt;
-	return std::make_optional<CompilationUnit>(std::move(unit));
+	auto state = std::make_shared<FrontendState>();
+	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
+	state->visitor->translate(stream, std::string{sourcename}, std::filesystem::current_path(), /*main=*/true);
+	return finish(std::move(state));
 }
 
 std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::path& file, const ParseOptions& options) {
-	CompilationUnit unit;
-	TranslatingVisitor visitor{unit, options};
-	visitor.translateFile(file, /*main=*/true);
-	if (visitor.getNumErrors() > 0)
-		return std::nullopt;
-	return std::make_optional<CompilationUnit>(std::move(unit));
+	auto state = std::make_shared<FrontendState>();
+	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
+	state->visitor->translateFile(file, /*main=*/true);
+	return finish(std::move(state));
+}
+
+mdl::Computegraph& mdl::CompilationUnit::graph() const { return state->graph; }
+
+std::expected<std::reference_wrapper<const mdl::ModuleType>, std::string>
+mdl::CompilationUnit::instantiate(const std::string& module, const std::map<std::string, Object>& values) const {
+	return state->visitor->instantiateByName(module, values);
 }

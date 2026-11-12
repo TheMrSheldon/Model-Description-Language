@@ -16,6 +16,7 @@ target_sources(mdl
 		mdl/backends/tvm/details/legalize.cpp
 		mdl/backends/tvm/details/pattern_registry.cpp
 		mdl/backends/tvm/details/patterns.cpp
+		mdl/backends/tvm/details/schedule.cpp
 		mdl/backends/tvm/details/pipeline.cpp
 		mdl/bindings/generator.cpp
 		mdl/compiler.cpp
@@ -98,7 +99,9 @@ target_sources(mdl PRIVATE ${ANTLR_mdlparser_CXX_OUTPUTS})
 #   porting the whole backend (planned as a separate upgrade).
 CPMAddPackage(
 	URI "gh:apache/tvm@0.24.0"
-	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu"
+	# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
+	# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
+	OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
 	EXCLUDE_FROM_ALL YES
 )
 target_link_libraries(mdl PUBLIC tvm_compiler)

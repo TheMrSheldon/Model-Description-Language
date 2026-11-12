@@ -50,8 +50,10 @@ TEST_CASE("the standard library can be imported", "[parser][imports]") {
 	// Only the definitions of the parsed file are part of the compilation unit.
 	CHECK(unit->definitions.size() == 1);
 	CHECK(unit->definitions.contains("Block"));
-	CHECK(weightPaths(std::get<ModuleType>(unit->definitions.at("Block"))) ==
-		  std::vector<std::string>{"lin.W", "lin.b", "norm.beta", "norm.gamma"});
+	// Block has a hyperparameter: its members are expanded when it is instantiated.
+	auto block = unit->instantiate("Block", {{"dim", Object{&unit->graph().addConstNode(Atomic{8})}}});
+	REQUIRE(block.has_value());
+	CHECK(weightPaths(block->get()) == std::vector<std::string>{"lin.W", "lin.b", "norm.beta", "norm.gamma"});
 }
 
 TEST_CASE("single files of the standard library can be imported", "[parser][imports]") {

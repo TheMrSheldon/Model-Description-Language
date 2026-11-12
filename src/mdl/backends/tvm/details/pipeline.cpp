@@ -4,6 +4,7 @@
 #include "./aot.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
+#include "./schedule.hpp"
 
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
@@ -164,6 +165,7 @@ namespace mdl::backend::tvm {
 			else
 				kernels->Add(gv, func);
 		}
+		kernels = applyDefaultCPUSchedule(kernels);
 		mod = runPasses(
 				kernels,
 				{

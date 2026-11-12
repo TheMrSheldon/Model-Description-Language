@@ -10,6 +10,7 @@
 #include <tvm/relax/struct_info.h>
 #include <tvm/runtime/tensor.h>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <functional>
@@ -185,6 +186,14 @@ relaxFunctions{
 
         int passthroughIdx = 0;
         for (size_t i = 1; i < ts.size(); ++i) {
+            // Ellipsis group {before, after}: the input dims [before, rank - after).
+            if (const auto* group = ts[i].template as<::tvm::relax::ShapeExprNode>()) {
+                const int64_t before = group->values[0].template as<::tvm::IntImmNode>()->value;
+                const int64_t after = group->values[1].template as<::tvm::IntImmNode>()->value;
+                for (int64_t d = before; d < static_cast<int64_t>(inShape.size()) - after; ++d)
+                    outDims.push_back(::tvm::cast(::tvm::DataType::Int(64), inShape[d]));
+                continue;
+            }
             ::tvm::PrimExpr dim = extractPrim(ts[i]);
             if (const auto* imm = dim.as<::tvm::IntImmNode>()) {
                 if (imm->value == -1) {
@@ -222,17 +231,33 @@ relaxFunctions{
         const auto* se = ts[1].template as<::tvm::relax::ShapeExprNode>();
         assert(se && "PERMUTE: expected ShapeExpr for permutation");
         int permSize = static_cast<int>(se->values.size());
-        int offset = (rank >= 0) ? (rank - permSize) : 0;
+        std::vector<int64_t> perm;
+        for (const auto& v : se->values)
+            perm.push_back(v.template as<::tvm::IntImmNode>()->value);
 
         ::tvm::ffi::Array<::tvm::Integer> axes;
-        for (int i = 0; i < offset; ++i)
-            axes.push_back(::tvm::Integer(i));
-        for (int i = 0; i < permSize; ++i) {
-            int idx = static_cast<int>(
-                se->values[i].template as<::tvm::IntImmNode>()->value
-            );
-            if (idx < 0 && rank > 0) idx += rank;
-            axes.push_back(::tvm::Integer(idx));
+        const bool hasEllipsis =
+            std::find(perm.begin(), perm.end(), mdl::builtins::kEllipsisPermMarker) != perm.end();
+        if (hasEllipsis) {
+            // The ellipsis group starts after the dims listed with non-negative indices and covers all dims that
+            // are not listed.
+            const int64_t start = std::count_if(perm.begin(), perm.end(), [](int64_t p) { return p >= 0; });
+            const int64_t groupRank = rank - (permSize - 1);
+            for (int64_t p : perm) {
+                if (p == mdl::builtins::kEllipsisPermMarker) {
+                    for (int64_t d = 0; d < groupRank; ++d)
+                        axes.push_back(::tvm::Integer(start + d));
+                } else {
+                    axes.push_back(::tvm::Integer(p < 0 ? p + rank : p));
+                }
+            }
+        } else {
+            // A shorter permutation applies to the trailing dims.
+            int offset = (rank >= 0) ? (rank - permSize) : 0;
+            for (int i = 0; i < offset; ++i)
+                axes.push_back(::tvm::Integer(i));
+            for (int64_t p : perm)
+                axes.push_back(::tvm::Integer(p < 0 && rank > 0 ? p + rank : p));
         }
 
         // Validate: must be a valid permutation

@@ -154,6 +154,9 @@ mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataT
 					},
 					[&](const ModuleInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
 						return std::nullopt;
+					},
+					[&](const ArrayInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
 					}
 			},
 			obj

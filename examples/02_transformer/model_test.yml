@@ -1,0 +1,10 @@
+# Small configuration for the tests: 2 layers, hidden size 768, 12 heads of size 64, FFN size 3072.
+BertEncoder:
+  conf:
+    dims:
+      model: 768
+      key: 64
+      value: 64
+      inner: 3072
+    numEncoders: 2
+    numAttnHeads: 12

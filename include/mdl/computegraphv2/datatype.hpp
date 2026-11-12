@@ -7,6 +7,7 @@
 #include <expected>
 #include <format>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -46,10 +47,25 @@ namespace mdl {
 		std::vector<std::variant<PrimitiveType, TensorType>> returnTypes = {};
 	};
 
+	/**
+	 * @brief The definition of a module (opaque to the IR; owned by the frontend), from which instances are expanded.
+	 */
+	struct ModuleTemplate;
+
+	/**
+	 * @brief A module type.
+	 * @details Modules are templates over their hyperparameters (typeargs): the variables and functions are expanded
+	 * per instantiation with concrete hyperparameter values (see CompilationUnit::instantiate). A module type without
+	 * expanded members (but with a template) is the uninstantiated definition.
+	 */
 	struct ModuleType final {
 		std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> typeargs;
 		std::vector<std::pair<std::string, std::reference_wrapper<const ParameterNode>>> variables;
 		std::map<std::string, FunctionDecl> functions;
+		/** @brief The definition this type is (or can be) expanded from. */
+		std::shared_ptr<const ModuleTemplate> templ = nullptr;
+		/** @brief Whether the members are expanded (false for the uninstantiated definition of a template). */
+		bool instantiated = false;
 
 		static constexpr size_t InvalidIdx = -1;
 

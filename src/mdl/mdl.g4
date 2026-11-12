@@ -24,6 +24,8 @@ param
 type
       : typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
       | 'struct' '{' vardecl* '}'                               # AnonType
+      // Array of `element` for var = lo, ..., hi-1 (e.g. a stack of modules)
+      | '[' element=type 'for' var=IDENT 'in' lo=expr '..' hi=expr ']' # ComprehensionType
       ;
 
 type_arg
@@ -85,6 +87,7 @@ expr
       // Postfix Expressions
       | expr '.' IDENT                                     # AccessExpression
       | expr '[' einops ']'                                # EinopsExpression
+      | base=expr '[' index=expr ']'                       # IndexExpression
       | func=expr '(' (args+=expr (',' args+=expr)*)? ')'  # MethodcallExpression
       // Prefix Expressions
       | '-' expr                                           # NegateExpression
@@ -99,6 +102,10 @@ statement
       : expr ';'                                           # ExpressionStatement
       | (type | 'auto') names+=IDENT (',' names+=IDENT)* '=' expr ';' # DeclarationStatement
       | 'return' values+=expr (',' values+=expr)* ';'       # ReturnStatement
+      // Rebinds a variable of an enclosing scope (e.g. the state carried through a loop)
+      | name=IDENT '=' expr ';'                             # AssignStatement
+      // Compile-time loop: the body is expanded for var = lo, ..., hi-1
+      | 'for' '(' var=IDENT 'in' lo=expr '..' hi=expr ')' '{' statement* '}' # ForStatement
       ;
 
 

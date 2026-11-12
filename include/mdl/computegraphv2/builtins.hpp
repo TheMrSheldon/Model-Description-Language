@@ -2,6 +2,7 @@
 #define MDL_COMPUTEGRAPH_BUILTINS_HPP
 
 #include <cstddef>
+#include <limits>
 
 namespace mdl::builtins {
 	/**
@@ -32,12 +33,26 @@ namespace mdl::builtins {
 		TANH,
 		VAR,
 		/** Einops **/
+		/**
+		 * Reshapes a tensor: arguments are the tensor and one entry per output dimension: a size, -1 (copy the next
+		 * leading input dimension), -2 (infer), or a vector constant `{before, after}` that denotes an ellipsis group,
+		 * i.e., the input dimensions `[before, rank - after)`.
+		 */
 		RESHAPE,
-		PERMUTE, /**< Permutes a tensor based on the given permutation **/
+		/**
+		 * Permutes a tensor: arguments are the tensor and a vector constant with one entry per output dimension:
+		 * non-negative entries index the input dimensions before an ellipsis, negative entries count from the end,
+		 * and kEllipsisPermMarker stands for the (possibly multi-dimensional) ellipsis group, which covers all input
+		 * dimensions that are not listed. Without an ellipsis, a shorter permutation applies to the trailing dims.
+		 */
+		PERMUTE,
 		EXPAND,
 
 		COUNT
 	};
+
+	/** @brief Marks the position of the ellipsis group in a PERMUTE permutation (see FunctionIDs::PERMUTE). */
+	inline constexpr int kEllipsisPermMarker = std::numeric_limits<int>::min();
 } // namespace mdl::builtins
 
 #endif

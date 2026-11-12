@@ -1,4 +1,5 @@
-TransformerEncoder:
+# BERT-base encoder: 12 layers, hidden size 768, 12 heads of size 64, FFN size 3072.
+BertEncoder:
   conf:
     dims:
       model: 768

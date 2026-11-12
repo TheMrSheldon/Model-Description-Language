@@ -27,6 +27,7 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 - `--arg-vals` sets the hyperparameters (here `FFN: {indim: 8, outdim: 3}`).
 - `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`.
 - `--kernels onednn|tvm` selects the kernels for recognized operations (oneDNN via `mdl_kernels`, or TVM-generated only).
+- `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
 - `-i DIR` adds import search paths; the standard library (`std/`) is always available.
 
 The object file exports one function per member function (`__tvm_ffi_<Module>__<function>`, TVM FFI calling
@@ -51,6 +52,9 @@ mdl::models::FFN::Weights weights;
 weights.W = W;
 weights.b = b;
 mdl::models::FFN::forward(x, weights, out);
+
+// The hyperparameters the model was compiled with, as a constexpr struct:
+static_assert(mdl::models::FFN::hyperparameters.outdim == 3);
 ```
 
 ## Roadmap

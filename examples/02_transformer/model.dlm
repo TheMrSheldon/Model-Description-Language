@@ -41,3 +41,18 @@ module TransformerEncoder[conf: TransformerConf] {
         return ffnNorm(weightIntermedOut(intermed) + attn);
     }
 }
+
+/**
+ * @brief A stack of `conf.numEncoders` encoder layers (e.g. the encoder of BERT).
+ */
+module BertEncoder[conf: TransformerConf] {
+    layers: [TransformerEncoder[conf] for i in 0..conf.numEncoders]
+
+    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
+        auto h = x;
+        for (i in 0..conf.numEncoders) {
+            h = layers[i](h);
+        }
+        return h;
+    }
+}

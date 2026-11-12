@@ -7,6 +7,7 @@
 #include <mdl/exports.hpp>
 #include <mdl/utils/overload.hpp>
 
+#include <algorithm>
 #include <string>
 
 namespace mdl::bindings::detail {
@@ -54,11 +55,19 @@ namespace mdl::bindings::detail {
 		);
 	}
 
-	/// Shape of an exported tensor, e.g. `float[B, 768]` (`B` marks dimensions only known at runtime).
+	/// Shape of an exported tensor, e.g. `float[B, 768]` or `float[B0, B1, 768]` (`B`/`Bi` mark the runtime
+	/// dimensions of the ellipsis; they are the same in all tensors of a function).
 	inline std::string shapeStr(const mdl::TensorSignature& sig) {
+		const auto dynamic = std::count(sig.shape.begin(), sig.shape.end(), int64_t{-1});
 		std::string s = primTypeStr(sig.dtype) + "[";
-		for (size_t i = 0; i < sig.shape.size(); ++i)
-			s += (i > 0 ? ", " : "") + (sig.shape[i] < 0 ? std::string{"B"} : std::to_string(sig.shape[i]));
+		int k = 0;
+		for (size_t i = 0; i < sig.shape.size(); ++i) {
+			s += i > 0 ? ", " : "";
+			if (sig.shape[i] >= 0)
+				s += std::to_string(sig.shape[i]);
+			else
+				s += dynamic == 1 ? std::string{"B"} : "B" + std::to_string(k++);
+		}
 		return s + "]";
 	}
 

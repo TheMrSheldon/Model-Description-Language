@@ -20,12 +20,12 @@ namespace mdl {
 		/** @brief Builtin datatypes. **/
 		static const std::map<std::string, DataType> builtinTypes;
 
-		const Namespace* parent;
+		Namespace* parent;
 		std::map<std::string, std::any> objects;
 		std::map<std::string, DataType> types;
 
 		explicit Namespace(
-				const Namespace* parent, const std::map<std::string, std::any>& objects = {},
+				Namespace* parent, const std::map<std::string, std::any>& objects = {},
 				const std::map<std::string, DataType>& types = {}
 		)
 				: parent(parent), objects{objects}, types{types} {}
@@ -47,6 +47,19 @@ namespace mdl {
 			if (it != std::end(objects))
 				return std::any_cast<const T&>(it->second);
 			return (parent != nullptr) ? parent->get<T>(name) : std::nullopt;
+		}
+
+		/**
+		 * @brief Rebinds the object named @p name in the closest namespace (this or a parent) that defines it.
+		 * @return false if no namespace defines @p name.
+		 */
+		template <typename T>
+		bool assign(std::string_view name, T&& obj) {
+			if (auto it = objects.find(std::string{name}); it != objects.end()) {
+				it->second = std::forward<T>(obj);
+				return true;
+			}
+			return parent != nullptr && parent->assign(name, std::forward<T>(obj));
 		}
 
 		/** @brief Whether an object or type named @p name is defined in this namespace itself (not in a parent). */
@@ -74,7 +87,7 @@ namespace mdl {
 			static Namespace bns{nullptr, builtins, builtinTypes};
 			return bns;
 		}
-		Namespace createSubnamespace() const { return Namespace{this}; }
+		Namespace createSubnamespace() { return Namespace{this}; }
 	};
 
 } // namespace mdl

@@ -27,6 +27,8 @@
 #include <utility>
 #include <cassert>
 #include <cctype>
+#include <cmath>
+#include <optional>
 #include <cstdlib>
 #include <format>
 #include <filesystem>
@@ -134,7 +136,12 @@ static ::tvm::PrimExpr nodeToPrimExpr(const mdl::Node& node, const mdl::ArgVals&
  */
 struct TranslationContext {
 	const mdl::ArgVals& argVals;
-	::tvm::tirx::Var ellipsis{"B", ::tvm::DataType::Int(64)};
+	std::vector<::tvm::tirx::Var> ellipsis;
+
+	TranslationContext(const mdl::ArgVals& argVals, unsigned ellipsisRank) : argVals(argVals) {
+		for (unsigned i = 0; i < ellipsisRank; ++i)
+			ellipsis.emplace_back(ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(i), ::tvm::DataType::Int(64));
+	}
 };
 
 static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const TranslationContext& ctx) {
@@ -145,9 +152,14 @@ static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const Tr
 					[&](const mdl::TensorType& ttype) {
 						::tvm::ffi::Array<::tvm::PrimExpr> shape;
 						for (const auto i : ttype.shape) {
+							if (std::holds_alternative<mdl::Elipsis>(i)) {
+								for (const auto& var : ctx.ellipsis)
+									shape.push_back(var);
+								continue;
+							}
 							auto expr = std::visit(
 									mdl::overloaded{
-											[&](mdl::Elipsis) -> ::tvm::PrimExpr { return ctx.ellipsis; },
+											[&](mdl::Elipsis) -> ::tvm::PrimExpr { return ctx.ellipsis.front(); }, // expanded above
 											[](unsigned u) -> ::tvm::PrimExpr {
 												return ::tvm::IntImm(::tvm::DataType::Int(64), u);
 											},
@@ -238,6 +250,80 @@ static ::tvm::relax::Expr translateRelax(
 	return ::tvm::relax::PrimValue(::tvm::tirx::Var(node.name.empty() ? "dim" : node.name, ::tvm::DataType::Int(32)));
 }
 
+/**
+ * @brief Evaluates a compile-time scalar expression (literals, hyperparameters, and elementwise builtins over them).
+ * @return the value, or std::nullopt if @p node is not a compile-time scalar.
+ */
+static std::optional<double> evalScalar(const mdl::Node& node, const mdl::ArgVals& argVals) {
+	using FIDs = mdl::builtins::FunctionIDs;
+	return std::visit(
+			mdl::overloaded{
+					[](const mdl::ConstNode& cn) -> std::optional<double> {
+						if (const auto* i = std::get_if<int>(&cn.value))
+							return *i;
+						if (const auto* d = std::get_if<double>(&cn.value))
+							return *d;
+						return std::nullopt;
+					},
+					[&](const mdl::HyperparameterNode& hn) -> std::optional<double> {
+						if (auto v = argVals.lookup(hn.name))
+							return static_cast<double>(*v);
+						return std::nullopt;
+					},
+					[&](const mdl::InvocationNode& in) -> std::optional<double> {
+						std::vector<double> args;
+						for (const auto& arg : in.arguments) {
+							auto v = evalScalar(arg.get(), argVals);
+							if (!v)
+								return std::nullopt;
+							args.push_back(*v);
+						}
+						auto unary = [&](double (*f)(double)) -> std::optional<double> {
+							return args.size() == 1 ? std::optional<double>{f(args[0])} : std::nullopt;
+						};
+						if (args.size() == 2) {
+							switch (in.id) {
+							case FIDs::TENSOR_ADD:
+								return args[0] + args[1];
+							case FIDs::TENSOR_SUB:
+								return args[0] - args[1];
+							case FIDs::TENSOR_PROD:
+								return args[0] * args[1];
+							case FIDs::TENSOR_DIV:
+								return args[0] / args[1];
+							default:
+								return std::nullopt;
+							}
+						}
+						switch (in.id) {
+						case FIDs::SQRT:
+							return unary([](double x) { return std::sqrt(x); });
+						case FIDs::RSQRT:
+							return unary([](double x) { return 1.0 / std::sqrt(x); });
+						case FIDs::EXP:
+							return unary([](double x) { return std::exp(x); });
+						case FIDs::LOG:
+							return unary([](double x) { return std::log(x); });
+						case FIDs::ERF:
+							return unary([](double x) { return std::erf(x); });
+						case FIDs::TANH:
+							return unary([](double x) { return std::tanh(x); });
+						case FIDs::COS:
+							return unary([](double x) { return std::cos(x); });
+						case FIDs::SIN:
+							return unary([](double x) { return std::sin(x); });
+						case FIDs::TAN:
+							return unary([](double x) { return std::tan(x); });
+						default:
+							return std::nullopt;
+						}
+					},
+					[](const auto&) -> std::optional<double> { return std::nullopt; },
+			},
+			node
+	);
+}
+
 // Promote a PrimValue(int) to a float32 0-D Constant for use in arithmetic ops.
 static ::tvm::relax::Expr promoteToFloatTensor(const ::tvm::relax::Expr& e) {
 	const auto* pv = e.as<::tvm::relax::PrimValueNode>();
@@ -258,19 +344,23 @@ static ::tvm::relax::Expr translateRelax(
 		::tvm::relax::BlockBuilder& bb, RelaxCache& cache, std::vector<::tvm::relax::Var>& params,
 		const mdl::InvocationNode& node, const mdl::ArgVals& argVals
 ) {
-	// Recursively translate all arguments
-	std::vector<::tvm::relax::Expr> translatedArgs;
-	translatedArgs.reserve(node.arguments.size());
-	for (const auto& argRef : node.arguments)
-		translatedArgs.push_back(translateRelax(bb, cache, params, argRef.get(), argVals));
-
 	// RESHAPE/PERMUTE/EXPAND pass raw PrimValues as shape sentinels.
-	// All other ops operate on tensors — promote any scalar PrimValues to float32 constants.
+	// All other ops operate on tensors: compile-time scalar arguments (e.g. `sqrt(2)` or `sqrt(conf.dims.key)`) are
+	// evaluated here and passed as float32 constants. (Relax's FoldConstant cannot evaluate operators without TVM's
+	// Python legalizations, and backend patterns rely on seeing the constant values.)
 	using FIDs = mdl::builtins::FunctionIDs;
 	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND);
-	if (!isShapeOp) {
-		for (auto& arg : translatedArgs)
-			arg = promoteToFloatTensor(arg);
+	std::vector<::tvm::relax::Expr> translatedArgs;
+	translatedArgs.reserve(node.arguments.size());
+	for (const auto& argRef : node.arguments) {
+		if (!isShapeOp) {
+			if (auto value = evalScalar(argRef.get(), argVals)) {
+				translatedArgs.push_back(mdl::backend::tvm::makeFloatConst(static_cast<float>(*value)));
+				continue;
+			}
+		}
+		auto arg = translateRelax(bb, cache, params, argRef.get(), argVals);
+		translatedArgs.push_back(isShapeOp ? arg : promoteToFloatTensor(arg));
 	}
 
 	auto& fn = mdl::backend::tvm::relaxFunctions[std::to_underlying(node.id)];
@@ -331,11 +421,14 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
  * @details The Relax parameters follow the exported calling convention: the inputs (in declaration order) followed
  * by the weights (in canonical order); see mdl::ExportedFunction.
  */
-static void translateFuncRelax(::tvm::relax::BlockBuilder& bb, const mdl::ExportedFunction& fn, const mdl::ArgVals& argVals) {
+static void translateFuncRelax(
+		::tvm::relax::BlockBuilder& bb, const mdl::ExportedFunction& fn, const mdl::ArgVals& argVals,
+		unsigned ellipsisRank
+) {
 	auto logger = mdl::log::getLogger("compiler");
 	logger->info("Translating {} (Relax)", fn.symbol);
 
-	TranslationContext ctx{argVals};
+	TranslationContext ctx{argVals, ellipsisRank};
 	RelaxCache cache;
 	::tvm::ffi::Array<::tvm::relax::Var> bbParams;
 	auto addParams = [&](const std::vector<mdl::TensorSignature>& tensors, auto&& typeOf) {
@@ -403,7 +496,7 @@ void mdl::backends::tvm::compileToFile(
 	// 1. Relax IRModule with one function per exported function.
 	auto bb = ::tvm::relax::BlockBuilder::Create(::tvm::ffi::Optional<::tvm::IRModule>{});
 	for (const auto& fn : exports)
-		translateFuncRelax(bb, fn, argvals);
+		translateFuncRelax(bb, fn, argvals, opts.ellipsisRank);
 	auto mod = bb->Finalize();
 	dump(mod, "relax");
 

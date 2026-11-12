@@ -1,10 +1,13 @@
-// Runs the compiled BERT encoder layer through the generated header, checks it against a straightforward reference
-// implementation, and measures its latency.
+// Runs the compiled BERT encoder (a stack of encoder layers) through the generated header, checks it against a
+// straightforward reference implementation, and measures its latency.
 //
-//   02_transformer [--seq N] [--iters N] [--weights file.safetensors]
+//   02_transformer [--batch N] [--seq N] [--iters N] [--weights file.safetensors] [--no-check]
+//
+// The model is `float[..., 768] -> float[..., 768]`; compiled with `--ellipsis-rank 2`, `...` stands for
+// [batch, seq] (otherwise for [seq] and --batch is ignored).
 //
 // Without --weights, the weights are random (deterministic). A .safetensors file must contain one float32 tensor per
-// weight path of the model (e.g. "weightQuery.W"; see TransformerEncoder::Weights::infos).
+// weight path of the model (e.g. "layers.0.weightQuery.W"; see BertEncoder::Weights::infos).
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -20,7 +23,7 @@
 #include <vector>
 
 using mdl::runtime::Tensor;
-using Model = mdl::models::TransformerEncoder;
+using Model = mdl::models::BertEncoder;
 
 namespace {
 	// ── reference implementation (row-major, naive loops) ────────────────────────────────────────────────────────
@@ -55,13 +58,16 @@ namespace {
 		}
 	}
 
-	/** BERT encoder layer (post-LN, exact GELU), heads of size 64. */
-	std::vector<float> referenceLayer(const Tensor& xT, std::map<std::string, Tensor>& w, int64_t S) {
-		const int64_t D = xT.shape()[1], H = D / 64, Dh = 64;
-		std::vector<float> x(xT.values().begin(), xT.values().end());
-		auto q = linear(x, w["weightQuery.W"], w["weightQuery.b"], S);
-		auto k = linear(x, w["weightKey.W"], w["weightKey.b"], S);
-		auto v = linear(x, w["weightValue.W"], w["weightValue.b"], S);
+	/** BERT encoder layer (post-LN, exact GELU), heads of size 64; weights are looked up as `prefix + name`. */
+	std::vector<float> referenceLayer(
+			const std::vector<float>& x, std::map<std::string, Tensor>& weights, int64_t S, int64_t D,
+			const std::string& prefix
+	) {
+		const int64_t H = D / 64, Dh = 64;
+		auto w = [&](const std::string& name) -> Tensor& { return weights.at(prefix + name); };
+		auto q = linear(x, w("weightQuery.W"), w("weightQuery.b"), S);
+		auto k = linear(x, w("weightKey.W"), w("weightKey.b"), S);
+		auto v = linear(x, w("weightValue.W"), w("weightValue.b"), S);
 		std::vector<float> ctx(S * D, 0.0f), p(S);
 		for (int64_t h = 0; h < H; ++h)
 			for (int64_t i = 0; i < S; ++i) {
@@ -79,19 +85,22 @@ namespace {
 					for (int64_t d = 0; d < Dh; ++d)
 						ctx[i * D + h * Dh + d] += float(p[j] / sum * v[j * D + h * Dh + d]);
 			}
-		auto attn = linear(ctx, w["weightOut.W"], w["weightOut.b"], S);
+		auto attn = linear(ctx, w("weightOut.W"), w("weightOut.b"), S);
 		for (size_t i = 0; i < attn.size(); ++i)
 			attn[i] += x[i];
-		layerNorm(attn, w["mhaNorm.gamma"], w["mhaNorm.beta"], S);
-		auto inter = linear(attn, w["weightIntermed.W"], w["weightIntermed.b"], S);
+		layerNorm(attn, w("mhaNorm.gamma"), w("mhaNorm.beta"), S);
+		auto inter = linear(attn, w("weightIntermed.W"), w("weightIntermed.b"), S);
 		for (auto& value : inter)
 			value = float(0.5 * value * (1.0 + std::erf(value / std::sqrt(2.0))));
-		auto out = linear(inter, w["weightIntermedOut.W"], w["weightIntermedOut.b"], S);
+		auto out = linear(inter, w("weightIntermedOut.W"), w("weightIntermedOut.b"), S);
 		for (size_t i = 0; i < out.size(); ++i)
 			out[i] += attn[i];
-		layerNorm(out, w["ffnNorm.gamma"], w["ffnNorm.beta"], S);
+		layerNorm(out, w("ffnNorm.gamma"), w("ffnNorm.beta"), S);
 		return out;
 	}
+
+	/** The number of encoder layers, from the hyperparameters the model was compiled with. */
+	constexpr int numLayers() { return static_cast<int>(Model::hyperparameters.conf.numEncoders); }
 
 	std::vector<int64_t> shapeOf(const mdl::models::mdl_detail::TensorInfo& info) {
 		return {info.shape.begin(), info.shape.begin() + info.ndim};
@@ -99,11 +108,21 @@ namespace {
 } // namespace
 
 int main(int argc, char* argv[]) {
-	int64_t seq = 128;
+	int64_t batch = 1, seq = 128;
 	int iters = 20;
+	bool check = true;
 	std::string weightsFile;
+	for (int i = 1; i < argc; ++i)
+		if (std::strcmp(argv[i], "--no-check") == 0)
+			check = false;
 	for (int i = 1; i + 1 < argc; i += 2) {
-		if (std::strcmp(argv[i], "--seq") == 0)
+		if (std::strcmp(argv[i], "--no-check") == 0) {
+			--i; // flag without value
+			continue;
+		}
+		if (std::strcmp(argv[i], "--batch") == 0)
+			batch = std::stoll(argv[i + 1]);
+		else if (std::strcmp(argv[i], "--seq") == 0)
 			seq = std::stoll(argv[i + 1]);
 		else if (std::strcmp(argv[i], "--iters") == 0)
 			iters = std::stoi(argv[i + 1]);
@@ -129,26 +148,42 @@ int main(int argc, char* argv[]) {
 		*weights.find(info.name) = tensors.at(info.name);
 	}
 
-	// Input [seq, model dim] and output.
+	// Input [..., model dim] and output; the runtime dims of `...` are [seq] or [batch, seq].
 	auto inShape = shapeOf(Model::forward_inputs[0]);
 	auto outShape = shapeOf(Model::forward_outputs[0]);
-	std::replace(inShape.begin(), inShape.end(), int64_t{-1}, seq);
-	std::replace(outShape.begin(), outShape.end(), int64_t{-1}, seq);
+	const auto runtimeDims = std::count(inShape.begin(), inShape.end(), int64_t{-1});
+	if (runtimeDims == 1)
+		batch = 1;
+	for (auto* shape : {&inShape, &outShape}) {
+		std::vector<int64_t> values = runtimeDims == 2 ? std::vector<int64_t>{batch, seq} : std::vector<int64_t>{seq};
+		size_t k = 0;
+		for (auto& d : *shape)
+			if (d == -1)
+				d = values[k++];
+	}
 	Tensor x{inShape}, out{outShape};
 	std::normal_distribution<float> unit{0.0f, 1.0f};
 	for (auto& value : x.values())
 		value = unit(rng);
 
-	// Correctness.
+	// Correctness: the reference processes each sequence of the batch separately.
 	Model::forward(x, weights, out);
-	auto expected = referenceLayer(x, tensors, seq);
-	double maxErr = 0;
-	for (size_t i = 0; i < expected.size(); ++i)
-		maxErr = std::max(maxErr, double(std::abs(out.data()[i] - expected[i])));
-	std::printf("seq=%lld  max |mdl - reference| = %.3g\n", static_cast<long long>(seq), maxErr);
-	if (!(maxErr < 1e-3)) {
-		std::printf("FAILED\n");
-		return 1;
+	if (check) {
+		const int64_t D = inShape.back();
+		double maxErr = 0;
+		for (int64_t b = 0; b < batch; ++b) {
+			std::vector<float> expected(x.data() + b * seq * D, x.data() + (b + 1) * seq * D);
+			for (int layer = 0; layer < numLayers(); ++layer)
+				expected = referenceLayer(expected, tensors, seq, D, "layers." + std::to_string(layer) + ".");
+			for (size_t i = 0; i < expected.size(); ++i)
+				maxErr = std::max(maxErr, double(std::abs(out.data()[b * seq * D + i] - expected[i])));
+		}
+		std::printf("layers=%d batch=%lld seq=%lld  max |mdl - reference| = %.3g\n", numLayers(),
+					static_cast<long long>(batch), static_cast<long long>(seq), maxErr);
+		if (!(maxErr < 1e-3)) {
+			std::printf("FAILED\n");
+			return 1;
+		}
 	}
 
 	// Latency.

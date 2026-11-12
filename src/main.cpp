@@ -74,14 +74,16 @@ static void runCompileCommand(const CompileArgs& args) {
 	mdl::ArgVals argvals = args.argvals.transform(mdl::ArgVals::fromYAML).value_or(mdl::ArgVals{});
 
 	std::filesystem::path output = args.output.value_or("a.o");
+	if (output.has_parent_path())
+		std::filesystem::create_directories(output.parent_path());
 	/** \todo: handle multiple input files */
 	auto result = mdl::parser::parse(args.inputs[0], {.importDirs = args.importdirs});
 	if (!result.has_value())
 		exit(1);
 	auto& program = result.value();
-	logger->debug("Computegraph has {} nodes", program.graph.getNumNodes());
+	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
-	auto exports = mdl::exportedFunctions(program, argvals);
+	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
@@ -94,7 +96,10 @@ static void runCompileCommand(const CompileArgs& args) {
 
 	for (const auto& binding : args.bindings) {
 		auto generator = binding.factory();
-		generator->generate(exports, binding.path.value_or(generator->inferBindingsFilename(output)));
+		auto path = binding.path.value_or(generator->inferBindingsFilename(output));
+		if (path.has_parent_path())
+			std::filesystem::create_directories(path.parent_path());
+		generator->generate(exports, path);
 	}
 	if (args.depfile)
 		writeDepfile(*args.depfile, output, program.sources);
@@ -135,6 +140,11 @@ int main(int argc, char* argv[]) {
 					{"onednn", mdl::Kernels::OneDnn},
 					{"tvm", mdl::Kernels::Tvm},
 			}));
+	app.add_option(
+			   "--ellipsis-rank", args.compileOpts.ellipsisRank,
+			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, seq])"
+	)
+			->check(CLI::Range(1u, 8u));
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
 	app.callback([&args]() { runCompileCommand(args); });

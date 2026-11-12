@@ -55,8 +55,9 @@ std::optional<int64_t> mdl::evalConstant(const Node& node, const ArgVals& argval
 	);
 }
 
-static TensorSignature
-makeSignature(std::string name, const DataType& dtype, const Node* node, const ArgVals& argvals) {
+static TensorSignature makeSignature(
+		std::string name, const DataType& dtype, const Node* node, const ArgVals& argvals, unsigned ellipsisRank
+) {
 	TensorSignature sig{.name = std::move(name), .dtype = PrimitiveType::error, .shape = {}, .node = node};
 	std::visit(
 			overloaded{
@@ -64,6 +65,10 @@ makeSignature(std::string name, const DataType& dtype, const Node* node, const A
 					[&](const TensorType& t) {
 						sig.dtype = t.type;
 						for (const auto& dim : t.shape) {
+							if (std::holds_alternative<Elipsis>(dim)) {
+								sig.shape.insert(sig.shape.end(), ellipsisRank, -1);
+								continue;
+							}
 							sig.shape.push_back(std::visit(
 									overloaded{
 											[](unsigned u) -> int64_t { return u; },
@@ -81,19 +86,89 @@ makeSignature(std::string name, const DataType& dtype, const Node* node, const A
 	return sig;
 }
 
-std::vector<ExportedFunction> mdl::exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals) {
+/**
+ * @brief The value of a hyperparameter of type @p type from the argument values at @p path (e.g. `Module.conf`):
+ * a ConstNode for scalars and an AggregateInstance for structs; std::nullopt if a value is missing.
+ */
+static std::optional<Object>
+hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std::string& path, const ArgVals& argvals) {
+	if (std::holds_alternative<PrimitiveType>(type)) {
+		auto value = argvals.lookupScalar(path);
+		if (!value)
+			return std::nullopt;
+		Atomic atomic = std::visit(
+				overloaded{
+						[](int64_t i) { return Atomic{static_cast<int>(i)}; },
+						[](double d) { return Atomic{d}; },
+						[](bool b) { return Atomic{b ? 1 : 0}; },
+				},
+				*value
+		);
+		return Object{&unit.graph().addConstNode(std::move(atomic))};
+	}
+	if (const auto* agg = std::get_if<AggregateType>(&type)) {
+		std::map<std::string, Object> members;
+		for (const auto& [name, memberType] : agg->members) {
+			auto member = hyperparameterValue(unit, memberType, path + "." + name, argvals);
+			if (!member)
+				return std::nullopt;
+			members.emplace(name, std::move(*member));
+		}
+		auto instance = AggregateInstance::create(*agg, std::move(members));
+		return instance ? std::optional<Object>{Object{std::move(*instance)}} : std::nullopt;
+	}
+	return std::nullopt;
+}
+
+/** @brief Flattens a (concrete) hyperparameter value into (path, value) pairs. */
+static void flattenHyperparameter(
+		const std::string& path, const Object& value,
+		std::vector<std::pair<std::string, std::variant<int64_t, double>>>& out
+) {
+	if (const auto* node = std::get_if<const Node*>(&value)) {
+		if (const auto* cn = std::get_if<ConstNode>(*node)) {
+			if (const auto* i = std::get_if<int>(&cn->value))
+				out.emplace_back(path, int64_t{*i});
+			else if (const auto* d = std::get_if<double>(&cn->value))
+				out.emplace_back(path, *d);
+		}
+	} else if (const auto* agg = std::get_if<AggregateInstance>(&value)) {
+		size_t i = 0;
+		for (const auto& [name, _] : agg->getType().members)
+			flattenHyperparameter(path + "." + name, agg->getMembers()[i++], out);
+	}
+}
+
+std::vector<ExportedFunction>
+mdl::exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank) {
 	std::vector<ExportedFunction> exports;
 	for (const auto& [moduleName, member] : unit.definitions) {
-		const auto* module = std::get_if<ModuleType>(&member);
-		if (module == nullptr)
+		const auto* definition = std::get_if<ModuleType>(&member);
+		if (definition == nullptr)
 			continue;
-		// Struct-typed hyperparameters are resolved per field (InvalidDataType means the struct itself is present).
-		bool resolvable = std::all_of(module->typeargs.begin(), module->typeargs.end(), [&](const auto& typearg) {
-			auto res = argvals.lookup(typearg.second.get().name);
-			return res.has_value() || res.error() != ArgVals::ErrorCode::NotFound;
-		});
-		if (!resolvable)
-			continue;
+		// Modules with hyperparameters are instantiated with the values given in the argument values; modules whose
+		// hyperparameters are not (all) given are not compiled.
+		const ModuleType* module = definition;
+		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameters;
+		if (!definition->instantiated) {
+			std::map<std::string, Object> values;
+			bool complete = true;
+			for (const auto& [pname, hn] : definition->typeargs) {
+				auto value = hyperparameterValue(unit, hn.get().type, moduleName + "." + pname, argvals);
+				if (!value) {
+					complete = false;
+					break;
+				}
+				flattenHyperparameter(pname, *value, hyperparameters);
+				values.emplace(pname, std::move(*value));
+			}
+			if (!complete)
+				continue;
+			auto result = unit.instantiate(moduleName, values);
+			if (!result)
+				throw std::runtime_error(result.error());
+			module = &result->get();
+		}
 		const auto order = weightPaths(*module);
 
 		for (const auto& [funcName, decl] : module->functions) {
@@ -108,6 +183,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(const CompilationUnit& unit
 					.weights = {},
 					.outputs = {},
 					.moduleWeights = order,
+					.hyperparameters = hyperparameters,
 			};
 
 			// Collect the graph nodes of the arguments and all weights reachable from the outputs.
@@ -132,7 +208,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(const CompilationUnit& unit
 			for (const auto& [pname, input] : decl.parameters) {
 				auto it = inputNodes.find(&input.get());
 				fn.inputs.push_back(makeSignature(
-						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals
+						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals, ellipsisRank
 				));
 			}
 			auto rank = [&](const Node* node) {
@@ -142,7 +218,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(const CompilationUnit& unit
 			std::sort(weights.begin(), weights.end(), [&](auto* a, auto* b) { return rank(a) < rank(b); });
 			for (const auto* weight : weights) {
 				const auto& pn = std::get<ParameterNode>(*weight);
-				fn.weights.push_back(makeSignature(pn.name, pn.type, weight, argvals));
+				fn.weights.push_back(makeSignature(pn.name, pn.type, weight, argvals, ellipsisRank));
 			}
 			for (size_t i = 0; i < decl.outputs.size(); ++i) {
 				const auto& out = decl.outputs[i].get();
@@ -151,7 +227,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(const CompilationUnit& unit
 				const DataType type = i < decl.returnTypes.size()
 											  ? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])
 											  : getDataType(out);
-				fn.outputs.push_back(makeSignature(std::move(name), type, &out, argvals));
+				fn.outputs.push_back(makeSignature(std::move(name), type, &out, argvals, ellipsisRank));
 			}
 			exports.push_back(std::move(fn));
 		}

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <format>
 #include <fstream>
 #include <map>
 #include <ostream>
@@ -91,6 +92,45 @@ namespace mdl::bindings::detail {
 		}
 	}
 
+	/** @brief Tree of hyperparameter paths (e.g. `conf.dims.model`) with the values at the leaves. */
+	struct HyperparameterTree {
+		std::vector<std::pair<std::string, HyperparameterTree>> children;
+		std::variant<int64_t, double> value;
+
+		HyperparameterTree& child(const std::string& name) {
+			for (auto& [n, c] : children)
+				if (n == name)
+					return c;
+			return children.emplace_back(name, HyperparameterTree{}).second;
+		}
+	};
+
+	inline void emitHyperparameterFields(std::ostream& out, const HyperparameterTree& tree, const std::string& indent) {
+		for (const auto& [name, node] : tree.children) {
+			if (node.children.empty()) {
+				out << indent << (std::holds_alternative<int64_t>(node.value) ? "int64_t " : "double ") << cppIdent(name)
+					<< ";\n";
+			} else {
+				out << indent << "struct {\n"; // anonymous struct type (initialized by designated initializers)
+				emitHyperparameterFields(out, node, indent + "    ");
+				out << indent << "} " << cppIdent(name) << ";\n";
+			}
+		}
+	}
+
+	/** @brief Designated initializer of the hyperparameter values, e.g. `.conf = {.dims = {.model = 768}}`. */
+	inline std::string hyperparameterInit(const HyperparameterTree& tree) {
+		std::string init;
+		for (const auto& [name, node] : tree.children) {
+			init += (init.empty() ? "" : ", ") + ("." + cppIdent(name) + " = ");
+			if (node.children.empty())
+				init += std::visit([](auto v) { return std::format("{}", v); }, node.value);
+			else
+				init += "{" + hyperparameterInit(node) + "}";
+		}
+		return init;
+	}
+
 	inline void generateCppModule(std::ostream& out, const std::vector<const ExportedFunction*>& fns) {
 		const auto& module = fns.front()->module;
 		std::map<std::string, const TensorSignature*> sigs;
@@ -136,6 +176,28 @@ namespace mdl::bindings::detail {
 			<< "        }\n"
 			<< "    };\n";
 
+		if (!fns.front()->hyperparameters.empty()) {
+			// A struct type mirroring the hyperparameters (nested structs for struct-typed ones) and a constexpr
+			// instance with the values the module was compiled with.
+			HyperparameterTree tree;
+			for (const auto& [path, value] : fns.front()->hyperparameters) {
+				HyperparameterTree* node = &tree;
+				for (size_t begin = 0;;) {
+					auto end = path.find('.', begin);
+					node = &node->child(path.substr(begin, end - begin));
+					if (end == std::string::npos)
+						break;
+					begin = end + 1;
+				}
+				node->value = value;
+			}
+			out << "\n    /// Hyperparameters (see `hyperparameters` for the values the module was compiled with).\n"
+				<< "    struct Hyperparameters {\n";
+			emitHyperparameterFields(out, tree, "        ");
+			out << "    };\n"
+				<< "    static constexpr Hyperparameters hyperparameters{" << hyperparameterInit(tree) << "};\n";
+		}
+
 		for (const auto* fn : fns) {
 			out << "\n    /// `" << fn->function << "(";
 			for (size_t i = 0; i < fn->inputs.size(); ++i)
@@ -146,7 +208,7 @@ namespace mdl::bindings::detail {
 			out << "`\n"
 				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must be\n"
 				<< "    /// contiguous float32 CPU tensors whose data is aligned to 64 bytes (e.g. mdl::runtime::Tensor).\n"
-				<< "    /// `B` marks dimensions that are only known at runtime; all of them have the same size.\n"
+				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all tensors).\n"
 				<< "    static void " << fn->function << "(";
 			for (const auto& in : fn->inputs)
 				out << "const DLTensor* " << in.name << ", ";
