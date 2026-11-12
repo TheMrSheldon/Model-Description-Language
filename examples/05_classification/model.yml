@@ -1,0 +1,5 @@
+Classifier:
+  vocab: 50
+  dim: 16
+  classes: 4
+  seq: 6

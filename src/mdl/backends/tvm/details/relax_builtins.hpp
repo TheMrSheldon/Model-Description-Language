@@ -9,11 +9,15 @@
 #include <tvm/relax/expr.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/runtime/tensor.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -83,6 +87,70 @@ static inline ::tvm::relax::Expr lastDimDivisor(const ::tvm::relax::Expr& x) {
     if (const auto* imm = shape.back().template as<::tvm::IntImmNode>())
         return makeFloatConst(static_cast<float>(imm->value));
     return ::tvm::relax::PrimValue(::tvm::cast(::tvm::DataType::Float(32), shape.back()));
+}
+
+static inline ::tvm::PrimExpr shapeProduct(const std::vector<::tvm::PrimExpr>& shape, size_t from = 0) {
+    ::tvm::PrimExpr p = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+    for (size_t i = from; i < shape.size(); ++i)
+        p = p * ::tvm::cast(::tvm::DataType::Int(64), shape[i]);
+    return ::tvm::arith::Analyzer().Simplify(p);
+}
+
+/**
+ * `out = zeros like `like` ([V, ...])`, then `out[ids[n]] += g[n]` for every index n (the adjoint of `take`, e.g. the
+ * gradient of an embedding table). A hand-written kernel (TVM's scatter is only available in Python): `g` and `ids`
+ * are flattened to [N, R] and [N]; the columns are split into chunks of 16 that are processed in parallel, so threads
+ * never write the same element (repeated indices accumulate correctly). Indices are clipped like `take(mode="clip")`.
+ */
+static inline ::tvm::relax::Expr scatterAddRows(
+    ::tvm::relax::BlockBuilder& bb, const ::tvm::relax::Expr& g, const ::tvm::relax::Expr& ids,
+    const ::tvm::relax::Expr& like)
+{
+    namespace tirx = ::tvm::tirx;
+    using ::tvm::IntImm;
+    const auto i64 = ::tvm::DataType::Int(64);
+    const auto likeShape = tensorShape(like);
+    const ::tvm::PrimExpr V = likeShape.at(0), R = shapeProduct(likeShape, 1), N = shapeProduct(tensorShape(ids));
+    auto flat = [&](const ::tvm::relax::Expr& x, ::tvm::ffi::Array<::tvm::PrimExpr> shape, const char* hint) {
+        return bb->Emit(callRelaxOp("relax.op.reshape", x, ::tvm::relax::ShapeExpr(shape)), hint);
+    };
+    auto g2 = flat(g, {N, R}, "g_rows");
+    auto ids1 = flat(ids, {N}, "ids_flat");
+    const auto idsType = ids->struct_info_.as<::tvm::relax::TensorStructInfoNode>()->dtype;
+
+    // The kernel's dimensions are its own variables (bound from the buffers).
+    tirx::Var n("n", i64), r("r", i64), v("v", i64);
+    auto G = tirx::decl_buffer({n, r}, ::tvm::DataType::Float(32), "g");
+    auto I = tirx::decl_buffer({n}, idsType, "ids");
+    auto O = tirx::decl_buffer({v, r}, ::tvm::DataType::Float(32), "out");
+    tirx::Var hg("g_handle", ::tvm::DataType::Handle()), hi("ids_handle", ::tvm::DataType::Handle()),
+        ho("out_handle", ::tvm::DataType::Handle());
+
+    constexpr int64_t kChunk = 16;
+    tirx::Var row("row", i64), col("col", i64), chunk("chunk", i64), lane("lane", i64), k("k", i64);
+    auto zero = tirx::For(row, IntImm(i64, 0), v, tirx::ForKind::kParallel,
+        tirx::For(col, IntImm(i64, 0), r, tirx::ForKind::kSerial,
+            tirx::BufferStore(O, ::tvm::FloatImm(::tvm::DataType::Float(32), 0.0), {row, col})));
+    const ::tvm::PrimExpr chunkSize = IntImm(i64, kChunk);
+    const ::tvm::PrimExpr c = chunk * chunkSize + lane;
+    const ::tvm::PrimExpr index = ::tvm::max(::tvm::min(::tvm::cast(i64, tirx::BufferLoad(I, {k})), v - 1), IntImm(i64, 0));
+    auto accumulate = tirx::For(chunk, IntImm(i64, 0), ::tvm::floordiv(r + IntImm(i64, kChunk - 1), chunkSize), tirx::ForKind::kParallel,
+        tirx::For(k, IntImm(i64, 0), n, tirx::ForKind::kSerial,
+            tirx::For(lane, IntImm(i64, 0), IntImm(i64, kChunk), tirx::ForKind::kSerial,
+                tirx::IfThenElse(c < r,
+                    tirx::BufferStore(O, tirx::BufferLoad(O, {index, c}) + tirx::BufferLoad(G, {k, c}), {index, c})))));
+    auto body = tirx::SBlockRealize({}, ::tvm::Bool(true),
+        tirx::SBlock({}, {}, {}, "root", tirx::SeqStmt(::tvm::ffi::Array<tirx::Stmt>{zero, accumulate})));
+    ::tvm::ffi::Map<tirx::Var, tirx::Buffer> buffers{{hg, G}, {hi, I}, {ho, O}};
+    auto func = tirx::PrimFunc({hg, hi, ho}, body, ::tvm::VoidType(), buffers);
+    func = ::tvm::WithAttr(std::move(func), "op_pattern", ::tvm::Integer(8)); // opaque: not fused or rescheduled
+    auto gv = bb->AddFunction(func, "scatter_add_rows");
+
+    static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
+    auto out = bb->Emit(::tvm::relax::Call(callTir, {gv, ::tvm::relax::Tuple({g2, ids1})}, ::tvm::Attrs(),
+                                           {::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr({V, R}), ::tvm::DataType::Float(32))}),
+                        "scatter");
+    return callRelaxOp("relax.op.reshape", out, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>(likeShape.begin(), likeShape.end())));
 }
 
 /** Emit a value into the BlockBuilder and return the bound Var. */
@@ -366,6 +434,21 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         auto ones = emitAs(bb, callRelaxOp("relax.op.broadcast_to", makeFloatConst(1.0f), ::tvm::relax::ShapeExpr(shape)), "ones");
         auto n = emitAs(bb, callRelaxOp("relax.op.sum", ones, all, false), "count");
         return callRelaxOp("relax.op.divide", s, n);
+    },
+    /** TAKE — rows of ts[0] at the indices ts[1] (out-of-range indices are clipped) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        return callRelaxOp("relax.op.take", ts[0], ts[1], ::tvm::ffi::Optional<int64_t>(0), ::tvm::ffi::String("clip"));
+    },
+    /** SCATTER_ADD_ROWS — the adjoint of TAKE **/
+    [](auto& bb, auto ts) -> ::tvm::relax::Expr { return scatterAddRows(bb, ts[0], ts[1], ts[2]); },
+    /** ONE_HOT_LIKE — ts[0] integer labels; the number of classes is the last dimension of ts[1] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        const auto like = tensorShape(ts[1]);
+        const auto* imm = like.empty() ? nullptr : like.back().template as<::tvm::IntImmNode>();
+        if (imm == nullptr)
+            throw std::runtime_error("one_hot_like: the number of classes (last dimension) must be static");
+        auto value = [](double x) { return ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(32), x)); };
+        return callRelaxOp("relax.op.one_hot", ts[0], value(1.0), value(0.0), static_cast<int>(imm->value), -1);
     },
 });
 

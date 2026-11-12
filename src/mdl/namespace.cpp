@@ -1,3 +1,4 @@
+#include <optional>
 #include <mdl/namespace.hpp>
 
 #include <mdl/computegraphv2/builtins.hpp>
@@ -26,9 +27,11 @@ static std::map<std::string, std::any> initBuiltins() {
 		FunctionIDs id;
 		std::vector<std::pair<const char*, DataType>> extraParams = {}; ///< Parameters after `x`
 		bool extraParamsAreArguments = false; ///< Whether the extra parameters are arguments of the builtin
+		std::optional<DataType> xType = std::nullopt; ///< Type of `x` (default: a float tensor)
 	};
 	/** \todo template the base type? **/
 	const auto tensor = mdl::TensorType{.type = PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
+	const auto intTensor = mdl::TensorType{.type = PrimitiveType::integer, .shape = {mdl::Elipsis{}}};
 	const Builtin table[] = {
 			{"__builtin_max", FunctionIDs::MAX},
 			{"__builtin_min", FunctionIDs::MIN},
@@ -49,11 +52,13 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_stop_gradient", FunctionIDs::STOP_GRADIENT},
 			{"__builtin_sum_all", FunctionIDs::SUM_ALL},
 			{"__builtin_mean_all", FunctionIDs::MEAN_ALL},
+			{"__builtin_take", FunctionIDs::TAKE, {{"ids", intTensor}}, true},
+			{"__builtin_one_hot_like", FunctionIDs::ONE_HOT_LIKE, {{"like", tensor}}, true, intTensor},
 	};
 
 	std::map<std::string, std::any> builtins;
 	for (const auto& builtin : table) {
-		const auto& x = graph.addInputNode(tensor, "x");
+		const auto& x = graph.addInputNode(builtin.xType.value_or(tensor), "x");
 		std::vector<std::pair<std::string, std::reference_wrapper<const mdl::InputNode>>> params{
 				{"x", std::cref(std::get<mdl::InputNode>(x))}
 		};

@@ -48,7 +48,11 @@ inputs. Gradients are added to the caller's buffers (accumulation; zero them bef
 `loss(x, target) -> loss, d_<weight>...` in one call.
 ```dlm
 float loss(x: float[..., 768], target: float[..., 768]) => mse(forward(x), target);
+float loss(ids: int[..., seq], labels: int[...]) => cross_entropy(forward(ids), labels);  // integer inputs
 ```
+`int` tensors (token ids, labels) are passed as int32 (`mdl::runtime::IntTensor`); they get no gradients. `std` provides
+`Embedding` (a lookup table; its gradient adds the selected rows), `cross_entropy`, `one_hot_like`, `mse`, `logsumexp`,
+and `sum_all`/`mean_all`. See [examples/05_classification](examples/05_classification/).
 
 **The caller computes the objective** (e.g. the trainer) and provides the cotangent `dL/d_output`:
 - `forward(x) -> output` also saves the values the backward pass needs in a context buffer `ctx`,
@@ -85,8 +89,7 @@ module Scale[dim: uint] {
     }
 }
 ```
-`std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`;
-`std.statistics` provides `sum_all`/`mean_all` and `std.losses` `mse` for objectives.
+`std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`.
 
 ## CMake
 ```cmake

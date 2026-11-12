@@ -245,6 +245,10 @@ namespace mdl::autodiff {
 				return b.op(FIDs::RESHAPE_LIKE, getDataType(x), {g, x});
 			case FIDs::PERMUTE_INVERSE:
 				return b.op(FIDs::PERMUTE, getDataType(x), {g, *other});
+			case FIDs::TAKE: // rows of a table: their gradients are added to the selected rows
+				return b.op(FIDs::SCATTER_ADD_ROWS, getDataType(x), {g, *other, x});
+			case FIDs::SCATTER_ADD_ROWS:
+				return b.op(FIDs::TAKE, getDataType(x), {g, *other});
 			default:
 				throw NoGradientRule{inv.id};
 			}
@@ -264,7 +268,11 @@ namespace mdl::autodiff {
 			case FIDs::EQUAL_MASK:
 				return false; // piecewise constant
 			case FIDs::STOP_GRADIENT:
+			case FIDs::ONE_HOT_LIKE:
 				return false;
+			case FIDs::TAKE:
+			case FIDs::SCATTER_ADD_ROWS:
+				return arg == 0; // not the (integer) indices
 			default:
 				return true;
 			}
@@ -362,6 +370,13 @@ namespace mdl::autodiff {
 					accumulate(*weights[i], (*results)[call.inputs.size() + i].get());
 			return {};
 		}
+		bool isFloating(const DataType& type) {
+			if (const auto* p = std::get_if<PrimitiveType>(&type))
+				return *p == PrimitiveType::floating;
+			const auto* t = std::get_if<TensorType>(&type);
+			return t != nullptr && t->type == PrimitiveType::floating;
+		}
+
 		bool isScalar(const DataType& type) {
 			if (std::holds_alternative<PrimitiveType>(type))
 				return true;
@@ -455,8 +470,8 @@ namespace mdl::autodiff {
 			bool target = false;
 			if (const auto* pn = std::get_if<ParameterNode>(node))
 				target = selected(pn->name);
-			else if (std::holds_alternative<InputNode>(*node))
-				target = options.inputs;
+			else if (const auto* in = std::get_if<InputNode>(node))
+				target = options.inputs && isFloating(in->type); // integer inputs (e.g. token ids) have no gradient
 			else if (const auto* inv = std::get_if<InvocationNode>(node))
 				for (size_t i = 0; i < inv->arguments.size(); ++i)
 					target |= differentiableArgument(inv->id, i) && dependsOnTarget.contains(&inv->arguments[i].get());
@@ -551,7 +566,7 @@ namespace mdl::autodiff {
 		if (options.inputs) {
 			for (const auto& [pname, input] : func.parameters) {
 				auto node = inputNodes.find(&input.get());
-				if (node == inputNodes.end())
+				if (node == inputNodes.end() || !isFloating(input.get().type))
 					continue;
 				auto adj = adjoint.find(node->second);
 				const Node& value = adj != adjoint.end() ? *adj->second : b.zerosLike(*node->second);

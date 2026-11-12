@@ -54,12 +54,26 @@ namespace mdl::bindings::detail {
 		return (!name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) ? "_" + name : name;
 	}
 
-	/// `ndim, {d0, d1, ...}` initializer of mdl_detail::TensorInfo.
+	/// DLDataType initializer of a primitive type (float32, int32, uint32, bool).
+	inline std::string dlDtype(PrimitiveType p) {
+		switch (p) {
+		case PrimitiveType::integer:
+			return "{kDLInt, 32, 1}";
+		case PrimitiveType::uint:
+			return "{kDLUInt, 32, 1}";
+		case PrimitiveType::boolean:
+			return "{kDLBool, 8, 1}";
+		default:
+			return "{kDLFloat, 32, 1}";
+		}
+	}
+
+	/// `ndim, {d0, d1, ...}, dtype` initializer of mdl_detail::TensorInfo.
 	inline std::string infoShape(const TensorSignature& sig) {
 		std::string s = std::to_string(sig.shape.size()) + ", {";
 		for (size_t i = 0; i < sig.shape.size(); ++i)
 			s += (i > 0 ? ", " : "") + std::to_string(sig.shape[i]);
-		return s + "}";
+		return s + "}, " + dlDtype(sig.dtype);
 	}
 
 	inline void emitWeightTree(
@@ -165,7 +179,7 @@ namespace mdl::bindings::detail {
 			if (auto it = sigs.find(path); it != sigs.end())
 				out << infoShape(*it->second);
 			else
-				out << "-1, {}";
+				out << "-1, {}, {kDLFloat, 32, 1}";
 			out << "},\n";
 		}
 		out << "        }};\n\n"
@@ -248,7 +262,8 @@ namespace mdl::bindings::detail {
 				out << (i > 0 ? ", " : "") << shapeStr(*outputs[i]);
 			out << "`\n"
 				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must be\n"
-				<< "    /// contiguous float32 CPU tensors whose data is aligned to 64 bytes (e.g. mdl::runtime::Tensor).\n"
+				<< "    /// contiguous CPU tensors of the declared type (float32, or int32 for `int`) whose data is aligned to\n"
+				<< "    /// 64 bytes (e.g. mdl::runtime::Tensor / mdl::runtime::IntTensor).\n"
 				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all tensors).\n";
 			if (context)
 				out << "    /// " << (context->producer ? "Writes the values the backward pass needs into" : "Reads")
@@ -270,13 +285,16 @@ namespace mdl::bindings::detail {
 					<< "        DLTensor ctx_tensor{ctx.data, {kDLCPU, 0}, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, 0};\n";
 			out << "        TVMFFIAny args[] = {\n";
 			for (const auto* in : inputs)
-				out << "            mdl_detail::tensorArg(" << in->name << "),\n";
+				out << "            mdl_detail::tensorArg(" << in->name << ", \"" << in->name << "\", " << dlDtype(in->dtype)
+					<< "),\n";
 			for (const auto& w : fn->weights)
-				out << "            mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name << "\"),\n";
+				out << "            mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name << "\", "
+					<< dlDtype(w.dtype) << "),\n";
 			for (const auto* o : outputs)
-				out << "            mdl_detail::tensorArg(" << o->name << "),\n";
+				out << "            mdl_detail::tensorArg(" << o->name << ", \"" << o->name << "\", " << dlDtype(o->dtype)
+					<< "),\n";
 			if (context)
-				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\"),\n";
+				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\", {kDLUInt, 8, 1}),\n";
 			out << "        };\n"
 				<< "        mdl_detail::call(__tvm_ffi_" << fn->symbol << ", args, \"" << fn->symbol << "\");\n"
 				<< "    }\n";
@@ -323,17 +341,20 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#ifndef MDL_MODELS_DETAIL_DEFINED\n"
 		<< "#define MDL_MODELS_DETAIL_DEFINED\n"
 		<< "namespace mdl_detail {\n"
-		<< "    /// Path (or name) and shape of a tensor; -1 marks dimensions that are only known at runtime.\n"
+		<< "    /// Path (or name), shape, and element type of a tensor; -1 marks dimensions that are only known at runtime.\n"
 		<< "    struct TensorInfo {\n"
 		<< "        const char* name;\n"
 		<< "        int32_t ndim;\n"
 		<< "        std::array<int64_t, 8> shape;\n"
+		<< "        DLDataType dtype;\n"
 		<< "    };\n\n"
 		<< "    /// Compiled functions require tensor data to be aligned to this many bytes.\n"
 		<< "    inline constexpr size_t kTensorAlignment = 64;\n\n"
-		<< "    inline TVMFFIAny tensorArg(const DLTensor* tensor, const char* name = nullptr) {\n"
+		<< "    inline TVMFFIAny tensorArg(const DLTensor* tensor, const char* name, DLDataType dtype) {\n"
 		<< "        if (tensor == nullptr)\n"
 		<< "            throw std::invalid_argument(std::string{\"missing tensor \"} + (name ? name : \"argument\"));\n"
+		<< "        if (tensor->dtype.code != dtype.code || tensor->dtype.bits != dtype.bits || tensor->dtype.lanes != dtype.lanes)\n"
+		<< "            throw std::invalid_argument(std::string{\"tensor \"} + name + \" has the wrong element type\");\n"
 		<< "        if ((reinterpret_cast<uintptr_t>(tensor->data) + tensor->byte_offset) % kTensorAlignment != 0)\n"
 		<< "            throw std::invalid_argument(std::string{\"tensor \"} + (name ? name : \"argument\") +\n"
 		<< "                                        \" is not aligned to 64 bytes\");\n"

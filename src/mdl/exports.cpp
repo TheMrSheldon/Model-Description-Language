@@ -222,11 +222,17 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				if (selected && used)
 					gradientOf.push_back(path);
 			}
+			auto floating = [](const DataType& type) { // integer inputs (e.g. token ids) have no gradient
+				if (const auto* p = std::get_if<PrimitiveType>(&type))
+					return *p == PrimitiveType::floating;
+				const auto* t = std::get_if<TensorType>(&type);
+				return t != nullptr && t->type == PrimitiveType::floating;
+			};
 			if (gradients.options.inputs)
 				for (const auto& [pname, input] : original.parameters)
 					if (std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
 							return std::get_if<InputNode>(n) == &input.get();
-						}))
+						}) && floating(input.get().type))
 						gradientOf.push_back(pname);
 
 			if (autodiff::numCotangents(original) == 0 || gradients.fused) {

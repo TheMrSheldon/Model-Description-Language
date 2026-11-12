@@ -48,3 +48,14 @@ module Linear[indim: uint, outdim: uint, bias: bool] {
 
     float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
 }
+
+/**
+ * @brief A lookup table of `num` vectors of size `dim`, e.g. token embeddings: `ids` selects the rows.
+ * @details Out-of-range ids are clipped to the valid range. The gradient of the table adds the gradients of the
+ * selected rows (repeated ids accumulate); rows that are not selected get a zero gradient.
+ */
+module Embedding[num: uint, dim: uint] {
+    table: float[num, dim]
+
+    float[..., dim] forward(ids: int[...]) => __builtin_take(table, ids);
+}

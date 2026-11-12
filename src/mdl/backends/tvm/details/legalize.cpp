@@ -3,6 +3,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/relax/attrs/datatype.h>
+#include <tvm/relax/attrs/index.h>
 #include <tvm/relax/attrs/manipulate.h>
 #include <tvm/relax/attrs/nn.h>
 #include <tvm/relax/attrs/statistical.h>
@@ -625,6 +626,23 @@ namespace mdl::backend::tvm {
 							"T_gelu", topi::kElementWise
 					));
 				}));
+		map.Set("relax.take", wrap([](const BlockBuilder& bb, const Call& call) {
+					const auto* attrs = call->attrs.as<::tvm::relax::TakeAttrs>();
+					TECall te{bb, "take"};
+					auto table = te.tensor(call->args[0], "table");
+					auto ids = te.tensor(call->args[1], "ids");
+					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
+					return te.finish(topi::take(table, ids, /*batch_dims=*/0, axis, std::string(attrs->mode)));
+				}));
+		map.Set("relax.one_hot", wrap([](const BlockBuilder& bb, const Call& call) {
+					const auto* attrs = call->attrs.as<::tvm::relax::OneHotAttrs>();
+					const auto* on = call->args[1].as<::tvm::relax::PrimValueNode>();
+					const auto* off = call->args[2].as<::tvm::relax::PrimValueNode>();
+					TECall te{bb, "one_hot"};
+					auto labels = te.tensor(call->args[0], "labels");
+					return te.finish(topi::one_hot(labels, on->value, off->value, attrs->depth, attrs->axis, on->value.dtype()));
+				}));
+
 		map.Set("relax.nn.layer_norm", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto* attrs = call->attrs.as<::tvm::relax::LayerNormAttrs>();
 					const auto &x = call->args[0], &gamma = call->args[1], &beta = call->args[2];

@@ -58,6 +58,11 @@ namespace mdl::builtins {
 		/** Full reductions (e.g. objectives) **/
 		SUM_ALL,  /**< (x): the sum of all elements (a scalar) */
 		MEAN_ALL, /**< (x): the mean of all elements (a scalar) */
+		/** Indexing (integer tensors) **/
+		TAKE,			  /**< (table [V, ...], ids int[...]): the rows table[ids] ([..., ...]), e.g. embeddings */
+		SCATTER_ADD_ROWS, /**< (g [..., ...], ids int[...], like [V, ...]): zeros like `like`, plus g's rows added at ids
+							 (the adjoint of TAKE) */
+		ONE_HOT_LIKE,	  /**< (labels int[...], like [..., C]): 1.0 at labels, 0.0 elsewhere (like's shape; C classes) */
 
 		COUNT
 	};

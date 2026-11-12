@@ -256,3 +256,19 @@ TEST_CASE("the gradient of an objective (scalar output) has no cotangent inputs"
 	CHECK(paramNames(*grad) == std::vector<std::string>{"x", "target"});
 	CHECK(grad->outputNames == std::vector<std::string>{"output", "d_W"});
 }
+
+TEST_CASE("integer inputs get no gradient; the embedding table gets a scatter-add", "[autodiff]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			table: float[10, 4]
+			float[..., 4] forward(ids: int[...], x: float[..., 4]) => __builtin_take(table, ids) * x;
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	autodiff::Options options;
+	options.inputs = true;
+	auto grad = autodiff::vjp(unit.graph(), m.functions.at("forward"), weightPaths(m), options);
+	REQUIRE(grad.has_value());
+	CHECK(grad->outputNames == std::vector<std::string>{"output", "d_table", "d_x"});
+	CHECK(countReachable(*grad, builtins::FunctionIDs::SCATTER_ADD_ROWS) == 1);
+}

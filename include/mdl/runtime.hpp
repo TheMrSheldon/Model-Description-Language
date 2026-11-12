@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <type_traits>
 #include <vector>
 
 namespace mdl::runtime {
@@ -46,28 +47,44 @@ namespace mdl::runtime {
 		}
 	};
 
-	/** @brief An owning, contiguous float32 tensor on the CPU that can be passed to compiled functions. */
-	class Tensor {
-	public:
-		Tensor() : Tensor(std::vector<int64_t>{}) {}
+	/** @brief The DLPack data type of the element type @p T (float32 or int32). */
+	template <typename T>
+	constexpr DLDataType dlDataType() {
+		if constexpr (std::is_same_v<T, float>)
+			return {kDLFloat, 32, 1};
+		else if constexpr (std::is_same_v<T, int32_t>)
+			return {kDLInt, 32, 1};
+		else
+			static_assert(sizeof(T) == 0, "unsupported element type");
+	}
 
-		explicit Tensor(std::vector<int64_t> shape, float value = 0.0f)
+	/**
+	 * @brief An owning, contiguous tensor on the CPU that can be passed to compiled functions (data aligned to
+	 * kTensorAlignment). Use Tensor (float32) for `float` tensors and IntTensor (int32) for `int` tensors (e.g. token
+	 * ids or labels).
+	 */
+	template <typename T>
+	class BasicTensor {
+	public:
+		BasicTensor() : BasicTensor(std::vector<int64_t>{}) {}
+
+		explicit BasicTensor(std::vector<int64_t> shape, T value = T{})
 				: shape_(std::move(shape)), data_(numel(shape_), value) {
 			updateView();
 		}
 
-		Tensor(std::vector<int64_t> shape, const std::vector<float>& data)
+		BasicTensor(std::vector<int64_t> shape, const std::vector<T>& data)
 				: shape_(std::move(shape)), data_(data.begin(), data.end()) {
 			if (data_.size() != numel(shape_))
 				throw std::invalid_argument("mdl::runtime::Tensor: data size does not match the shape");
 			updateView();
 		}
 
-		Tensor(const Tensor& other) : shape_(other.shape_), data_(other.data_) { updateView(); }
-		Tensor(Tensor&& other) noexcept : shape_(std::move(other.shape_)), data_(std::move(other.data_)) {
+		BasicTensor(const BasicTensor& other) : shape_(other.shape_), data_(other.data_) { updateView(); }
+		BasicTensor(BasicTensor&& other) noexcept : shape_(std::move(other.shape_)), data_(std::move(other.data_)) {
 			updateView();
 		}
-		Tensor& operator=(Tensor other) noexcept {
+		BasicTensor& operator=(BasicTensor other) noexcept {
 			std::swap(shape_, other.shape_);
 			std::swap(data_, other.data_);
 			updateView();
@@ -81,15 +98,15 @@ namespace mdl::runtime {
 		operator const DLTensor*() const { return &view_; }
 
 		const std::vector<int64_t>& shape() const { return shape_; }
-		std::span<float> values() { return data_; }
-		std::span<const float> values() const { return data_; }
-		float* data() { return data_.data(); }
-		const float* data() const { return data_.data(); }
+		std::span<T> values() { return data_; }
+		std::span<const T> values() const { return data_; }
+		T* data() { return data_.data(); }
+		const T* data() const { return data_.data(); }
 		size_t size() const { return data_.size(); }
 
 	private:
 		std::vector<int64_t> shape_;
-		std::vector<float, AlignedAllocator<float>> data_;
+		std::vector<T, AlignedAllocator<T>> data_;
 		DLTensor view_{};
 
 		static size_t numel(const std::vector<int64_t>& shape) {
@@ -101,13 +118,16 @@ namespace mdl::runtime {
 					.data = data_.data(),
 					.device = {kDLCPU, 0},
 					.ndim = static_cast<int32_t>(shape_.size()),
-					.dtype = {kDLFloat, 32, 1},
+					.dtype = dlDataType<T>(),
 					.shape = shape_.data(),
 					.strides = nullptr,
 					.byte_offset = 0,
 			};
 		}
 	};
+
+	using Tensor = BasicTensor<float>;
+	using IntTensor = BasicTensor<int32_t>;
 
 	namespace detail {
 		/** @brief Minimal reader for the (flat) JSON header of a safetensors file. */

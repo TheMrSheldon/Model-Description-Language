@@ -113,6 +113,29 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 		if (args.size() >= 2)
 			return getDataType(args[1].get());
 		return fallback();
+	case FunctionIDs::SCATTER_ADD_ROWS:
+		if (args.size() >= 3)
+			return getDataType(args[2].get());
+		return fallback();
+
+	// TAKE: the index shape followed by the table's row shape.
+	case FunctionIDs::TAKE:
+		if (args.size() >= 2) {
+			const auto* table = getTensor(args[0].get());
+			const auto* ids = getTensor(args[1].get());
+			if (table != nullptr && ids != nullptr && !table->shape.empty()) {
+				TensorType::Shape s = ids->shape;
+				s.insert(s.end(), table->shape.begin() + 1, table->shape.end());
+				return TensorType{table->type, std::move(s)};
+			}
+		}
+		return fallback();
+
+	// ONE_HOT_LIKE: the shape of the reference (the labels' shape followed by the number of classes).
+	case FunctionIDs::ONE_HOT_LIKE:
+		if (args.size() >= 2)
+			return getDataType(args[1].get());
+		return fallback();
 
 	case FunctionIDs::STOP_GRADIENT:
 		if (!args.empty())
