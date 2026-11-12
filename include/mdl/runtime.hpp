@@ -259,30 +259,61 @@ namespace mdl::runtime {
 	 * @brief Loads all float32 tensors of a `.safetensors` file.
 	 * @throws std::runtime_error if the file cannot be read or contains tensors of another data type.
 	 */
-	inline std::map<std::string, Tensor> loadSafetensors(const std::string& path) {
-		std::ifstream in{path, std::ios::binary};
-		if (!in)
-			throw std::runtime_error("cannot open " + path);
-		uint64_t headerSize = 0;
-		in.read(reinterpret_cast<char*>(&headerSize), sizeof(headerSize)); // little endian
-		std::string header(headerSize, '\0');
-		in.read(header.data(), static_cast<std::streamsize>(headerSize));
-		std::vector<char> payload{std::istreambuf_iterator<char>(in), {}};
-
-		std::map<std::string, Tensor> tensors;
-		for (auto& [name, entry] : detail::SafetensorsHeaderParser{header}.parse()) {
-			if (entry.dtype != "F32")
-				throw std::runtime_error("safetensors: tensor " + name + " has unsupported dtype " + entry.dtype);
-			auto [begin, end] = entry.offsets;
-			if (end > payload.size() || begin > end)
-				throw std::runtime_error("safetensors: tensor " + name + " is out of bounds");
-			std::vector<float> data((end - begin) / sizeof(float));
-			std::memcpy(data.data(), payload.data() + begin, end - begin);
-			tensors.emplace(name, Tensor{std::move(entry.shape), std::move(data)});
+	namespace detail {
+		template <typename T>
+		constexpr const char* safetensorsDtype() {
+			if constexpr (std::is_same_v<T, float>)
+				return "F32";
+			else
+				return "I32";
 		}
-		return tensors;
+
+		/**
+		 * @brief Reads the tensors of a safetensors file whose dtype matches T; tensors of other dtypes are skipped if
+		 * @p skipOthers, else they are an error.
+		 */
+		template <typename T>
+		std::map<std::string, BasicTensor<T>> readSafetensors(const std::string& path, bool skipOthers) {
+			std::ifstream in{path, std::ios::binary};
+			if (!in)
+				throw std::runtime_error("cannot open " + path);
+			uint64_t headerSize = 0;
+			in.read(reinterpret_cast<char*>(&headerSize), sizeof(headerSize)); // little endian
+			std::string header(headerSize, '\0');
+			in.read(header.data(), static_cast<std::streamsize>(headerSize));
+			std::vector<char> payload{std::istreambuf_iterator<char>(in), {}};
+
+			std::map<std::string, BasicTensor<T>> tensors;
+			for (auto& [name, entry] : SafetensorsHeaderParser{header}.parse()) {
+				if (entry.dtype != safetensorsDtype<T>()) {
+					if (skipOthers)
+						continue;
+					throw std::runtime_error("safetensors: tensor " + name + " has unsupported dtype " + entry.dtype);
+				}
+				auto [begin, end] = entry.offsets;
+				if (end > payload.size() || begin > end)
+					throw std::runtime_error("safetensors: tensor " + name + " is out of bounds");
+				std::vector<T> data((end - begin) / sizeof(T));
+				std::memcpy(data.data(), payload.data() + begin, end - begin);
+				tensors.emplace(name, BasicTensor<T>{std::move(entry.shape), std::move(data)});
+			}
+			return tensors;
+		}
+	} // namespace detail
+
+	/** @brief Loads all tensors of a safetensors file (all must be float32). */
+	inline std::map<std::string, Tensor> loadSafetensors(const std::string& path) {
+		return detail::readSafetensors<float>(path, /*skipOthers=*/false);
 	}
 
+	/**
+	 * @brief Loads the tensors of element type T (float or int32_t) of a safetensors file; tensors of other types are
+	 * skipped (e.g. to read the float weights and the int32 token ids of one file separately).
+	 */
+	template <typename T>
+	std::map<std::string, BasicTensor<T>> loadSafetensorsAs(const std::string& path) {
+		return detail::readSafetensors<T>(path, /*skipOthers=*/true);
+	}
 } // namespace mdl::runtime
 
 #endif

@@ -56,3 +56,35 @@ module BertEncoder[conf: TransformerConf] {
         return h;
     }
 }
+
+/** @brief Sizes of BERT's embedding tables. */
+struct EmbeddingConf {
+    vocab: uint      // number of tokens
+    positions: uint  // maximum sequence length
+    types: uint      // number of segment types
+}
+
+/**
+ * @brief BERT's input embeddings: the sum of the token, position, and segment embeddings, normalized.
+ */
+module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
+    word: Embedding[emb.vocab, conf.dims.model]
+    position: Embedding[emb.positions, conf.dims.model]
+    tokenType: Embedding[emb.types, conf.dims.model]
+    norm: LayerNorm[conf.dims.model]
+
+    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+        norm(word(ids) + position(positions) + tokenType(types));
+}
+
+/**
+ * @brief The BERT model (like Hugging Face's `BertModel` without pooler): token, segment, and position ids to the
+ * last hidden states. With `--ellipsis-rank 2`, the ids are [batch, seq] and the output is [batch, seq, model].
+ */
+module Bert[conf: TransformerConf, emb: EmbeddingConf] {
+    embeddings: BertEmbeddings[conf, emb]
+    encoder: BertEncoder[conf]
+
+    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+        encoder(embeddings(ids, types, positions));
+}

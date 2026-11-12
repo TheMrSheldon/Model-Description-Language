@@ -25,3 +25,11 @@ mdl_add_model(transformer_model_grad SOURCE model.dlm CONFIG model_grad.yml OPTI
 add_executable(02_transformer_grad grad_check.cpp)
 target_link_libraries(02_transformer_grad PRIVATE transformer_model_grad)
 add_test(NAME example_02_transformer_grad COMMAND 02_transformer_grad)
+
+# The full model `Bert` (embeddings + encoder) against Hugging Face's BertModel (reference data written by
+# export_bert_reference.py; `...` = [batch, seq]).
+mdl_add_model(bert_model SOURCE model.dlm CONFIG model_bert_tiny.yml OPTIONS --ellipsis-rank 2)
+add_executable(02_transformer_bert bert_check.cpp)
+target_link_libraries(02_transformer_bert PRIVATE bert_model)
+target_compile_definitions(02_transformer_bert PRIVATE MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny.safetensors")
+add_test(NAME example_02_transformer_bert COMMAND 02_transformer_bert)
