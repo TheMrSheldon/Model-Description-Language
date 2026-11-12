@@ -13,9 +13,10 @@ add_executable(tests
     mdl/backends/tvm_patterns.cpp
     mdl/utils/pathpattern.cpp
     mdl/passes/autodiff.cpp
+    mdl/runtime/safetensors.cpp
 )
 
-target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl)
+target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl mdl_runtime)
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_features(tests PRIVATE cxx_std_23)
 

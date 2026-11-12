@@ -119,10 +119,12 @@ target_include_directories(mdl PUBLIC
 # ── Runtime helpers (mdl_runtime) ────────────────────────────────────────────
 # Header-only helpers for programs that call compiled models (include/mdl/runtime.hpp) plus the TVM runtime that
 # compiled models depend on (thread pool, workspace allocation, FFI).
+# nlohmann/json parses the safetensors headers (header-only).
+CPMAddPackage(URI "gh:nlohmann/json@3.12.0" OPTIONS "JSON_BuildTests OFF" EXCLUDE_FROM_ALL YES)
 add_library(mdl_runtime INTERFACE)
 target_include_directories(mdl_runtime INTERFACE ${CMAKE_CURRENT_LIST_DIR}/../include)
 target_compile_features(mdl_runtime INTERFACE cxx_std_20)
-target_link_libraries(mdl_runtime INTERFACE tvm_runtime)
+target_link_libraries(mdl_runtime INTERFACE tvm_runtime nlohmann_json::nlohmann_json)
 
 # ── Vendor kernels (mdl_kernels) ─────────────────────────────────────────────
 # Runtime library that compiled models link against: it implements the extern kernels the TVM backend emits calls to

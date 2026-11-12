@@ -3,15 +3,18 @@
 
 /**
  * @file
- * @brief Small header-only helpers for programs that call compiled models: an owning (CPU, float32) tensor that can be
- * passed as `DLTensor*` and a loader for `.safetensors` files.
+ * @brief Small header-only helpers for programs that call compiled models: owning (CPU, float32/int32) tensors that can
+ * be passed as `DLTensor*`, and safetensors support: loading a model's weights directly into its generated `Weights`
+ * (with dtype and shape checks and an optional name mapping), saving them, and reading arbitrary tensors.
  */
 
 #include <dlpack/dlpack.h>
+#include <nlohmann/json.hpp>
 
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -129,180 +132,111 @@ namespace mdl::runtime {
 	using Tensor = BasicTensor<float>;
 	using IntTensor = BasicTensor<int32_t>;
 
+	// ── safetensors ─────────────────────────────────────────────────────────────────────────────────────────────
+	// File layout: an 8-byte little-endian header size N, an N-byte JSON header {name: {dtype, shape, data_offsets}}
+	// (plus an optional "__metadata__" entry), and the tensor data (offsets relative to the end of the header).
+
+	/** @brief One tensor of a safetensors file. */
+	struct SafetensorsEntry {
+		std::string dtype; ///< e.g. "F32", "I32"
+		std::vector<int64_t> shape;
+		uint64_t begin = 0, end = 0; ///< byte offsets of the data relative to the start of the data section
+	};
+
+	/** @brief Maps a tensor name of a file onto a weight path of the model; an empty result skips the tensor. */
+	using NameMap = std::function<std::string(std::string_view)>;
+
 	namespace detail {
-		/** @brief Minimal reader for the (flat) JSON header of a safetensors file. */
-		class SafetensorsHeaderParser {
-		public:
-			explicit SafetensorsHeaderParser(std::string_view json) : json(json) {}
-
-			struct Entry {
-				std::string dtype;
-				std::vector<int64_t> shape;
-				std::pair<uint64_t, uint64_t> offsets{0, 0};
-			};
-
-			std::map<std::string, Entry> parse() {
-				std::map<std::string, Entry> entries;
-				expect('{');
-				while (!consume('}')) {
-					std::string name = string();
-					expect(':');
-					if (name == "__metadata__")
-						skipValue();
-					else
-						entries.emplace(std::move(name), entry());
-					consume(',');
-				}
-				return entries;
-			}
-
-		private:
-			std::string_view json;
-			size_t pos = 0;
-
-			void skipWs() {
-				while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos])))
-					++pos;
-			}
-			bool consume(char c) {
-				skipWs();
-				if (pos < json.size() && json[pos] == c) {
-					++pos;
-					return true;
-				}
-				return false;
-			}
-			void expect(char c) {
-				if (!consume(c))
-					throw std::runtime_error(std::string{"safetensors: malformed header, expected '"} + c + "'");
-			}
-			std::string string() {
-				expect('"');
-				std::string s;
-				while (pos < json.size() && json[pos] != '"') {
-					if (json[pos] == '\\')
-						++pos;
-					s += json[pos++];
-				}
-				expect('"');
-				return s;
-			}
-			int64_t number() {
-				skipWs();
-				size_t end = pos;
-				while (end < json.size() && (std::isdigit(static_cast<unsigned char>(json[end])) || json[end] == '-'))
-					++end;
-				int64_t value = std::stoll(std::string{json.substr(pos, end - pos)});
-				pos = end;
-				return value;
-			}
-			std::vector<int64_t> numbers() {
-				std::vector<int64_t> values;
-				expect('[');
-				while (!consume(']')) {
-					values.push_back(number());
-					consume(',');
-				}
-				return values;
-			}
-			void skipValue() {
-				skipWs();
-				int depth = 0;
-				bool inString = false;
-				for (; pos < json.size(); ++pos) {
-					char c = json[pos];
-					if (inString) {
-						if (c == '\\')
-							++pos;
-						else if (c == '"')
-							inString = false;
-					} else if (c == '"') {
-						inString = true;
-					} else if (c == '{' || c == '[') {
-						++depth;
-					} else if (c == '}' || c == ']') {
-						if (--depth == 0) {
-							++pos;
-							return;
-						}
-					} else if (depth == 0 && c == ',') {
-						return;
-					}
-				}
-			}
-			Entry entry() {
-				Entry e;
-				expect('{');
-				while (!consume('}')) {
-					std::string key = string();
-					expect(':');
-					if (key == "dtype") {
-						e.dtype = string();
-					} else if (key == "shape") {
-						e.shape = numbers();
-					} else if (key == "data_offsets") {
-						auto o = numbers();
-						if (o.size() != 2)
-							throw std::runtime_error("safetensors: malformed data_offsets");
-						e.offsets = {static_cast<uint64_t>(o[0]), static_cast<uint64_t>(o[1])};
-					} else {
-						skipValue();
-					}
-					consume(',');
-				}
-				return e;
-			}
-		};
-	} // namespace detail
-
-	/**
-	 * @brief Loads all float32 tensors of a `.safetensors` file.
-	 * @throws std::runtime_error if the file cannot be read or contains tensors of another data type.
-	 */
-	namespace detail {
-		template <typename T>
-		constexpr const char* safetensorsDtype() {
-			if constexpr (std::is_same_v<T, float>)
+		/** @brief The safetensors dtype of a DLPack data type (empty if unsupported). */
+		inline std::string safetensorsDtype(DLDataType t) {
+			if (t.lanes != 1)
+				return {};
+			if (t.code == kDLFloat && t.bits == 32)
 				return "F32";
-			else
+			if (t.code == kDLInt && t.bits == 32)
 				return "I32";
+			if (t.code == kDLUInt && t.bits == 8)
+				return "U8";
+			return {};
 		}
 
-		/**
-		 * @brief Reads the tensors of a safetensors file whose dtype matches T; tensors of other dtypes are skipped if
-		 * @p skipOthers, else they are an error.
-		 */
-		template <typename T>
-		std::map<std::string, BasicTensor<T>> readSafetensors(const std::string& path, bool skipOthers) {
-			std::ifstream in{path, std::ios::binary};
-			if (!in)
-				throw std::runtime_error("cannot open " + path);
-			uint64_t headerSize = 0;
-			in.read(reinterpret_cast<char*>(&headerSize), sizeof(headerSize)); // little endian
-			std::string header(headerSize, '\0');
-			in.read(header.data(), static_cast<std::streamsize>(headerSize));
-			std::vector<char> payload{std::istreambuf_iterator<char>(in), {}};
+		/** @brief An opened safetensors file: its header and the stream positioned anywhere. */
+		struct SafetensorsFile {
+			std::ifstream in;
+			std::map<std::string, SafetensorsEntry> entries;
+			uint64_t dataStart = 0;
+			uint64_t fileSize = 0;
 
+			explicit SafetensorsFile(const std::filesystem::path& path) : in(path, std::ios::binary) {
+				if (!in)
+					throw std::runtime_error("safetensors: cannot open " + path.string());
+				in.seekg(0, std::ios::end);
+				fileSize = static_cast<uint64_t>(in.tellg());
+				in.seekg(0);
+				uint64_t headerSize = 0;
+				in.read(reinterpret_cast<char*>(&headerSize), sizeof(headerSize)); // little endian
+				if (!in || headerSize > fileSize - sizeof(headerSize))
+					throw std::runtime_error("safetensors: " + path.string() + " is truncated");
+				std::string header(headerSize, '\0');
+				in.read(header.data(), static_cast<std::streamsize>(headerSize));
+				dataStart = sizeof(headerSize) + headerSize;
+				const auto json = nlohmann::json::parse(header);
+				for (const auto& [name, meta] : json.items()) {
+					if (name == "__metadata__")
+						continue;
+					SafetensorsEntry e{
+							.dtype = meta.at("dtype").get<std::string>(),
+							.shape = meta.at("shape").get<std::vector<int64_t>>(),
+							.begin = meta.at("data_offsets").at(0).get<uint64_t>(),
+							.end = meta.at("data_offsets").at(1).get<uint64_t>(),
+					};
+					if (e.begin > e.end || dataStart + e.end > fileSize)
+						throw std::runtime_error("safetensors: tensor " + name + " is out of bounds");
+					entries.emplace(name, std::move(e));
+				}
+			}
+
+			/** @brief Reads the data of @p e into @p dst (exactly e.end - e.begin bytes). */
+			void read(const SafetensorsEntry& e, void* dst) {
+				in.seekg(static_cast<std::streamoff>(dataStart + e.begin));
+				in.read(static_cast<char*>(dst), static_cast<std::streamsize>(e.end - e.begin));
+				if (!in)
+					throw std::runtime_error("safetensors: read failed");
+			}
+		};
+
+		template <typename T>
+		std::string safetensorsDtypeOf() {
+			return safetensorsDtype(dlDataType<T>());
+		}
+
+		template <typename T>
+		std::map<std::string, BasicTensor<T>> readSafetensors(const std::filesystem::path& path, bool skipOthers) {
+			SafetensorsFile file{path};
 			std::map<std::string, BasicTensor<T>> tensors;
-			for (auto& [name, entry] : SafetensorsHeaderParser{header}.parse()) {
-				if (entry.dtype != safetensorsDtype<T>()) {
+			for (const auto& [name, entry] : file.entries) {
+				if (entry.dtype != safetensorsDtypeOf<T>()) {
 					if (skipOthers)
 						continue;
 					throw std::runtime_error("safetensors: tensor " + name + " has unsupported dtype " + entry.dtype);
 				}
-				auto [begin, end] = entry.offsets;
-				if (end > payload.size() || begin > end)
-					throw std::runtime_error("safetensors: tensor " + name + " is out of bounds");
-				std::vector<T> data((end - begin) / sizeof(T));
-				std::memcpy(data.data(), payload.data() + begin, end - begin);
-				tensors.emplace(name, BasicTensor<T>{std::move(entry.shape), std::move(data)});
+				BasicTensor<T> t{entry.shape};
+				if (t.size() * sizeof(T) != entry.end - entry.begin)
+					throw std::runtime_error("safetensors: tensor " + name + " has an inconsistent size");
+				file.read(entry, t.data());
+				tensors.emplace(name, std::move(t));
 			}
 			return tensors;
 		}
 	} // namespace detail
 
+	/** @brief The entries of a safetensors file (names, dtypes, shapes) without reading the data. */
+	inline std::map<std::string, SafetensorsEntry> readSafetensorsHeader(const std::filesystem::path& path) {
+		return detail::SafetensorsFile{path}.entries;
+	}
+
 	/** @brief Loads all tensors of a safetensors file (all must be float32). */
-	inline std::map<std::string, Tensor> loadSafetensors(const std::string& path) {
+	inline std::map<std::string, Tensor> loadSafetensors(const std::filesystem::path& path) {
 		return detail::readSafetensors<float>(path, /*skipOthers=*/false);
 	}
 
@@ -311,9 +245,145 @@ namespace mdl::runtime {
 	 * skipped (e.g. to read the float weights and the int32 token ids of one file separately).
 	 */
 	template <typename T>
-	std::map<std::string, BasicTensor<T>> loadSafetensorsAs(const std::string& path) {
+	std::map<std::string, BasicTensor<T>> loadSafetensorsAs(const std::filesystem::path& path) {
 		return detail::readSafetensors<T>(path, /*skipOthers=*/true);
 	}
+
+	/**
+	 * @brief Writes tensors (contiguous, CPU) to a safetensors file, in the given order.
+	 * @param tensors (name, tensor) pairs; the dtypes float32, int32, and uint8 are supported.
+	 */
+	inline void saveSafetensors(
+			const std::filesystem::path& path, const std::vector<std::pair<std::string, const DLTensor*>>& tensors
+	) {
+		nlohmann::ordered_json header = nlohmann::ordered_json::object();
+		uint64_t offset = 0;
+		std::vector<uint64_t> sizes;
+		for (const auto& [name, t] : tensors) {
+			const std::string dtype = detail::safetensorsDtype(t->dtype);
+			if (dtype.empty())
+				throw std::runtime_error("safetensors: unsupported dtype of tensor " + name);
+			if (t->strides != nullptr)
+				throw std::runtime_error("safetensors: tensor " + name + " is not contiguous");
+			std::vector<int64_t> shape(t->shape, t->shape + t->ndim);
+			uint64_t bytes = (t->dtype.bits / 8) * std::accumulate(shape.begin(), shape.end(), uint64_t{1}, std::multiplies<>{});
+			header[name] = {{"dtype", dtype}, {"shape", shape}, {"data_offsets", {offset, offset + bytes}}};
+			sizes.push_back(bytes);
+			offset += bytes;
+		}
+		std::string json = header.dump();
+		json.append((8 - (json.size() % 8)) % 8, ' '); // the data section starts 8-byte aligned
+		std::ofstream out(path, std::ios::binary);
+		if (!out)
+			throw std::runtime_error("safetensors: cannot write " + path.string());
+		const uint64_t headerSize = json.size();
+		out.write(reinterpret_cast<const char*>(&headerSize), sizeof(headerSize));
+		out.write(json.data(), static_cast<std::streamsize>(json.size()));
+		for (size_t i = 0; i < tensors.size(); ++i) {
+			const DLTensor* t = tensors[i].second;
+			out.write(static_cast<const char*>(t->data) + t->byte_offset, static_cast<std::streamsize>(sizes[i]));
+		}
+		if (!out)
+			throw std::runtime_error("safetensors: write failed for " + path.string());
+	}
+
+	// ── weights of compiled models ──────────────────────────────────────────────────────────────────────────────
+	// `Model` is a struct of a generated C++ header (e.g. mdl::models::Bert): `Model::Weights` has one DLTensor slot per
+	// weight, `Model::Weights::infos` lists their paths, shapes, and dtypes, and `find(path)` returns a slot.
+
+	/** @brief The weights of a model loaded from a file: the bound slots (`weights`) and the memory they point to. */
+	template <typename Model>
+	struct LoadedWeights {
+		typename Model::Weights weights;
+		/** @brief Tensors of the file that are not weights of the model (after the name mapping). */
+		std::vector<std::string> unused;
+
+		/** @brief The memory the slots point to (map nodes do not move, so moving LoadedWeights keeps them valid). */
+		std::map<std::string, BasicTensor<float>> floats;
+		std::map<std::string, BasicTensor<int32_t>> ints;
+
+		LoadedWeights() = default;
+		LoadedWeights(const LoadedWeights&) = delete; // the slots point into this object's tensors
+		LoadedWeights(LoadedWeights&&) = default;
+		LoadedWeights& operator=(const LoadedWeights&) = delete;
+		LoadedWeights& operator=(LoadedWeights&&) = default;
+	};
+
+	/**
+	 * @brief Loads the weights of @p Model from a safetensors file and binds them.
+	 * @details Every weight of the model must be in the file with the declared dtype and shape (dimensions that are only
+	 * known at runtime match any size); all problems are reported together. Tensors of the file that are not weights of
+	 * the model are listed in LoadedWeights::unused.
+	 * @param map optional mapping of the file's tensor names onto the model's weight paths (e.g. from a Hugging Face
+	 * checkpoint); an empty result skips the tensor.
+	 */
+	template <typename Model>
+	LoadedWeights<Model> loadWeights(const std::filesystem::path& path, const NameMap& map = {}) {
+		detail::SafetensorsFile file{path};
+		LoadedWeights<Model> result;
+		std::map<std::string, const SafetensorsEntry*> byPath;
+		for (const auto& [name, entry] : file.entries) {
+			std::string target = map ? map(name) : name;
+			if (target.empty())
+				continue;
+			if (result.weights.find(target) == nullptr) {
+				result.unused.push_back(name);
+				continue;
+			}
+			byPath.emplace(std::move(target), &entry);
+		}
+
+		std::string problems;
+		for (const auto& info : Model::Weights::infos) {
+			auto it = byPath.find(info.name);
+			if (it == byPath.end()) {
+				problems += std::string("\n  missing: ") + info.name;
+				continue;
+			}
+			const SafetensorsEntry& e = *it->second;
+			const std::string dtype = detail::safetensorsDtype(info.dtype);
+			bool shapeOk = static_cast<int32_t>(e.shape.size()) == info.ndim;
+			for (int32_t d = 0; shapeOk && d < info.ndim; ++d)
+				shapeOk = info.shape[d] < 0 || info.shape[d] == e.shape[d];
+			if (e.dtype != dtype || !shapeOk) {
+				std::string fileShape, modelShape;
+				for (auto d : e.shape)
+					fileShape += (fileShape.empty() ? "" : ", ") + std::to_string(d);
+				for (int32_t d = 0; d < info.ndim; ++d)
+					modelShape += (d > 0 ? ", " : "") + std::to_string(info.shape[d]);
+				problems += std::string("\n  ") + info.name + ": file has " + e.dtype + "[" + fileShape + "], model expects " +
+							dtype + "[" + modelShape + "]";
+				continue;
+			}
+			auto bind = [&](auto& storage, auto tensor) {
+				file.read(e, tensor.data());
+				auto& stored = storage.emplace(info.name, std::move(tensor)).first->second;
+				*result.weights.find(info.name) = stored.dl();
+			};
+			if (dtype == "I32")
+				bind(result.ints, BasicTensor<int32_t>{e.shape});
+			else
+				bind(result.floats, BasicTensor<float>{e.shape});
+		}
+		if (!problems.empty())
+			throw std::runtime_error("loading the weights from " + path.string() + " failed:" + problems);
+		return result;
+	}
+
+	/** @brief Writes the (bound) weights of @p Model to a safetensors file, in canonical order. */
+	template <typename Model>
+	void saveWeights(const std::filesystem::path& path, const typename Model::Weights& weights) {
+		std::vector<std::pair<std::string, const DLTensor*>> tensors;
+		auto& slots = const_cast<typename Model::Weights&>(weights);
+		for (const auto& info : Model::Weights::infos) {
+			const DLTensor* t = *slots.find(info.name);
+			if (t == nullptr)
+				throw std::runtime_error(std::string("saveWeights: weight ") + info.name + " is not bound");
+			tensors.emplace_back(info.name, t);
+		}
+		saveSafetensors(path, tensors);
+	}
+
 } // namespace mdl::runtime
 
 #endif

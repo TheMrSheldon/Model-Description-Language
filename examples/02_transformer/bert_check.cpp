@@ -16,18 +16,13 @@ using Model = mdl::models::Bert;
 
 int main(int argc, char** argv) {
 	const std::string path = argc > 1 ? argv[1] : MDL_BERT_REFERENCE;
+	// The weights are loaded directly into Model::Weights (with dtype and shape checks); the file also contains the
+	// inputs and the reference output, which are not weights of the model.
+	auto loaded = mdl::runtime::loadWeights<Model>(path);
+	const auto& weights = loaded.weights;
 	auto floats = mdl::runtime::loadSafetensorsAs<float>(path);
 	auto ints = mdl::runtime::loadSafetensorsAs<int32_t>(path);
-
-	Model::Weights weights;
-	for (const auto& info : Model::Weights::infos) {
-		auto it = floats.find(info.name);
-		if (it == floats.end()) {
-			std::printf("FAILED: missing weight %s in %s\n", info.name, path.c_str());
-			return 1;
-		}
-		*weights.find(info.name) = it->second;
-	}
+	std::printf("loaded %zu weights (%zu other tensors in the file)\n", Model::Weights::infos.size(), loaded.unused.size());
 	auto& ids = ints.at("input.ids");
 	auto& types = ints.at("input.types");
 	auto& positions = ints.at("input.positions");
