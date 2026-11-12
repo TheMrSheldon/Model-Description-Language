@@ -403,6 +403,8 @@ namespace mdl::shapes {
 		}
 	}
 
+	void Oracle::assume(const Node& node, Shape shape) { impl->inference.result.of[&node] = std::move(shape); }
+
 	std::expected<Shapes, std::string> infer(
 			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
 			const std::unordered_map<const Node*, Shape>& known

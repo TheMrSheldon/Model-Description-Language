@@ -42,7 +42,10 @@ namespace mdl::backend::tvm {
 		bool context = false;		  ///< whether the function takes a context buffer (as its last argument)
 		/** @brief For the producer: global symbol of the size function to emit (`dims... -> bytes`); else empty. */
 		std::string sizeSymbol;
-		/** @brief The arguments of the size function (the symbolic dimensions of `...`). */
+		/**
+		 * @brief The symbolic dimensions of `...` (the arguments of the size function). The producer writes them into
+		 * the header of the context buffer; the consumer reads those that its other arguments do not determine.
+		 */
 		::tvm::ffi::Array<::tvm::tirx::Var> dims;
 	};
 

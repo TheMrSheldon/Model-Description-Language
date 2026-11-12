@@ -70,8 +70,13 @@ namespace mdl::autodiff {
 	 *
 	 * @param numOutputs the number of outputs of the differentiated function (the first outputs of @p vjp; its last
 	 * @p numOutputs parameters are the cotangents).
+	 * @param checkpoint module instances (gitignore-style patterns over their paths, e.g. `encoder.layers.*`) whose
+	 * computations are recomputed in the backward pass instead of being saved (gradient checkpointing): only their
+	 * inputs are saved. nullptr for none.
 	 */
-	std::expected<Split, std::string> split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs);
+	std::expected<Split, std::string> split(
+			Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint = nullptr
+	);
 
 } // namespace mdl::autodiff
 

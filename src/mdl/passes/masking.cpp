@@ -8,6 +8,7 @@
 #include <map>
 #include <numeric>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace mdl::masking {
@@ -36,11 +37,55 @@ namespace mdl::masking {
 			const Node& rebuild(const Node& node) {
 				if (auto it = memo.find(&node); it != memo.end())
 					return *it->second;
+				const bool outer = std::exchange(inserted, false);
 				const Node& result = std::holds_alternative<InvocationNode>(node)
 											 ? rebuildInvocation(node, std::get<InvocationNode>(node))
 											 : node;
+				if (inserted)
+					maskedNodes.insert(&node); // masking was inserted at this node
+				inserted = outer;
 				memo.emplace(&node, &result);
 				return result;
+			}
+
+			/**
+			 * @brief Records the module calls of the rebuilt function for the new nodes (see ModuleCall). A call whose
+			 * computation got masking loses its custom gradient (which does not know the mask).
+			 */
+			void propagateModuleCalls() {
+				std::vector<const ModuleCall*> calls;
+				for (const auto& [original, rebuilt] : memo)
+					for (const ModuleCall* call : graph.moduleCallsProducing(*original))
+						if (std::find(calls.begin(), calls.end(), call) == calls.end())
+							calls.push_back(call);
+				for (const ModuleCall* call : calls) {
+					ModuleCall copy = *call;
+					bool complete = true;
+					for (auto* nodes : {&copy.inputs, &copy.outputs})
+						for (auto& n : *nodes) {
+							auto it = memo.find(n);
+							complete &= it != memo.end();
+							if (it != memo.end())
+								n = it->second;
+						}
+					if (!complete)
+						continue;
+					// The call's computation: the nodes between its outputs and its inputs.
+					std::unordered_set<const Node*> stop(call->inputs.begin(), call->inputs.end()), seen;
+					std::vector<const Node*> stack(call->outputs.begin(), call->outputs.end());
+					while (!stack.empty() && copy.customGradient) {
+						const Node* n = stack.back();
+						stack.pop_back();
+						if (stop.contains(n) || !seen.insert(n).second)
+							continue;
+						if (maskedNodes.contains(n))
+							copy.customGradient = false;
+						if (const auto* inv = std::get_if<InvocationNode>(n))
+							for (const auto& a : inv->arguments)
+								stack.push_back(&a.get());
+					}
+					graph.addModuleCall(std::move(copy));
+				}
 			}
 
 			/** @brief Zero at the masked positions of an output (if it has masked dimensions). */
@@ -59,6 +104,8 @@ namespace mdl::masking {
 			std::vector<std::string> batchSymbols;
 			shapes::Dim merged; ///< all dimensions of `...` flattened into one
 			std::unordered_map<const Node*, const Node*> memo;
+			std::unordered_set<const Node*> maskedNodes; ///< original nodes at which masking was inserted
+			bool inserted = false;						 ///< whether masking was inserted while rebuilding a node
 			std::map<std::string, const Node*> maskCache;
 
 			const shapes::Shape& shapeOf(const Node& node) const {
@@ -155,6 +202,7 @@ namespace mdl::masking {
 					if (c != nullptr && std::holds_alternative<double>(c->value) && std::get<double>(c->value) == value)
 						return x;
 				}
+				inserted = true;
 				return graph.addInvocationNode(FIDs::WHERE, getDataType(x), {cond, x, graph.addConstNode(Atomic{value})});
 			}
 
@@ -265,6 +313,7 @@ namespace mdl::masking {
 					return graph.addInvocationNode(inv.id, inv.type, std::vector<NodeRef>(args));
 				}
 				case FIDs::MASK_OF: { // x.mask: 1.0 at the valid elements, 0.0 at the masked ones
+					inserted = true;
 					const auto& s = argShape(0);
 					auto dims = maskedDims(s);
 					if (dims.empty())
@@ -300,6 +349,7 @@ namespace mdl::masking {
 			result.outputs.clear();
 			for (const auto& output : func.outputs)
 				result.outputs.push_back(std::cref(masker.maskOutput(output.get(), masker.rebuild(output.get()))));
+			masker.propagateModuleCalls();
 		} catch (const MaskError& e) {
 			return std::unexpected(func.name + ": " + e.message);
 		}

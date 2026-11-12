@@ -36,6 +36,11 @@ namespace mdl {
 		std::string function;
 		std::vector<const Node*> inputs;
 		std::vector<const Node*> outputs;
+		/**
+		 * @brief Whether the gradient pass may use the module's custom `gradient` function for this call (false e.g.
+		 * after the masking pass inserted masking into the call's computation, which the custom gradient ignores).
+		 */
+		bool customGradient = true;
 
 		/** @brief The fully qualified path of the instance's weight @p weight (a path relative to the module). */
 		std::string weightPath(const std::string& weight) const { return path.empty() ? weight : path + "." + weight; }

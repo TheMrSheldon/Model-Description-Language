@@ -333,7 +333,7 @@ namespace mdl::autodiff {
 		std::optional<CustomCall> customCallProducing(const Computegraph& graph, const Node& node) {
 			std::optional<CustomCall> best;
 			for (const ModuleCall* call : graph.moduleCallsProducing(node)) {
-				if (call->module == nullptr)
+				if (call->module == nullptr || !call->customGradient)
 					continue;
 				auto fn = call->module->functions.find(customGradientName(call->function));
 				if (fn == call->module->functions.end())
@@ -548,6 +548,10 @@ namespace mdl::autodiff {
 				const Node& cotangent = graph.addInputNode(type, "d_" + name);
 				grad.parameters.emplace_back("d_" + name, std::cref(std::get<InputNode>(cotangent)));
 				seed = &cotangent;
+				// The cotangent has the exact shape of the output (whose `...` may have fewer dimensions).
+				if (options.shapes != nullptr)
+					if (const shapes::Shape* s = options.shapes->shapeOf(func.outputs[i].get()))
+						options.shapes->assume(cotangent, *s);
 			} else if (isScalar(type)) {
 				seed = &b.constant(1.0);
 			}
@@ -613,7 +617,9 @@ namespace mdl::autodiff {
 		return grad;
 	}
 
-	std::expected<Split, std::string> split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs) {
+	std::expected<Split, std::string> split(
+			Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint
+	) {
 		if (vjp.parameters.size() < numOutputs || vjp.outputs.size() < numOutputs)
 			return std::unexpected(vjp.name + ": not a gradient function with " + std::to_string(numOutputs) + " output(s)");
 		const size_t numInputs = vjp.parameters.size() - numOutputs;
@@ -657,6 +663,68 @@ namespace mdl::autodiff {
 			}
 		};
 
+		// Checkpointing: the computations of the selected module calls are recomputed; their inputs are saved.
+		std::unordered_set<const Node*> recompute, boundary;
+		if (checkpoint != nullptr) {
+			std::unordered_set<const Node*> seen;
+			std::vector<const Node*> stack;
+			for (const auto& out : vjp.outputs)
+				stack.push_back(&out.get());
+			std::vector<const ModuleCall*> calls;
+			while (!stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!seen.insert(n).second)
+					continue;
+				for (const ModuleCall* call : graph.moduleCallsProducing(*n))
+					if (!call->path.empty() && checkpoint->selects(call->path) &&
+						std::find(calls.begin(), calls.end(), call) == calls.end())
+						calls.push_back(call);
+				if (const auto* inv = std::get_if<InvocationNode>(n))
+					for (const auto& a : inv->arguments)
+						stack.push_back(&a.get());
+			}
+			// Only the outermost selected calls define the boundaries (the calls nested in them are recomputed with them).
+			auto nested = [&](const ModuleCall* call) {
+				return std::any_of(calls.begin(), calls.end(), [&](const ModuleCall* other) {
+					return other != call && call->path.starts_with(other->path + ".");
+				});
+			};
+			std::erase_if(calls, nested);
+			for (const ModuleCall* call : calls) {
+				boundary.insert(call->inputs.begin(), call->inputs.end());
+				std::unordered_set<const Node*> stop(call->inputs.begin(), call->inputs.end()), internal;
+				std::vector<const Node*> work(call->outputs.begin(), call->outputs.end());
+				while (!work.empty()) {
+					const Node* n = work.back();
+					work.pop_back();
+					if (stop.contains(n) || !internal.insert(n).second)
+						continue;
+					recompute.insert(n);
+					if (const auto* inv = std::get_if<InvocationNode>(n))
+						for (const auto& a : inv->arguments)
+							work.push_back(&a.get());
+				}
+			}
+		}
+
+		// The nodes of the forward computation (the others were created by the gradient pass).
+		std::unordered_set<const Node*> forward;
+		if (checkpoint != nullptr) {
+			std::vector<const Node*> stack;
+			for (size_t i = 0; i < numOutputs; ++i)
+				stack.push_back(&vjp.outputs[i].get());
+			while (!stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!forward.insert(n).second)
+					continue;
+				if (const auto* inv = std::get_if<InvocationNode>(n))
+					for (const auto& a : inv->arguments)
+						stack.push_back(&a.get());
+			}
+		}
+
 		// The residuals: the frontier of primal, input-dependent values that the backward computation reaches.
 		std::vector<const Node*> residuals;
 		std::unordered_set<const Node*> visited;
@@ -666,7 +734,11 @@ namespace mdl::autodiff {
 			auto [cot, inp] = dependencies(node);
 			if (!cot && !inp)
 				return; // depends only on weights and constants: recomputed
-			if (cot || cheap(node)) {
+			// (Only computed values are recomputed; inputs used in the region, e.g. the mask, are saved. With
+			// checkpointing, the values the gradient pass computes from forward values are recomputed as well.)
+			const bool recomputed = std::holds_alternative<InvocationNode>(node) && !boundary.contains(&node) &&
+									(recompute.contains(&node) || (checkpoint != nullptr && !forward.contains(&node)));
+			if (cot || cheap(node) || recomputed) {
 				if (const auto* inv = std::get_if<InvocationNode>(&node))
 					for (const auto& arg : inv->arguments)
 						visit(arg.get());

@@ -189,6 +189,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			size_t numPacked = 0; ///< packed outputs (producer: the last ones) or inputs (consumer: the first ones)
 			size_t firstGradient = std::numeric_limits<size_t>::max(); ///< index of the first gradient output
 			std::vector<std::string> gradientOf = {};				   ///< what the gradient outputs are gradients of
+			std::map<std::string, shapes::Shape> cotangents = {};	   ///< the exact shapes of its cotangent inputs
 		};
 		std::vector<Function> functions;
 		auto requested = [&](const std::string& name) {
@@ -197,9 +198,12 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		auto evaluate = [&](const Node& n) { return evalConstant(n, argvals); };
 
 		// The shapes of the inputs whose `...` has fewer dimensions (the leading ones of the function's `...`).
+		// Exact shapes of the cotangent inputs of a gradient function by name (`d_<output>`: the output's shape).
+		using CotangentShapes = std::map<std::string, shapes::Shape>;
+		CotangentShapes cotangentShapes; // of the gradient function being built (see knownInputs)
 		auto knownInputs = [&](const FunctionDecl& f) {
 			std::unordered_map<const Node*, shapes::Shape> known;
-			if (inputRanks.empty())
+			if (inputRanks.empty() && cotangentShapes.empty())
 				return known;
 			std::unordered_set<const Node*> seen;
 			std::vector<const Node*> stack;
@@ -216,6 +220,11 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 					continue;
 				}
 				const auto* in = std::get_if<InputNode>(n);
+				if (in != nullptr)
+					if (auto c = cotangentShapes.find(in->name); c != cotangentShapes.end()) {
+						known.emplace(n, c->second);
+						continue;
+					}
 				auto rank = in ? inputRanks.find(in->name) : inputRanks.end();
 				const auto* t = in ? std::get_if<TensorType>(&in->type) : nullptr;
 				if (rank == inputRanks.end() || t == nullptr)
@@ -288,6 +297,12 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			const FunctionDecl& original = *it->second;
 			// Exact shapes for the compiled `...` rank, so that the gradient pass does not depend on imprecise types.
 			shapes::Oracle oracle{ellipsisRank, evaluate, knownInputs(original)};
+			// The cotangents `d_<output>` get the outputs' exact shapes (their `...` may have fewer dimensions).
+			cotangentShapes.clear();
+			if (autodiff::numCotangents(original) > 0)
+				for (size_t i = 0; i < original.outputs.size(); ++i)
+					if (const shapes::Shape* s = oracle.shapeOf(original.outputs[i].get()))
+						cotangentShapes["d_" + (original.outputs.size() == 1 ? std::string{"output"} : "output" + std::to_string(i))] = *s;
 			autodiff::Options options = gradients.options;
 			options.shapes = &oracle;
 			auto grad = autodiff::vjp(unit.graph(), original, order, options);
@@ -341,10 +356,13 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 						gradientOf.push_back(pname);
 
 			if (autodiff::numCotangents(original) == 0 || gradients.fused) {
-				functions.push_back({name, &vjp, std::nullopt, 0, original.outputs.size(), gradientOf});
+				functions.push_back({name, &vjp, std::nullopt, 0, original.outputs.size(), gradientOf, cotangentShapes});
 				continue;
 			}
-			auto parts = autodiff::split(unit.graph(), vjp, original.outputs.size());
+			const PathPatterns checkpoint{gradients.checkpoint};
+			auto parts = autodiff::split(
+					unit.graph(), vjp, original.outputs.size(), gradients.checkpoint.empty() ? nullptr : &checkpoint
+			);
 			if (!parts)
 				throw std::runtime_error(moduleName + "." + parts.error());
 			ContextBuffer context{
@@ -358,13 +376,14 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			context.producer = false;
 			functions.push_back(
 					{name + "_backward", &unit.keep(std::move(parts->backward)), context, parts->numResiduals, 0,
-					 gradientOf}
+					 gradientOf, cotangentShapes}
 			);
 		}
 
 		for (const auto& function : functions) {
 			const std::string& funcName = function.name;
 			const FunctionDecl* declPtr = function.decl;
+			cotangentShapes = function.cotangents; // (for knownInputs and the input signatures)
 			const FunctionDecl& decl = *declPtr;
 			if (!decl.templateParameters.empty())
 				continue;
@@ -403,13 +422,21 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			for (const auto& [pname, input] : decl.parameters) {
 				auto it = inputNodes.find(&input.get());
 				auto rank = inputRanks.find(pname);
-				const bool smaller = rank != inputRanks.end() && rank->second < ellipsisRank;
+				bool smaller = rank != inputRanks.end() && rank->second < ellipsisRank;
+				unsigned inputRank = smaller ? rank->second : ellipsisRank;
+				if (auto c = cotangentShapes.find(pname); c != cotangentShapes.end()) {
+					// A cotangent: the leading symbolic dimensions of the output's shape are its `...`.
+					unsigned symbolic = 0;
+					while (symbolic < c->second.size() && !c->second[symbolic].isConstant())
+						++symbolic;
+					smaller = symbolic < ellipsisRank;
+					inputRank = symbolic;
+				}
 				fn.inputs.push_back(makeSignature(
-						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals,
-						smaller ? rank->second : ellipsisRank
+						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals, inputRank
 				));
 				if (smaller)
-					fn.inputs.back().ellipsisRank = static_cast<int>(rank->second);
+					fn.inputs.back().ellipsisRank = static_cast<int>(inputRank);
 			}
 			auto rank = [&](const Node* node) {
 				const auto& name = std::get<ParameterNode>(*node).name;

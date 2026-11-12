@@ -103,6 +103,11 @@ namespace mdl {
 		bool fused = false;
 		/** @brief Whether gradient outputs are added to the caller's buffers (true) or overwrite them. */
 		bool accumulate = true;
+		/**
+		 * @brief Gradient checkpointing: module instances (patterns over their paths) whose computations the backward
+		 * pass recomputes instead of saving them (see autodiff::split); empty for none.
+		 */
+		std::vector<std::string> checkpoint = {};
 	};
 
 	/**

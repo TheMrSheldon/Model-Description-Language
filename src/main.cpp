@@ -48,6 +48,7 @@ struct CompileArgs {
 	bool gradOverwrite = false;
 	std::vector<std::string> maskFunctions;
 	std::vector<std::string> ellipsisRanks;
+	std::vector<std::string> checkpoint;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -93,7 +94,8 @@ static void runCompileCommand(const CompileArgs& args) {
 	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
 	mdl::GradientRequest gradients{
-			.functions = args.gradFunctions, .options = {}, .fused = args.gradFused, .accumulate = !args.gradOverwrite
+			.functions = args.gradFunctions, .options = {}, .fused = args.gradFused, .accumulate = !args.gradOverwrite,
+			.checkpoint = args.checkpoint
 	};
 	{
 		std::vector<std::string> patterns = args.trainable;
@@ -184,6 +186,12 @@ int main(int argc, char* argv[]) {
 			"Make this member function masked: it takes an additional input mask: bool[...] (true: valid), and masked "
 			"positions in the last dimension of `...` (e.g. the padding of shorter sequences) do not influence the "
 			"valid results; outputs are zero at masked positions. Repeatable."
+	);
+	app.add_option(
+			"--checkpoint", args.checkpoint,
+			"Gradient checkpointing: the module instances matching this gitignore-style pattern over their paths "
+			"(e.g. 'encoder.layers.*') save only their inputs; the backward pass recomputes their computations. "
+			"Repeatable."
 	);
 	app.add_flag(
 			"--grad-overwrite", args.gradOverwrite,

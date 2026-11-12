@@ -72,3 +72,11 @@ target_link_libraries(02_transformer_cls_train PRIVATE bert_cls_train_model)
 target_compile_definitions(02_transformer_cls_train PRIVATE MDL_CLS_TRAIN
 	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_cls.safetensors")
 add_test(NAME example_02_transformer_cls_train COMMAND 02_transformer_cls_train)
+
+# The same with gradient checkpointing: the encoder layers save only their inputs, the backward pass recomputes them.
+mdl_add_model(transformer_model_grad_checkpoint SOURCE model.dlm CONFIG model_grad.yml
+	OPTIONS --ellipsis-rank 2 --mask forward --grad forward --checkpoint "layers.*")
+add_executable(02_transformer_grad_checkpoint grad_check.cpp)
+target_compile_definitions(02_transformer_grad_checkpoint PRIVATE MDL_GRAD_MASKED)
+target_link_libraries(02_transformer_grad_checkpoint PRIVATE transformer_model_grad_checkpoint)
+add_test(NAME example_02_transformer_grad_checkpoint COMMAND 02_transformer_grad_checkpoint)

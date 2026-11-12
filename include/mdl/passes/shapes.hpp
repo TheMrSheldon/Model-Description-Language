@@ -81,6 +81,9 @@ namespace mdl::shapes {
 		/** @brief The shape of @p node, or nullptr if it cannot be inferred. */
 		const Shape* shapeOf(const Node& node);
 
+		/** @brief Declares the shape of @p node (e.g. of an input whose declared type is imprecise). */
+		void assume(const Node& node, Shape shape);
+
 	private:
 		struct Impl;
 		std::unique_ptr<Impl> impl;

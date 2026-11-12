@@ -581,11 +581,13 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 	}
 	if (std::getenv("MDL_VERIFY_SHAPES"))
 		verifyShapes(fn, cache, argVals, ellipsisRank);
-	if (fn.context && fn.context->producer) {
-		contexts[fn.context->name] = produced;
-		packing.sizeSymbol = fn.context->sizeSymbol;
+	if (fn.context) {
 		for (const auto& var : ctx.ellipsis)
 			packing.dims.push_back(var);
+		if (fn.context->producer) {
+			contexts[fn.context->name] = produced;
+			packing.sizeSymbol = fn.context->sizeSymbol;
+		}
 	}
 	::tvm::relax::Var outputVar = results.size() == 1 ? bb->EmitOutput(results[0], "output")
 													  : bb->EmitOutput(::tvm::relax::Tuple(results), "output");

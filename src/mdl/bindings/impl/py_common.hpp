@@ -41,6 +41,12 @@ namespace mdl::bindings {
 		 * for most frameworks.
 		 */
 		virtual std::string toFfiArg(const std::string& expr) const { return expr; }
+
+		/** @brief Additional methods of the class of @p module (e.g. autograd integration). */
+		virtual void classExtras(std::ostream& /*out*/, const std::string& /*module*/, const std::vector<ExportedFunction>& /*exports*/) const {}
+
+		/** @brief Additional code at the end of the file. */
+		virtual void fileExtras(std::ostream& /*out*/, const std::vector<ExportedFunction>& /*exports*/) const {}
 	};
 
 } // namespace mdl::bindings
@@ -131,5 +137,7 @@ inline void mdl::bindings::PyBindingGenerator::generate(
 				out << (i > 0 ? ", " : "") << args[i];
 			out << ")\n";
 		}
+		classExtras(out, module, exports);
 	}
+	fileExtras(out, exports);
 }

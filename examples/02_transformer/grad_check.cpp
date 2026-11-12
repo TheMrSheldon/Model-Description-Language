@@ -77,6 +77,7 @@ int main() {
 
 	// The required size grows with the dimensions; a buffer for larger dimensions is reused.
 	const size_t needed = Model::forward_ctx_size(batch, seq);
+	std::printf("context buffer: %zu bytes for batch %lld, seq %lld\n", needed, (long long)batch, (long long)seq);
 	if (needed == 0 || needed > Model::forward_ctx_size(batch, 2 * seq) || needed > Model::forward_ctx_size(2 * batch, seq))
 		fail("context size does not grow with the dimensions");
 	auto ctx = Model::forward_ctx_alloc(batch + 1, 2 * seq);

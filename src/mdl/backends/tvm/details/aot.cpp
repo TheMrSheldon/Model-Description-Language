@@ -10,6 +10,7 @@
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -62,7 +63,7 @@ namespace mdl::backend::tvm {
 
 			tirx::PrimFunc build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
 				if (packing != nullptr && packing->context)
-					beginContext();
+					beginContext(packing->dims);
 				for (size_t p = 0; p < func->params.size(); ++p) {
 					const auto& param = func->params[p];
 					const auto* info = tensorInfo(relax::GetStructInfo(param));
@@ -109,7 +110,7 @@ namespace mdl::backend::tvm {
 				}
 
 				if (packing != nullptr && packing->context)
-					endContext();
+					endContext(packing->sizeSymbol.empty() ? Role::Consumer : Role::Producer);
 
 				for (const auto& block : seq->blocks)
 					for (const auto& binding : block->bindings)
@@ -126,16 +127,89 @@ namespace mdl::backend::tvm {
 						copy(v.buffer, outputs[i]);
 				}
 
+				const std::string bodySymbol = headerDims.empty() ? symbol : symbol + "_impl";
+				auto attrs = ::tvm::DictAttrs(
+						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(bodySymbol)},
+						 {tirx::attr::kNoAlias, ::tvm::Bool(true)},
+						 {kAOTEntryAttr, ::tvm::Bool(true)}}
+				);
+				auto body = tirx::PrimFunc(
+						params, stmts.empty() ? tirx::Stmt(tirx::Evaluate(0)) : tirx::SeqStmt::Flatten(stmts),
+						::tvm::VoidType(), bufferMap, attrs
+				);
+				functions.emplace_back(bodySymbol, body);
+				if (!headerDims.empty())
+					functions.emplace_back(symbol, wrapForHeaderDims(body, bodySymbol, symbol));
+				return body;
+			}
+
+			/** @brief The PrimFuncs to add (the entry, plus its inner function if dimensions come from the header). */
+			std::vector<std::pair<std::string, tirx::PrimFunc>> functions;
+
+			/**
+			 * @brief The exported entry of a consumer whose dimensions partly come from the context header: it takes the
+			 * arguments of @p inner without those dimensions, reads them from the header, and calls @p inner.
+			 */
+			tirx::PrimFunc wrapForHeaderDims(const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol) {
+				// Fresh variables for the outer function (its buffers have the same shapes as the inner ones).
+				::tvm::ffi::Map<tirx::Var, PrimExpr> rename;
+				auto fresh = [&](const tirx::Var& v) -> tirx::Var {
+					if (auto it = rename.find(v); it != rename.end())
+						return ::tvm::Downcast<tirx::Var>((*it).second);
+					tirx::Var copy(v->name_hint, v->dtype);
+					rename.Set(v, copy);
+					return copy;
+				};
+				Array<tirx::Var> outerParams;
+				::tvm::ffi::Map<tirx::Var, tirx::Buffer> outerBuffers;
+				Array<PrimExpr> callArgs{tirx::StringImm(innerSymbol)};
+				tirx::Buffer outerContext;
+				for (const auto& p : inner->params) {
+					auto buffer = inner->buffer_map.Get(p);
+					if (!buffer) { // a dimension from the header
+						callArgs.push_back(fresh(p));
+						continue;
+					}
+					Array<PrimExpr> shape;
+					for (const auto& d : buffer.value()->shape) {
+						for (const auto& v : tirx::UndefinedVars(d))
+							fresh(v);
+						shape.push_back(tirx::Substitute(d, rename));
+					}
+					auto handle = tirx::Var(p->name_hint, DataType::Handle());
+					auto outer = tirx::decl_buffer(shape, buffer.value()->dtype, buffer.value()->name);
+					outerParams.push_back(handle);
+					outerBuffers.Set(handle, outer);
+					if (p.same_as(contextHandle))
+						outerContext = outer;
+					Array<PrimExpr> dims;
+					for (const auto& d : shape)
+						dims.push_back(::tvm::cast(DataType::Int(64), d));
+					callArgs.push_back(tirx::Call(
+							DataType::Handle(), tirx::builtin::tvm_stack_make_array(),
+							{outer->data, tirx::Call(DataType::Handle(), tirx::builtin::tvm_stack_make_shape(), dims),
+							 IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), static_cast<int>(shape.size())),
+							 tirx::make_zero(outer->dtype), IntImm(DataType::Int(64), 0)}
+					));
+				}
+				auto words = tirx::Buffer(
+						outerContext->data, DataType::Int(64), {::tvm::floordiv(outerContext->shape[0], 8)}, {},
+						IntImm(DataType::Int(64), 0), "ctx_words", 0, 0, tirx::BufferType::kDefault
+				);
+				std::vector<tirx::Stmt> body{tirx::DeclBuffer(words)};
+				for (const auto& [slot, dim] : headerDims) {
+					PrimExpr value = tirx::BufferLoad(words, {IntImm(DataType::Int(64), slot)});
+					if (dim.dtype() != DataType::Int(64))
+						value = ::tvm::cast(dim.dtype(), value);
+					body.push_back(tirx::Bind(fresh(dim), value));
+				}
+				body.push_back(tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs)));
 				auto attrs = ::tvm::DictAttrs(
 						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)},
 						 {tirx::attr::kNoAlias, ::tvm::Bool(true)},
 						 {kAOTEntryAttr, ::tvm::Bool(true)}}
 				);
-				return tirx::PrimFunc(
-						params, stmts.empty() ? tirx::Stmt(tirx::Evaluate(0)) : tirx::SeqStmt::Flatten(stmts),
-						::tvm::VoidType(), bufferMap,
-						attrs
-				);
+				return tirx::PrimFunc(outerParams, tirx::SeqStmt::Flatten(body), ::tvm::VoidType(), outerBuffers, attrs);
 			}
 
 			/** @brief The size of the context buffer in bytes (valid after build with packing). */
@@ -160,43 +234,90 @@ namespace mdl::backend::tvm {
 
 			static PrimExpr alignTo64(PrimExpr bytes) { return ::tvm::floordiv(bytes + 63, 64) * 64; }
 
-			void beginContext() {
+			enum class Role { Producer, Consumer };
+			static constexpr int64_t kHeaderBytes = 64; ///< the runtime dimensions as int64 (at most 8)
+			Array<tirx::Var> contextDims;
+			tirx::Buffer header;
+			std::vector<const tirx::VarNode*> boundByParams; ///< dimension variables of the (non-packed) parameters
+
+			void beginContext(const Array<tirx::Var>& dims) {
 				contextHandle = tirx::Var("ctx_handle", DataType::Handle());
 				context = tirx::decl_buffer({tirx::Var("ctx_bytes", DataType::Int(64))}, DataType::UInt(8), "ctx");
+				contextDims = dims;
+				// The context memory is only accessed as int64 words (one element type, as TIR's storage rewriting
+				// requires): the header (the runtime dimensions) and the addresses of the packed tensors, which follow it.
+				header = tirx::Buffer(
+						context->data, DataType::Int(64), {::tvm::floordiv(context->shape[0], 8)}, {},
+						IntImm(DataType::Int(64), 0), "ctx_words", 0, 0, tirx::BufferType::kDefault
+				);
+				stmts.push_back(tirx::DeclBuffer(header));
+				contextSize = IntImm(DataType::Int(64), kHeaderBytes);
 			}
 
-			/** @brief Places the next packed tensor in the context buffer. */
+			std::vector<tirx::Stmt> contextStmts; ///< the declarations of the packed tensors (after the prologue)
+			std::vector<std::pair<int64_t, tirx::Var>> headerDims; ///< (header slot, dimension) read by the outer entry
+
+			/** @brief Places the next packed tensor in the context buffer (its own pointer to its 64-byte aligned offset). */
 			tirx::Buffer packedView(const relax::TensorStructInfoNode& info, const std::string& name) {
 				const PrimExpr offset = alignTo64(contextSize);
 				PrimExpr bytes = IntImm(DataType::Int(64), info.dtype.bytes());
 				for (const auto& d : info.GetShape().value())
 					bytes = bytes * ::tvm::cast(DataType::Int(64), d);
 				contextSize = offset + bytes;
+				tirx::Var data(name + "_data", ::tvm::PointerType(::tvm::PrimType(info.dtype)));
+				contextStmts.push_back(tirx::Bind(
+						data, tirx::Call(
+									  DataType::Handle(), tirx::builtin::address_of(),
+									  {tirx::BufferLoad(header, {::tvm::floordiv(offset, 8)})}
+							  )
+				));
 				auto buffer = tirx::Buffer(
-						context->data, info.dtype, info.GetShape().value(), {},
-						::tvm::floordiv(offset, info.dtype.bytes()), name, 0, 0, tirx::BufferType::kDefault
+						data, info.dtype, info.GetShape().value(), {}, IntImm(DataType::Int(64), 0), name, 0, 0,
+						tirx::BufferType::kDefault
 				);
-				stmts.push_back(tirx::DeclBuffer(buffer));
+				contextStmts.push_back(tirx::DeclBuffer(buffer));
 				return buffer;
 			}
 
-			/** @brief Adds the context buffer as the last parameter and checks that it is large enough. */
-			void endContext() {
+			/**
+			 * @brief Adds the context buffer as the last parameter, transfers the runtime dimensions through its header,
+			 * and checks that it is large enough.
+			 */
+			void endContext(Role role) {
 				contextSize = alignTo64(contextSize);
 				params.push_back(contextHandle);
 				bufferMap.Set(contextHandle, context);
-				stmts.insert(
-						stmts.begin(),
-						tirx::AssertStmt(
-								context->shape[0] >= contextSize, tirx::StringImm("ValueError"),
-								{tirx::StringImm("the context buffer is too small for these dimensions")}
-						)
-				);
+				std::vector<tirx::Stmt> prologue;
+				for (size_t k = 0; k < contextDims.size(); ++k) {
+					const tirx::Var& dim = contextDims[k];
+					const PrimExpr slot = IntImm(DataType::Int(64), static_cast<int64_t>(k));
+					if (role == Role::Producer) {
+						prologue.push_back(tirx::BufferStore(header, ::tvm::cast(DataType::Int(64), dim), {slot}));
+					} else if (std::find(boundByParams.begin(), boundByParams.end(), dim.get()) == boundByParams.end()) {
+						// Not determined by another argument (e.g. the sequence length when only [batch, classes]
+						// cotangents are passed): a scalar parameter of this (inner) function, which the outer entry
+						// function reads from the header (see wrapForHeaderDims). (A binding in the body would not
+						// do: TIR passes hoist allocations and expressions that use it before it.)
+						params.push_back(dim);
+						headerDims.emplace_back(static_cast<int64_t>(k), dim);
+					}
+				}
+				prologue.push_back(tirx::AssertStmt(
+						context->shape[0] >= contextSize, tirx::StringImm("ValueError"),
+						{tirx::StringImm("the context buffer is too small for these dimensions")}
+				));
+				// After the declaration of the context memory (the first statement), before everything that uses the
+				// dimensions: the dimensions, the size check, then the packed tensors.
+				prologue.insert(prologue.end(), contextStmts.begin(), contextStmts.end());
+				stmts.insert(stmts.begin() + 1, prologue.begin(), prologue.end());
 			}
 
 			tirx::Buffer addBufferParam(const std::string& name, const relax::TensorStructInfoNode& info) {
 				auto handle = tirx::Var(name + "_handle", DataType::Handle());
 				auto buffer = tirx::decl_buffer(info.GetShape().value(), info.dtype, name);
+				for (const auto& d : info.GetShape().value())
+					if (const auto* v = d.as<tirx::VarNode>())
+						boundByParams.push_back(v);
 				params.push_back(handle);
 				bufferMap.Set(handle, buffer);
 				return buffer;
@@ -495,8 +616,9 @@ namespace mdl::backend::tvm {
 				EntryBuilder builder{mod, symbols, profile};
 				auto packed = packing.find(std::string(symbol.value()));
 				const EntrySignature* signature = packed == packing.end() ? nullptr : &packed->second;
-				auto entry = builder.build(::tvm::ffi::GetRef<relax::Function>(fn), symbol.value(), signature);
-				result->Add(GlobalVar(symbol.value()), entry);
+				builder.build(::tvm::ffi::GetRef<relax::Function>(fn), symbol.value(), signature);
+				for (const auto& [name, func] : builder.functions)
+					result->Add(GlobalVar(name), func);
 				if (signature != nullptr && !signature->sizeSymbol.empty())
 					result->Add(
 							GlobalVar(signature->sizeSymbol),
