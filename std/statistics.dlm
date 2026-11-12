@@ -38,3 +38,15 @@ float[...] mean(x: float[..., N]) => __builtin_mean(x);
  * \todo `dof` is not yet forwarded (default values are not yet supported).
  */
 float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
+
+/**
+ * @brief Sum of all elements (a scalar), e.g. for objectives.
+ * @ingroup Statistics
+ */
+float sum_all(x: float[...]) => __builtin_sum_all(x);
+
+/**
+ * @brief Mean of all elements (a scalar), e.g. for objectives.
+ * @ingroup Statistics
+ */
+float mean_all(x: float[...]) => __builtin_mean_all(x);

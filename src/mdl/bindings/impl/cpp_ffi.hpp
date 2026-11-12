@@ -153,6 +153,7 @@ namespace mdl::bindings::detail {
 
 		out << "/// Compiled functions of the MDL module `" << module << "`.\n"
 			<< "struct " << module << " {\n"
+			<< "    using Context = mdl_detail::Context;\n\n"
 			<< "    /// Weights of `" << module << "`; dimensions `B` are only known at runtime.\n"
 			<< "    struct Weights {\n";
 		emitWeightTree(out, tree, sigs, "        ");
@@ -199,43 +200,96 @@ namespace mdl::bindings::detail {
 		}
 
 		for (const auto* fn : fns) {
+			// Packed tensors are not arguments: they are stored in the context buffer.
+			std::vector<const TensorSignature*> inputs, outputs;
+			for (const auto& in : fn->inputs)
+				if (!in.packed)
+					inputs.push_back(&in);
+			for (const auto& o : fn->outputs)
+				if (!o.packed)
+					outputs.push_back(&o);
+			const auto& context = fn->context;
+
+			if (context && context->producer) {
+				std::string dims, dimArgs;
+				for (unsigned d = 0; d < context->ellipsisRank; ++d) {
+					dims += (d > 0 ? ", " : "") + std::format("int64_t d{}", d);
+					dimArgs += (d > 0 ? ", " : "") + std::format("d{}", d);
+				}
+				out << "\n    /// Size in bytes of the context buffer `" << context->name << "` (written by `" << fn->function
+					<< "`) for the given\n"
+					<< "    /// dimensions of `...`. It grows with the dimensions: a buffer for the largest dimensions can be\n"
+					<< "    /// reused for all smaller ones.\n"
+					<< "    static size_t " << context->name << "_size(" << dims << ") {\n";
+				if (context->ellipsisRank > 0) {
+					out << "        TVMFFIAny args[] = {";
+					for (unsigned d = 0; d < context->ellipsisRank; ++d)
+						out << (d > 0 ? ", " : "") << "mdl_detail::intArg(d" << d << ")";
+					out << "};\n";
+				} else {
+					out << "        const TVMFFIAny* args = nullptr;\n";
+				}
+				out << "        return static_cast<size_t>(mdl_detail::callInt(__tvm_ffi_" << context->sizeSymbol << ", args, "
+					<< context->ellipsisRank << ", \"" << context->sizeSymbol << "\"));\n"
+					<< "    }\n"
+					<< "    /// Allocates a context buffer for the given dimensions of `...` (free it with "
+					<< context->name << "_free).\n"
+					<< "    static Context " << context->name << "_alloc(" << dims << ") {\n"
+					<< "        return mdl_detail::allocContext(" << context->name << "_size(" << dimArgs << "));\n"
+					<< "    }\n"
+					<< "    static void " << context->name << "_free(Context& ctx) { mdl_detail::freeContext(ctx); }\n";
+			}
+
 			out << "\n    /// `" << fn->function << "(";
-			for (size_t i = 0; i < fn->inputs.size(); ++i)
-				out << (i > 0 ? ", " : "") << fn->inputs[i].name << ": " << shapeStr(fn->inputs[i]);
+			for (size_t i = 0; i < inputs.size(); ++i)
+				out << (i > 0 ? ", " : "") << inputs[i]->name << ": " << shapeStr(*inputs[i]);
 			out << ") -> ";
-			for (size_t i = 0; i < fn->outputs.size(); ++i)
-				out << (i > 0 ? ", " : "") << shapeStr(fn->outputs[i]);
+			for (size_t i = 0; i < outputs.size(); ++i)
+				out << (i > 0 ? ", " : "") << shapeStr(*outputs[i]);
 			out << "`\n"
 				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must be\n"
 				<< "    /// contiguous float32 CPU tensors whose data is aligned to 64 bytes (e.g. mdl::runtime::Tensor).\n"
-				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all tensors).\n"
-				<< "    static void " << fn->function << "(";
-			for (const auto& in : fn->inputs)
-				out << "const DLTensor* " << in.name << ", ";
+				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all tensors).\n";
+			if (context)
+				out << "    /// " << (context->producer ? "Writes the values the backward pass needs into" : "Reads")
+					<< " the context buffer `ctx` (see " << context->name << "_size)"
+					<< (context->producer ? "" : ", which must have been written with the same dimensions") << ".\n";
+			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
+				out << "    /// The gradients are added to the given buffers (accumulation): zero them before the first step.\n";
+			out << "    static void " << fn->function << "(";
+			for (const auto* in : inputs)
+				out << "const DLTensor* " << in->name << ", ";
 			out << "const Weights& weights";
-			for (const auto& o : fn->outputs)
-				out << ", DLTensor* " << o.name;
-			out << ") {\n"
-				<< "        TVMFFIAny args[] = {\n";
-			for (const auto& in : fn->inputs)
-				out << "            mdl_detail::tensorArg(" << in.name << "),\n";
+			for (const auto* o : outputs)
+				out << ", DLTensor* " << o->name;
+			if (context)
+				out << ", " << (context->producer ? "" : "const ") << "Context& ctx";
+			out << ") {\n";
+			if (context)
+				out << "        int64_t ctx_shape[1] = {static_cast<int64_t>(ctx.bytes)};\n"
+					<< "        DLTensor ctx_tensor{ctx.data, {kDLCPU, 0}, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, 0};\n";
+			out << "        TVMFFIAny args[] = {\n";
+			for (const auto* in : inputs)
+				out << "            mdl_detail::tensorArg(" << in->name << "),\n";
 			for (const auto& w : fn->weights)
 				out << "            mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name << "\"),\n";
-			for (const auto& o : fn->outputs)
-				out << "            mdl_detail::tensorArg(" << o.name << "),\n";
+			for (const auto* o : outputs)
+				out << "            mdl_detail::tensorArg(" << o->name << "),\n";
+			if (context)
+				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\"),\n";
 			out << "        };\n"
 				<< "        mdl_detail::call(__tvm_ffi_" << fn->symbol << ", args, \"" << fn->symbol << "\");\n"
 				<< "    }\n";
-			auto emitInfos = [&](const char* suffix, const std::vector<TensorSignature>& tensors) {
+			auto emitInfos = [&](const char* suffix, const std::vector<const TensorSignature*>& tensors) {
 				out << "    static constexpr std::array<mdl_detail::TensorInfo, " << tensors.size() << "> " << fn->function
 					<< "_" << suffix << "{{\n";
-				for (const auto& t : tensors)
-					out << "        {\"" << t.name << "\", " << infoShape(t) << "},\n";
+				for (const auto* t : tensors)
+					out << "        {\"" << t->name << "\", " << infoShape(*t) << "},\n";
 				out << "    }};\n";
 			};
 			out << "    /// Names and shapes of the inputs and outputs of `" << fn->function << "`.\n";
-			emitInfos("inputs", fn->inputs);
-			emitInfos("outputs", fn->outputs);
+			emitInfos("inputs", inputs);
+			emitInfos("outputs", outputs);
 		}
 		out << "};\n\n";
 	}
@@ -251,13 +305,19 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#include <tvm/ffi/c_api.h>\n\n"
 		<< "#include <array>\n"
 		<< "#include <cstdint>\n"
+		<< "#include <cstdlib>\n"
+		<< "#include <new>\n"
 		<< "#include <stdexcept>\n"
 		<< "#include <string>\n"
 		<< "#include <string_view>\n\n"
 		<< "extern \"C\" {\n";
-	for (const auto& fn : exports)
+	for (const auto& fn : exports) {
 		out << "int __tvm_ffi_" << fn.symbol
 			<< "(void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result);\n";
+		if (fn.context && fn.context->producer)
+			out << "int __tvm_ffi_" << fn.context->sizeSymbol
+				<< "(void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result);\n";
+	}
 	out << "}\n\n"
 		<< "namespace mdl::models {\n\n"
 		<< "#ifndef MDL_MODELS_DETAIL_DEFINED\n"
@@ -282,13 +342,35 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "        any.v_ptr = const_cast<DLTensor*>(tensor);\n"
 		<< "        return any;\n"
 		<< "    }\n\n"
-		<< "    template <size_t N>\n"
-		<< "    inline void call(int (*fn)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*), TVMFFIAny (&args)[N],\n"
-		<< "                     const char* name) {\n"
+		<< "    inline TVMFFIAny intArg(int64_t value) {\n"
+		<< "        TVMFFIAny any{};\n"
+		<< "        any.type_index = kTVMFFIInt;\n"
+		<< "        any.v_int64 = value;\n"
+		<< "        return any;\n"
+		<< "    }\n\n"
+		<< "    /// An opaque buffer that carries values from one compiled function to another (e.g. from\n"
+		<< "    /// `forward_train` to `forward_backward`). `data` must be aligned to kTensorAlignment.\n"
+		<< "    struct Context {\n"
+		<< "        void* data = nullptr;\n"
+		<< "        size_t bytes = 0;\n"
+		<< "    };\n\n"
+		<< "    inline Context allocContext(size_t bytes) {\n"
+		<< "        const size_t rounded = (bytes + kTensorAlignment - 1) / kTensorAlignment * kTensorAlignment;\n"
+		<< "        Context ctx{std::aligned_alloc(kTensorAlignment, rounded > 0 ? rounded : kTensorAlignment), bytes};\n"
+		<< "        if (ctx.data == nullptr)\n"
+		<< "            throw std::bad_alloc();\n"
+		<< "        return ctx;\n"
+		<< "    }\n\n"
+		<< "    inline void freeContext(Context& ctx) {\n"
+		<< "        std::free(ctx.data);\n"
+		<< "        ctx = Context{};\n"
+		<< "    }\n\n"
+		<< "    using Function = int (*)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*);\n\n"
+		<< "    inline TVMFFIAny callRaw(Function fn, const TVMFFIAny* args, int32_t num_args, const char* name) {\n"
 		<< "        TVMFFIAny result{};\n"
 		<< "        result.type_index = kTVMFFINone;\n"
-		<< "        if (fn(nullptr, args, static_cast<int32_t>(N), &result) == 0)\n"
-		<< "            return;\n"
+		<< "        if (fn(nullptr, args, num_args, &result) == 0)\n"
+		<< "            return result;\n"
 		<< "        TVMFFIObjectHandle error = nullptr;\n"
 		<< "        TVMFFIErrorMoveFromRaised(&error);\n"
 		<< "        std::string message = std::string{name} + \" failed\";\n"
@@ -299,6 +381,16 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "            TVMFFIObjectDecRef(error);\n"
 		<< "        }\n"
 		<< "        throw std::runtime_error(message);\n"
+		<< "    }\n\n"
+		<< "    template <size_t N>\n"
+		<< "    inline void call(Function fn, TVMFFIAny (&args)[N], const char* name) {\n"
+		<< "        callRaw(fn, args, static_cast<int32_t>(N), name);\n"
+		<< "    }\n\n"
+		<< "    inline int64_t callInt(Function fn, const TVMFFIAny* args, int32_t num_args, const char* name) {\n"
+		<< "        TVMFFIAny result = callRaw(fn, args, num_args, name);\n"
+		<< "        if (result.type_index != kTVMFFIInt)\n"
+		<< "            throw std::runtime_error(std::string{name} + \" did not return an integer\");\n"
+		<< "        return result.v_int64;\n"
 		<< "    }\n"
 		<< "} // namespace mdl_detail\n"
 		<< "#endif\n\n";

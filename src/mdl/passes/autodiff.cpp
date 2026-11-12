@@ -128,17 +128,39 @@ namespace mdl::autodiff {
 				const auto* tb = std::get_if<TensorType>(&getDataType(*other));
 				if (ta == nullptr || tb == nullptr || ta->shape.size() < 2 || tb->shape.size() < 2)
 					throw NoGradientRule{inv.id}; // \todo matrix-vector products
-				// y = A @ B: dA = g @ B^T, dB = A^T @ g (summed over broadcast batch dims)
-				if (arg == 0)
-					return b.unbroadcast(b.matmul(g, b.transposed(*other), getDataType(x)), x);
-				return b.unbroadcast(b.matmul(b.transposed(x), g, getDataType(*other)), *other);
+				// y = A @ B: dA = g @ B^T, dB = A^T @ g (summed over broadcast batch dims). If only the other operand
+				// has batch dimensions (`...`, e.g. activations times a weight), the product keeps (some of) them: its
+				// type keeps a `...`, so that it is summed to the operand's shape. (The number of dimensions of `...` is
+				// only known when compiling, so the graph types cannot tell whether the product already reduced them.)
+				auto batched = [](const TensorType* t) {
+					return std::any_of(t->shape.begin(), t->shape.end(), [](const auto& d) {
+						return std::holds_alternative<Elipsis>(d);
+					});
+				};
+				auto withBatch = [&](const TensorType* t) -> DataType {
+					TensorType result{t->type, {Elipsis{}}};
+					result.shape.insert(result.shape.end(), t->shape.begin(), t->shape.end());
+					return result;
+				};
+				if (arg == 0) {
+					DataType type = batched(tb) && !batched(ta) ? withBatch(ta) : getDataType(x);
+					return b.unbroadcast(b.matmul(g, b.transposed(*other), type), x);
+				}
+				DataType type = batched(ta) && !batched(tb) ? withBatch(tb) : getDataType(*other);
+				return b.unbroadcast(b.matmul(b.transposed(x), g, type), *other);
 			}
 			case FIDs::MAX:
 			case FIDs::MIN:
 				// Reductions over the last axis that keep it (size 1): the gradient flows to the extremal elements.
 				return b.mul(g, b.op(FIDs::EQUAL_MASK, getDataType(x), {x, node}));
 			case FIDs::SUM:
+			case FIDs::SUM_ALL:
 				return b.op(FIDs::BROADCAST_LIKE, getDataType(x), {g, x});
+			case FIDs::MEAN_ALL: {
+				// The number of elements (only known at runtime with `...`): the sum of ones of x's shape.
+				const Node& count = b.op(FIDs::SUM_ALL, PrimitiveType::floating, {b.op(FIDs::BROADCAST_LIKE, getDataType(x), {b.constant(1.0), x})});
+				return b.op(FIDs::BROADCAST_LIKE, getDataType(x), {b.div(g, count), x});
+			}
 			case FIDs::MEAN: {
 				// The last axis is removed: restore it (size 1), broadcast, and divide by its size.
 				const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
@@ -299,7 +321,24 @@ namespace mdl::autodiff {
 					accumulate(*weights[i], (*results)[call.inputs.size() + i].get());
 			return {};
 		}
+		bool isScalar(const DataType& type) {
+			if (std::holds_alternative<PrimitiveType>(type))
+				return true;
+			const auto* t = std::get_if<TensorType>(&type);
+			return t != nullptr && t->shape.empty();
+		}
 	} // namespace
+
+	size_t numCotangents(const FunctionDecl& func) {
+		for (size_t i = 0; i < func.outputs.size(); ++i) {
+			DataType type = i < func.returnTypes.size()
+									? std::visit([](const auto& t) -> DataType { return t; }, func.returnTypes[i])
+									: getDataType(func.outputs[i].get());
+			if (isScalar(type))
+				return 0;
+		}
+		return func.outputs.size();
+	}
 
 	std::expected<FunctionDecl, std::string> vjp(
 			Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
@@ -403,15 +442,24 @@ namespace mdl::autodiff {
 			if (!inserted)
 				it->second = &b.add(*it->second, contribution);
 		};
+		// A function with scalar outputs is an objective: the scalar outputs are differentiated (seeded with 1) and the
+		// other outputs are auxiliary. Otherwise, the caller provides one cotangent per output.
+		const bool objective = numCotangents(func) == 0;
 		for (size_t i = 0; i < func.outputs.size(); ++i) {
 			const auto& name = grad.outputNames[i];
 			DataType type = i < func.returnTypes.size()
 									? std::visit([](const auto& t) -> DataType { return t; }, func.returnTypes[i])
 									: getDataType(func.outputs[i].get());
-			const Node& cotangent = graph.addInputNode(type, "d_" + name);
-			grad.parameters.emplace_back("d_" + name, std::cref(std::get<InputNode>(cotangent)));
-			if (dependsOnTarget.contains(&func.outputs[i].get()))
-				accumulate(func.outputs[i].get(), cotangent);
+			const Node* seed = nullptr;
+			if (!objective) {
+				const Node& cotangent = graph.addInputNode(type, "d_" + name);
+				grad.parameters.emplace_back("d_" + name, std::cref(std::get<InputNode>(cotangent)));
+				seed = &cotangent;
+			} else if (isScalar(type)) {
+				seed = &b.constant(1.0);
+			}
+			if (seed != nullptr && dependsOnTarget.contains(&func.outputs[i].get()))
+				accumulate(func.outputs[i].get(), *seed);
 		}
 
 		// Backward sweep in reverse topological order.
@@ -470,6 +518,189 @@ namespace mdl::autodiff {
 			}
 		}
 		return grad;
+	}
+
+	std::expected<Split, std::string> split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs) {
+		if (vjp.parameters.size() < numOutputs || vjp.outputs.size() < numOutputs)
+			return std::unexpected(vjp.name + ": not a gradient function with " + std::to_string(numOutputs) + " output(s)");
+		const size_t numInputs = vjp.parameters.size() - numOutputs;
+		std::unordered_set<const void*> cotangents, inputs;
+		for (size_t i = 0; i < vjp.parameters.size(); ++i)
+			(i < numInputs ? inputs : cotangents).insert(&vjp.parameters[i].second.get());
+
+		// Memoized dependency analysis: whether a node depends on a cotangent / on a (primal) input.
+		std::unordered_map<const Node*, std::pair<bool, bool>> deps;
+		std::function<std::pair<bool, bool>(const Node&)> dependencies = [&](const Node& node) {
+			if (auto it = deps.find(&node); it != deps.end())
+				return it->second;
+			std::pair<bool, bool> result{false, false};
+			if (const auto* in = std::get_if<InputNode>(&node)) {
+				result = {cotangents.contains(in), inputs.contains(in)};
+			} else if (const auto* inv = std::get_if<InvocationNode>(&node)) {
+				for (const auto& arg : inv->arguments) {
+					auto [cot, inp] = dependencies(arg.get());
+					result.first |= cot;
+					result.second |= inp;
+				}
+			}
+			deps.emplace(&node, result);
+			return result;
+		};
+		auto cheap = [](const Node& node) {
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr)
+				return false;
+			switch (inv->id) {
+			case FIDs::RESHAPE:
+			case FIDs::PERMUTE:
+			case FIDs::EXPAND:
+			case FIDs::RESHAPE_LIKE:
+			case FIDs::PERMUTE_INVERSE:
+			case FIDs::BROADCAST_LIKE:
+			case FIDs::STOP_GRADIENT:
+				return true;
+			default:
+				return false;
+			}
+		};
+
+		// The residuals: the frontier of primal, input-dependent values that the backward computation reaches.
+		std::vector<const Node*> residuals;
+		std::unordered_set<const Node*> visited;
+		std::function<void(const Node&)> visit = [&](const Node& node) {
+			if (!visited.insert(&node).second)
+				return;
+			auto [cot, inp] = dependencies(node);
+			if (!cot && !inp)
+				return; // depends only on weights and constants: recomputed
+			if (cot || cheap(node)) {
+				if (const auto* inv = std::get_if<InvocationNode>(&node))
+					for (const auto& arg : inv->arguments)
+						visit(arg.get());
+				return;
+			}
+			residuals.push_back(&node);
+		};
+		for (size_t i = numOutputs; i < vjp.outputs.size(); ++i)
+			visit(vjp.outputs[i].get());
+
+		// Do not save values that elementwise operations recompute from the other residuals (e.g. `1 - h*h` of the
+		// tanh rule when `h` is saved anyway): this only removes residuals, so the saved memory never grows.
+		auto elementwise = [&](const Node& node) {
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr)
+				return false;
+			switch (inv->id) {
+			case FIDs::TENSOR_ADD:
+			case FIDs::TENSOR_SUB:
+			case FIDs::TENSOR_PROD:
+			case FIDs::TENSOR_DIV:
+			case FIDs::EXP:
+			case FIDs::LOG:
+			case FIDs::SQRT:
+			case FIDs::RSQRT:
+			case FIDs::ERF:
+			case FIDs::TANH:
+			case FIDs::SIN:
+			case FIDs::COS:
+			case FIDs::TAN:
+			case FIDs::EQUAL_MASK:
+				return true;
+			default:
+				return cheap(node);
+			}
+		};
+		std::unordered_set<const Node*> saved(residuals.begin(), residuals.end());
+		std::function<bool(const Node&, const Node*)> recomputable = [&](const Node& node, const Node* self) {
+			if (&node != self && saved.contains(&node))
+				return true;
+			if (!dependencies(node).second)
+				return true; // weights and constants
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr || !elementwise(node))
+				return false;
+			return std::all_of(inv->arguments.begin(), inv->arguments.end(), [&](const auto& arg) {
+				return recomputable(arg.get(), self);
+			});
+		};
+		std::erase_if(residuals, [&](const Node* r) {
+			if (!recomputable(*r, r))
+				return false;
+			saved.erase(r);
+			return true;
+		});
+
+		auto typeOf =[](const Node& node) -> std::variant<PrimitiveType, TensorType> {
+			const DataType& type = getDataType(node);
+			if (const auto* t = std::get_if<TensorType>(&type))
+				return *t;
+			if (const auto* p = std::get_if<PrimitiveType>(&type))
+				return *p;
+			return PrimitiveType::error;
+		};
+		auto declaredType = [&](size_t i) {
+			return i < vjp.returnTypes.size() ? vjp.returnTypes[i] : typeOf(vjp.outputs[i].get());
+		};
+		auto outputName = [&](size_t i) {
+			return i < vjp.outputNames.size() ? vjp.outputNames[i] : "output" + std::to_string(i);
+		};
+
+		Split result;
+		result.numResiduals = residuals.size();
+		const std::string base = vjp.name.ends_with("_vjp") ? vjp.name.substr(0, vjp.name.size() - 4) : vjp.name;
+
+		// Forward pass: the outputs followed by the residuals.
+		result.train.name = base + "_train";
+		result.train.templateParameters = vjp.templateParameters;
+		result.train.parameters.assign(vjp.parameters.begin(), vjp.parameters.begin() + numInputs);
+		for (size_t i = 0; i < numOutputs; ++i) {
+			result.train.outputs.push_back(vjp.outputs[i]);
+			result.train.returnTypes.push_back(declaredType(i));
+			result.train.outputNames.push_back(outputName(i));
+		}
+		for (size_t i = 0; i < residuals.size(); ++i) {
+			result.train.outputs.push_back(std::cref(*residuals[i]));
+			result.train.returnTypes.push_back(typeOf(*residuals[i]));
+			result.train.outputNames.push_back("residual" + std::to_string(i));
+		}
+
+		// Backward pass: the residuals become inputs.
+		result.backward.name = base + "_backward";
+		result.backward.templateParameters = vjp.templateParameters;
+		std::unordered_map<const Node*, const Node*> replacements;
+		for (size_t i = 0; i < residuals.size(); ++i) {
+			const std::string name = "residual" + std::to_string(i);
+			const Node& input = graph.addInputNode(getDataType(*residuals[i]), name);
+			replacements.emplace(residuals[i], &input);
+			result.backward.parameters.emplace_back(name, std::cref(std::get<InputNode>(input)));
+		}
+		result.backward.parameters.insert(
+				result.backward.parameters.end(), vjp.parameters.begin() + numInputs, vjp.parameters.end()
+		);
+		std::vector<NodeRef> gradients(vjp.outputs.begin() + numOutputs, vjp.outputs.end());
+		result.backward.outputs = graph.substitute(gradients, replacements);
+		for (size_t i = numOutputs; i < vjp.outputs.size(); ++i) {
+			result.backward.returnTypes.push_back(declaredType(i));
+			result.backward.outputNames.push_back(outputName(i));
+		}
+
+		// Sanity check: the backward pass must not read the primal inputs directly.
+		std::unordered_set<const Node*> seen;
+		std::function<bool(const Node&)> readsInput = [&](const Node& node) {
+			if (!seen.insert(&node).second)
+				return false;
+			if (const auto* in = std::get_if<InputNode>(&node))
+				return inputs.contains(in);
+			if (const auto* inv = std::get_if<InvocationNode>(&node))
+				return std::any_of(inv->arguments.begin(), inv->arguments.end(), [&](const auto& a) {
+					return readsInput(a.get());
+				});
+			return false;
+		};
+		for (const auto& out : result.backward.outputs)
+			if (readsInput(out.get()))
+				return std::unexpected(vjp.name + ": internal error: the backward pass depends on the inputs");
+		return result;
 	}
 
 } // namespace mdl::autodiff

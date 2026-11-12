@@ -19,6 +19,7 @@
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/struct_info.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/var.h>
 
 #include <algorithm>
@@ -33,6 +34,7 @@
 #include <format>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <ranges>
 #include <sstream>
 #include <unordered_map>
@@ -407,8 +409,11 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
 	if (sinfo == nullptr || !sinfo->GetShape().defined())
 		error("has no known shape");
 	auto shape = sinfo->GetShape().value();
-	if (shape.size() != declared.shape.size())
-		error(std::format("has {} dimension(s)", shape.size()));
+	if (shape.size() != declared.shape.size()) {
+		std::ostringstream dims;
+		dims << shape;
+		error(std::format("has {} dimension(s) {}", shape.size(), dims.str()));
+	}
 	for (size_t d = 0; d < shape.size(); ++d) {
 		const auto* imm = shape[d].as<::tvm::IntImmNode>();
 		if (declared.shape[d] >= 0 && (imm == nullptr || imm->value != declared.shape[d]))
@@ -417,43 +422,92 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
 }
 
 /**
+ * @brief The packed tensors of a context buffer, as produced by its producer (see mdl::ContextBuffer).
+ * @details The consumer declares its packed inputs with exactly these shapes (in its own dimension variables), so that
+ * both compute the same layout.
+ */
+struct ContextLayout {
+	std::vector<::tvm::relax::TensorStructInfo> tensors;
+	std::vector<::tvm::tirx::Var> ellipsis; ///< the producer's dimension variables of `...`
+};
+
+/**
  * @brief Translates an exported function into a Relax function.
  * @details The Relax parameters follow the exported calling convention: the inputs (in declaration order) followed
- * by the weights (in canonical order); see mdl::ExportedFunction.
+ * by the weights (in canonical order); see mdl::ExportedFunction. Packed inputs are Relax parameters as well (the AOT
+ * lowering reads them from the context buffer).
+ *
+ * @param contexts the layouts of the context buffers translated so far (a producer adds its layout).
+ * @return which parameters and outputs are packed.
  */
-static void translateFuncRelax(
+static mdl::backend::tvm::EntrySignature translateFuncRelax(
 		::tvm::relax::BlockBuilder& bb, const mdl::ExportedFunction& fn, const mdl::ArgVals& argVals,
-		unsigned ellipsisRank
+		unsigned ellipsisRank, std::map<std::string, ContextLayout>& contexts
 ) {
 	auto logger = mdl::log::getLogger("compiler");
 	logger->info("Translating {} (Relax)", fn.symbol);
 
 	TranslationContext ctx{argVals, ellipsisRank};
 	RelaxCache cache;
+	mdl::backend::tvm::EntrySignature packing;
+	packing.context = fn.context.has_value();
 	::tvm::ffi::Array<::tvm::relax::Var> bbParams;
-	auto addParams = [&](const std::vector<mdl::TensorSignature>& tensors, auto&& typeOf) {
-		for (const auto& t : tensors) {
-			auto var = makeRelaxParam(t.name, typeOf(t), ctx);
-			bbParams.push_back(var);
-			if (t.node != nullptr)
-				cache[t.node] = var;
-		}
+	auto bind = [&](const mdl::TensorSignature& t, ::tvm::relax::Var var, bool packed) {
+		bbParams.push_back(var);
+		packing.params.push_back(packed);
+		if (t.node != nullptr)
+			cache[t.node] = var;
 	};
-	for (size_t i = 0; i < fn.inputs.size(); ++i)
-		addParams({fn.inputs[i]}, [&](const auto&) { return fn.decl->parameters[i].second.get().type; });
-	addParams(fn.weights, [](const auto& t) { return mdl::getDataType(*t.node); });
+	size_t nextPacked = 0;
+	for (size_t i = 0; i < fn.inputs.size(); ++i) {
+		const auto& t = fn.inputs[i];
+		if (!t.packed) {
+			bind(t, makeRelaxParam(t.name, fn.decl->parameters[i].second.get().type, ctx), false);
+			continue;
+		}
+		// A packed input has the shape its producer computed, in this function's dimension variables.
+		auto layout = fn.context ? contexts.find(fn.context->name) : contexts.end();
+		if (layout == contexts.end() || nextPacked >= layout->second.tensors.size())
+			throw std::runtime_error(fn.symbol + ": the producer of the context buffer must be compiled first");
+		::tvm::ffi::Map<::tvm::tirx::Var, ::tvm::PrimExpr> rename;
+		for (size_t d = 0; d < ctx.ellipsis.size() && d < layout->second.ellipsis.size(); ++d)
+			rename.Set(layout->second.ellipsis[d], ctx.ellipsis[d]);
+		const auto& sinfo = layout->second.tensors[nextPacked++];
+		auto shape = ::tvm::tirx::Substitute(sinfo->GetShape().value(), rename);
+		bind(t, ::tvm::relax::Var(t.name, ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(shape), sinfo->dtype)), true);
+	}
+	for (const auto& w : fn.weights)
+		bind(w, makeRelaxParam(w.name, mdl::getDataType(*w.node), ctx), false);
 
 	bb->BeginScope(bbParams);
 	bb->BeginDataflowBlock();
 
 	std::vector<::tvm::relax::Var> unusedParams; // params are already in the cache
 	::tvm::ffi::Array<::tvm::relax::Expr> results;
+	ContextLayout produced{.tensors = {}, .ellipsis = ctx.ellipsis};
 	for (size_t i = 0; i < fn.decl->outputs.size(); ++i) {
 		auto result = translateRelax(bb, cache, unusedParams, fn.decl->outputs[i].get(), ctx.argVals);
 		if (!result.as<::tvm::relax::VarNode>())
 			result = bb->Emit(result, "out");
-		checkOutputShape(fn, i, result);
+		const bool packed = fn.outputs[i].packed;
+		packing.outputs.push_back(packed);
+		packing.accumulate.push_back(fn.outputs[i].accumulate);
+		if (packed) {
+			// Laid out by the backend: the (possibly imprecise) declared type is not part of the ABI.
+			const auto* sinfo = ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(result);
+			if (sinfo == nullptr || !sinfo->GetShape().defined())
+				throw std::runtime_error(std::format("{}: packed output {} has no known shape", fn.symbol, i));
+			produced.tensors.push_back(::tvm::ffi::GetRef<::tvm::relax::TensorStructInfo>(sinfo));
+		} else {
+			checkOutputShape(fn, i, result);
+		}
 		results.push_back(result);
+	}
+	if (fn.context && fn.context->producer) {
+		contexts[fn.context->name] = produced;
+		packing.sizeSymbol = fn.context->sizeSymbol;
+		for (const auto& var : ctx.ellipsis)
+			packing.dims.push_back(var);
 	}
 	::tvm::relax::Var outputVar = results.size() == 1 ? bb->EmitOutput(results[0], "output")
 													  : bb->EmitOutput(::tvm::relax::Tuple(results), "output");
@@ -466,6 +520,7 @@ static void translateFuncRelax(
 	::tvm::relax::Function func(bbParams, body, retSI, /*is_pure=*/true);
 	func = ::tvm::WithAttr(func, ::tvm::attr::kGlobalSymbol, ::tvm::ffi::String{fn.symbol});
 	bb->AddFunction(func, fn.symbol);
+	return packing;
 }
 
 // ── main entry point ──────────────────────────────────────────────────────────
@@ -495,8 +550,11 @@ void mdl::backends::tvm::compileToFile(
 
 	// 1. Relax IRModule with one function per exported function.
 	auto bb = ::tvm::relax::BlockBuilder::Create(::tvm::ffi::Optional<::tvm::IRModule>{});
-	for (const auto& fn : exports)
-		translateFuncRelax(bb, fn, argvals, opts.ellipsisRank);
+	std::map<std::string, ContextLayout> contexts;
+	std::unordered_map<std::string, backend::EntrySignature> packing;
+	for (const auto& fn : exports) {
+		packing.emplace(fn.symbol, translateFuncRelax(bb, fn, argvals, opts.ellipsisRank, contexts));
+	}
 	auto mod = bb->Finalize();
 	dump(mod, "relax");
 
@@ -505,7 +563,7 @@ void mdl::backends::tvm::compileToFile(
 	mod = backend::runRelaxPipeline(mod, target, opts);
 	dump(mod, "relax-lowered");
 	const auto prefix = symbolPrefix(output);
-	mod = backend::lowerToAOT(mod, prefix + "k_");
+	mod = backend::lowerToAOT(mod, prefix + "k_", packing);
 	dump(mod, "tir");
 	backend::buildObject(mod, target, prefix, output);
 }

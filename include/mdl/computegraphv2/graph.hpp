@@ -97,6 +97,15 @@ namespace mdl {
 		const Node& addInvocationNode(builtins::FunctionIDs func, DataType dtype, std::vector<NodeRef>&& arguments);
 
 		/**
+		 * @brief Rebuilds the subgraph of @p roots with the nodes in @p replacements replaced (e.g. by new inputs).
+		 * @details Nodes that do not depend on a replaced node are shared, not copied.
+		 * @return the rebuilt roots (in the same order).
+		 */
+		Outputs substitute(
+				const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements
+		);
+
+		/**
 		 * @brief Adds an invalid node that signifies an uncompilable part of the computegraph.
 		 * @details For example, if the expression `a + b` is compiled, where `a` is a valid variable but `b` is not,
 		 * then `b` is represented by an error node.

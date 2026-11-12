@@ -204,3 +204,55 @@ TEST_CASE("a custom gradient can be called directly with the instance's weights"
 	REQUIRE(weight != nullptr);
 	CHECK(weight->name == "inst.s");
 }
+
+TEST_CASE("a gradient function is split into a forward pass that saves residuals and a backward pass", "[autodiff][split]") {
+	auto unit = parseOrFail(twoLayers);
+	const auto& net = std::get<ModuleType>(unit.definitions.at("Net"));
+	const auto& forward = net.functions.at("forward");
+	auto grad = autodiff::vjp(unit.graph(), forward, weightPaths(net));
+	REQUIRE(grad.has_value());
+	auto parts = autodiff::split(unit.graph(), *grad, forward.outputs.size());
+	REQUIRE(parts.has_value());
+
+	// train(x) -> (output, residuals...); backward(residuals..., d_output) -> gradients.
+	CHECK(parts->train.name == "forward_train");
+	CHECK(parts->backward.name == "forward_backward");
+	CHECK(paramNames(parts->train) == std::vector<std::string>{"x"});
+	REQUIRE(parts->train.outputs.size() == 1 + parts->numResiduals);
+	CHECK(&parts->train.outputs[0].get() == &forward.outputs[0].get());
+	REQUIRE(parts->backward.parameters.size() == parts->numResiduals + 1);
+	CHECK(parts->backward.parameters.back().first == "d_output");
+	CHECK(parts->backward.outputNames ==
+		  std::vector<std::string>{"d_first_W", "d_first_b", "d_second_W", "d_second_b"});
+
+	// Saved: x (for d_first_W) and h = tanh(first(x)) (for d_second_W and the tanh rule, which uses its output).
+	// Weights (and their transposes) are recomputed from the weights, and the output itself is not needed.
+	REQUIRE(parts->numResiduals == 2);
+	bool savesInput = false, savesTanh = false;
+	for (size_t i = 1; i <= parts->numResiduals; ++i) {
+		const Node& residual = parts->train.outputs[i].get();
+		savesInput |= std::holds_alternative<InputNode>(residual);
+		if (const auto* inv = std::get_if<InvocationNode>(&residual))
+			savesTanh |= inv->id == builtins::FunctionIDs::TANH;
+	}
+	CHECK(savesInput);
+	CHECK(savesTanh);
+}
+
+TEST_CASE("the gradient of an objective (scalar output) has no cotangent inputs", "[autodiff]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			W: float[4, 4]
+			float[..., 4] forward(x: float[..., 4]) => x @ W.T();
+			float loss(x: float[..., 4], target: float[..., 4]) => __builtin_mean_all((forward(x) - target) * (forward(x) - target));
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	const auto& loss = m.functions.at("loss");
+	CHECK(autodiff::numCotangents(loss) == 0);
+	CHECK(autodiff::numCotangents(m.functions.at("forward")) == 1);
+	auto grad = autodiff::vjp(unit.graph(), loss, weightPaths(m));
+	REQUIRE(grad.has_value());
+	CHECK(paramNames(*grad) == std::vector<std::string>{"x", "target"});
+	CHECK(grad->outputNames == std::vector<std::string>{"output", "d_W"});
+}

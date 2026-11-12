@@ -55,6 +55,9 @@ namespace mdl::builtins {
 		EQUAL_MASK,		   /**< (a, b): 1 where a == b (broadcasting), 0 elsewhere */
 		/** Differentiation **/
 		STOP_GRADIENT, /**< (x): x; no gradient flows through it (std `nograd`) */
+		/** Full reductions (e.g. objectives) **/
+		SUM_ALL,  /**< (x): the sum of all elements (a scalar) */
+		MEAN_ALL, /**< (x): the mean of all elements (a scalar) */
 
 		COUNT
 	};

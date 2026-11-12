@@ -343,6 +343,27 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     },
     /** STOP_GRADIENT — identity (only meaningful to the gradient pass) **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
+    /** SUM_ALL — sum over all axes (0-d result) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>> all;
+        return callRelaxOp("relax.op.sum", ts[0], all, false);
+    },
+    /** MEAN_ALL — sum over all axes divided by the number of elements **/
+    [](auto& bb, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>> all;
+        auto s = emitAs(bb, callRelaxOp("relax.op.sum", ts[0], all, false), "sum");
+        ::tvm::PrimExpr count = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+        for (const auto& d : tensorShape(ts[0]))
+            count = count * ::tvm::cast(::tvm::DataType::Int(64), d);
+        if (const auto* imm = ::tvm::arith::Analyzer().Simplify(count).template as<::tvm::IntImmNode>())
+            return callRelaxOp("relax.op.divide", s, makeFloatConst(static_cast<float>(imm->value)));
+        // Symbolic number of elements: counted as a tensor (a PrimValue divisor would leave the dimension variables
+        // unbound in the kernel).
+        ::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[0]));
+        auto ones = emitAs(bb, callRelaxOp("relax.op.broadcast_to", makeFloatConst(1.0f), ::tvm::relax::ShapeExpr(shape)), "ones");
+        auto n = emitAs(bb, callRelaxOp("relax.op.sum", ones, all, false), "count");
+        return callRelaxOp("relax.op.divide", s, n);
+    },
 });
 
 // Every builtin needs a translation (the table is positional).

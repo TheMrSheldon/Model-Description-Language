@@ -25,7 +25,7 @@ module FFN[indim: uint, outdim: uint] {
 mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 ```
 - `--arg-vals` sets the hyperparameters (here `FFN: {indim: 8, outdim: 3}`).
-- `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`.
+- `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`, `json` (metadata).
 - `--kernels onednn|tvm` selects the kernels for recognized operations (oneDNN via `mdl_kernels`, or TVM-generated only).
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
 - `-i DIR` adds import search paths; the standard library (`std/`) is always available.
@@ -36,11 +36,41 @@ kernels, `mdl_kernels`.
 
 ## Gradients
 ```bash
-mdlc model.dlm -a model.yml -o model.o --binding cpp=model.hpp --grad forward --trainable 'layers.**' --trainable '!layers.0.**'
+mdlc model.dlm -a model.yml -o model_train.o --binding cpp=model_train.hpp --grad forward --trainable 'layers.**' --trainable '!layers.0.**'
 ```
-`--grad forward` additionally compiles `forward_vjp(x, d_output) -> output, d_<weight>...` (reverse-mode gradient,
-computed on the computegraph; the backend only sees an ordinary function). `--trainable` takes gitignore-style patterns
-over weight paths (all weights by default); `--input-grads` adds gradients with respect to the inputs.
+`--grad f` makes a *gradient build*: the function `f` is replaced by its gradient (a transformation of the
+computegraph; the backend only sees ordinary functions). Compile without `--grad` for inference. `--trainable` takes
+gitignore-style patterns over weight paths (all weights by default); `--input-grads` adds gradients with respect to the
+inputs. Gradients are added to the caller's buffers (accumulation; zero them before the first step, or use
+`--grad-overwrite`).
+
+**The objective is part of the model.** If `f` returns a scalar, it is differentiated directly:
+`loss(x, target) -> loss, d_<weight>...` in one call.
+```dlm
+float loss(x: float[..., 768], target: float[..., 768]) => mse(forward(x), target);
+```
+
+**The caller computes the objective** (e.g. the trainer) and provides the cotangent `dL/d_output`:
+- `forward(x) -> output` also saves the values the backward pass needs in a context buffer `ctx`,
+- `forward_backward(d_output) -> d_<weight>...` reads them and computes the gradients.
+
+`ctx` is an opaque byte buffer whose layout depends on the runtime dimensions; `forward_ctx_size(dims of ...)` returns
+the bytes needed (`forward_ctx_alloc`/`forward_ctx_free` allocate it, 64-byte aligned). The size grows with the
+dimensions, so a buffer allocated once for the largest batch/sequence is reused for all steps; `forward_backward` must
+be called with the same dimensions as the `forward` that wrote it.
+```cpp
+auto ctx = Model::forward_ctx_alloc(maxBatch, maxSeq);
+Model::forward(x, weights, y, ctx);          // then compute dL/dy
+Model::forward_backward(dy, weights, d_W1, d_b1, /* ... */ ctx);
+Model::forward_ctx_free(ctx);
+```
+Only values that depend on the inputs are saved; values computed from weights alone, reshapes, and elementwise
+functions of other saved values are recomputed. With `--grad-fused`, `forward(x, d_output) -> output, d_<weight>...`
+does both in one call instead (nothing is saved, but `d_output` must be known before the call).
+
+`--binding json` writes metadata for runtimes that load the library dynamically (e.g. a trainer): the weights with
+shapes and whether they are trainable, and every function with its C symbol, arguments, which outputs are gradients
+of which weight, and its context buffer.
 
 A module can provide its own gradient as an ordinary member function named `gradient` (for `forward`; other member
 functions use `<name>_gradient`). It takes the inputs followed by one cotangent per output and returns one cotangent
@@ -55,7 +85,8 @@ module Scale[dim: uint] {
     }
 }
 ```
-`std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`.
+`std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`;
+`std.statistics` provides `sum_all`/`mean_all` and `std.losses` `mse` for objectives.
 
 ## CMake
 ```cmake

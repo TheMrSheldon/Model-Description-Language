@@ -27,13 +27,40 @@ namespace mdl {
 		std::vector<int64_t> shape;
 		/** @brief The graph node (nullptr for an argument that the function does not use). */
 		const Node* node;
+		/**
+		 * @brief Whether the tensor is stored in the function's context buffer (see ExportedFunction::context) instead
+		 * of being a separate argument. Its shape is then only known to the backend (the layout is computed from the
+		 * runtime dimensions).
+		 */
+		bool packed = false;
+		/** @brief Whether the function adds to this (output) tensor instead of overwriting it (accumulated gradients). */
+		bool accumulate = false;
+		/** @brief For a gradient output: the weight path or input name it is the gradient of; else empty. */
+		std::string gradientOf = {};
+	};
+
+	/**
+	 * @brief An opaque byte buffer that carries packed tensors from one exported function to another (e.g. the
+	 * residuals from `forward_train` to `forward_backward`).
+	 * @details The producer writes its packed outputs into the buffer, the consumer reads its packed inputs from it, in
+	 * the same order. The backend lays the tensors out at offsets computed from the runtime dimensions (64-byte aligned)
+	 * and exports a size function `size(d_0, ..., d_{ellipsisRank-1}) -> bytes` that takes the dimensions `...` stands
+	 * for. The required size grows monotonically with the dimensions, so a buffer allocated for the largest dimensions
+	 * can be reused for all smaller ones. The consumer must be called with the same dimensions as the producer.
+	 */
+	struct ContextBuffer {
+		std::string name;		///< Name in the bindings (e.g. `forward_ctx`)
+		std::string sizeSymbol; ///< Mangled name of the exported size function
+		bool producer;			///< Whether the function writes (true) or reads (false) the buffer
+		unsigned ellipsisRank;	///< Number of arguments of the size function
 	};
 
 	/**
 	 * @brief A function that is compiled and exported by the backend.
 	 * @details The exported (DPS) calling convention is: inputs (in declaration order), then weights (in canonical
-	 * order, see mdl::weightPaths), then preallocated outputs. Backends and binding generators must both use this
-	 * description so that the generated bindings match the compiled code.
+	 * order, see mdl::weightPaths), then preallocated outputs, then the context buffer (if any; a 1-D uint8 tensor).
+	 * Packed inputs and outputs are not arguments (they are stored in the context buffer). Backends and binding
+	 * generators must both use this description so that the generated bindings match the compiled code.
 	 */
 	struct ExportedFunction {
 		std::string module;	  ///< Name of the module that defines the function
@@ -50,17 +77,29 @@ namespace mdl {
 		 * declaration order.
 		 */
 		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameters;
+		/** @brief The context buffer that carries the packed tensors, if any. */
+		std::optional<ContextBuffer> context = std::nullopt;
 	};
 
 	/**
 	 * @brief Lists the functions that are compiled: all non-template member functions of modules whose
 	 * hyperparameters are all given in @p argvals.
 	 */
-	/** @brief Gradient functions to compile in addition to the module functions. */
+	/**
+	 * @brief The gradient pass: member functions that are replaced by their gradient (a gradient build; compile
+	 * without it for inference).
+	 * @details A function `f` with a scalar output (an objective) becomes `f(inputs...) -> (outputs..., d_<weight>...)`.
+	 * Otherwise, the caller computes the objective and provides the cotangents of the outputs:
+	 *  - by default, `f(inputs...) -> outputs` saves the values the backward pass needs in the context buffer `f_ctx`,
+	 *    and `f_backward(d_<output>...) -> d_<weight>...` computes the gradients from them;
+	 *  - with `fused`, `f(inputs..., d_<output>...) -> (outputs..., d_<weight>...)` does both in one call.
+	 */
 	struct GradientRequest {
-		/** @brief Member functions to differentiate (exported as `<function>_vjp`). */
 		std::vector<std::string> functions;
 		autodiff::Options options;
+		bool fused = false;
+		/** @brief Whether gradient outputs are added to the caller's buffers (true) or overwrite them. */
+		bool accumulate = true;
 	};
 
 	std::vector<ExportedFunction> exportedFunctions(

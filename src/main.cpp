@@ -44,6 +44,8 @@ struct CompileArgs {
 	std::vector<std::string> trainable;
 	std::optional<std::filesystem::path> trainableFile;
 	bool inputGrads = false;
+	bool gradFused = false;
+	bool gradOverwrite = false;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -88,7 +90,9 @@ static void runCompileCommand(const CompileArgs& args) {
 	auto& program = result.value();
 	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
-	mdl::GradientRequest gradients{.functions = args.gradFunctions, .options = {}};
+	mdl::GradientRequest gradients{
+			.functions = args.gradFunctions, .options = {}, .fused = args.gradFused, .accumulate = !args.gradOverwrite
+	};
 	{
 		std::vector<std::string> patterns = args.trainable;
 		if (args.trainableFile) {
@@ -134,14 +138,25 @@ int main(int argc, char* argv[]) {
 	app.add_option(
 			   "--binding", args.bindings,
 			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ header), "
-			   "python, python-torch, python-tensorflow. Without PATH, the file is placed next to the output. Repeatable."
+			   "python, python-torch, python-tensorflow, json (metadata). Without PATH, the file is placed next to the output. Repeatable."
 	)
 			->type_name("TYPE[=PATH]");
 	app.add_option("--depfile", args.depfile, "Write a dependency file listing all (imported) source files.");
 	app.add_option(
 			"--grad", args.gradFunctions,
-			"Also compile the gradient (vector-Jacobian product) of this member function, exported as <function>_vjp. "
-			"Repeatable."
+			"Gradient build: replace this member function by its gradient (compile without --grad for inference). "
+			"A function with a scalar output (an objective) returns it and the gradients of the trainable weights. "
+			"Otherwise <function> also saves the values that <function>_backward(d_<output>...) needs in the "
+			"context buffer <function>_ctx. Repeatable."
+	);
+	app.add_flag(
+			"--grad-fused", args.gradFused,
+			"For functions without scalar output: compute the outputs and gradients in one call "
+			"<function>(inputs..., d_<output>...) instead of <function> + <function>_backward."
+	);
+	app.add_flag(
+			"--grad-overwrite", args.gradOverwrite,
+			"Write the gradients to the output buffers instead of adding them (the default accumulates)."
 	);
 	app.add_option(
 			"--trainable", args.trainable,

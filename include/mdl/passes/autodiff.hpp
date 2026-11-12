@@ -19,12 +19,21 @@ namespace mdl::autodiff {
 	};
 
 	/**
+	 * @brief The number of cotangent inputs of the gradient of @p func (see vjp): 0 if @p func is an objective (has a
+	 * scalar output), else one per output.
+	 */
+	size_t numCotangents(const FunctionDecl& func);
+
+	/**
 	 * @brief Builds the vector-Jacobian product (reverse-mode gradient) of @p func in the same graph.
 	 * @details The returned function takes the inputs of @p func followed by one cotangent `d_<output>` per output and
 	 * returns the outputs of @p func followed by the gradient of each selected weight (in the order of
 	 * @p weightOrder, named `d_<path>`) and, if requested, the gradient of each input (`d_<input>`). Selected weights
 	 * that do not influence the outputs get a zero gradient. The gradient is expressed with builtins only, so the result
 	 * can be differentiated again (higher-order derivatives).
+	 *
+	 * If @p func has a scalar output, it is an objective: the gradient is that of its scalar outputs (other outputs are
+	 * auxiliary) and there are no cotangent inputs (see numCotangents).
 	 *
 	 * @param weightOrder the weights of the module in canonical order (see mdl::weightPaths).
 	 * @return the gradient function, or an error if a builtin without gradient rule is involved.
@@ -33,6 +42,29 @@ namespace mdl::autodiff {
 			Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
 			const Options& options = {}
 	);
+
+	/** @brief A gradient function split into a forward pass that saves residuals and a backward pass. */
+	struct Split {
+		/**
+		 * @brief `train(inputs...) -> (outputs..., residuals...)`: the forward pass, which also returns the values the
+		 * backward pass needs (the last `numResiduals` outputs).
+		 */
+		FunctionDecl train;
+		/** @brief `backward(residuals..., cotangents...) -> gradients...` (the first `numResiduals` parameters). */
+		FunctionDecl backward;
+		size_t numResiduals = 0;
+	};
+
+	/**
+	 * @brief Splits a gradient function (see vjp) into a forward and a backward pass.
+	 * @details The residuals are the values computed from the inputs that the backward pass needs. Values that only
+	 * depend on weights and constants, and cheap reshaping operations of residuals, are recomputed in the backward
+	 * pass instead of being saved.
+	 *
+	 * @param numOutputs the number of outputs of the differentiated function (the first outputs of @p vjp; its last
+	 * @p numOutputs parameters are the cotangents).
+	 */
+	std::expected<Split, std::string> split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs);
 
 } // namespace mdl::autodiff
 

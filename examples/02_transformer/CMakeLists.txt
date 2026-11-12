@@ -18,3 +18,10 @@ mdl_add_model(transformer_model_batched SOURCE model.dlm CONFIG model_test.yml O
 add_executable(02_transformer_batched main.cpp)
 target_link_libraries(02_transformer_batched PRIVATE transformer_model_batched)
 add_test(NAME example_02_transformer_batched COMMAND 02_transformer_batched --batch 3 --seq 16 --iters 2)
+
+# Gradient build of a tiny batched encoder: forward (saves into a context buffer) + forward_backward against finite
+# differences.
+mdl_add_model(transformer_model_grad SOURCE model.dlm CONFIG model_grad.yml OPTIONS --ellipsis-rank 2 --grad forward)
+add_executable(02_transformer_grad grad_check.cpp)
+target_link_libraries(02_transformer_grad PRIVATE transformer_model_grad)
+add_test(NAME example_02_transformer_grad COMMAND 02_transformer_grad)

@@ -8,7 +8,9 @@
 #include <mdl/utils/overload.hpp>
 
 #include <algorithm>
+#include <format>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -172,21 +174,86 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		}
 		const auto order = weightPaths(*module);
 
-		// The member functions plus the requested gradient functions.
-		std::vector<std::pair<std::string, const FunctionDecl*>> functions;
+		// The member functions; the gradient pass replaces the requested ones by their gradient functions.
+		struct Function {
+			std::string name;
+			const FunctionDecl* decl;
+			std::optional<ContextBuffer> context = std::nullopt;
+			size_t numPacked = 0; ///< packed outputs (producer: the last ones) or inputs (consumer: the first ones)
+			size_t firstGradient = std::numeric_limits<size_t>::max(); ///< index of the first gradient output
+			std::vector<std::string> gradientOf = {};				   ///< what the gradient outputs are gradients of
+		};
+		std::vector<Function> functions;
+		auto requested = [&](const std::string& name) {
+			return std::find(gradients.functions.begin(), gradients.functions.end(), name) != gradients.functions.end();
+		};
 		for (const auto& [funcName, decl] : module->functions)
-			functions.emplace_back(funcName, &decl);
+			if (!requested(funcName))
+				functions.push_back({funcName, &decl});
 		for (const auto& name : gradients.functions) {
 			auto it = module->functions.find(name);
 			if (it == module->functions.end())
-				continue;
-			auto grad = autodiff::vjp(unit.graph(), it->second, order, gradients.options);
+				throw std::runtime_error(std::format("{} has no member function '{}' to differentiate", moduleName, name));
+			const FunctionDecl& original = it->second;
+			auto grad = autodiff::vjp(unit.graph(), original, order, gradients.options);
 			if (!grad)
 				throw std::runtime_error(moduleName + "." + grad.error());
-			functions.emplace_back(name + "_vjp", &unit.keep(std::move(*grad)));
+			const FunctionDecl& vjp = unit.keep(std::move(*grad));
+
+			// What the gradient outputs are gradients of (as selected by autodiff::vjp).
+			std::unordered_set<const Node*> reachable;
+			std::function<void(const Node&)> reach = [&](const Node& node) {
+				if (!reachable.insert(&node).second)
+					return;
+				if (const auto* inv = std::get_if<InvocationNode>(&node))
+					for (const auto& arg : inv->arguments)
+						reach(arg.get());
+			};
+			for (const auto& output : original.outputs)
+				reach(output.get());
+			std::vector<std::string> gradientOf;
+			for (const auto& path : order) {
+				const bool selected =
+						gradients.options.trainable.empty() || gradients.options.trainable.selects(path);
+				const bool used = std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
+					const auto* pn = std::get_if<ParameterNode>(n);
+					return pn != nullptr && pn->name == path;
+				});
+				if (selected && used)
+					gradientOf.push_back(path);
+			}
+			if (gradients.options.inputs)
+				for (const auto& [pname, input] : original.parameters)
+					if (std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
+							return std::get_if<InputNode>(n) == &input.get();
+						}))
+						gradientOf.push_back(pname);
+
+			if (autodiff::numCotangents(original) == 0 || gradients.fused) {
+				functions.push_back({name, &vjp, std::nullopt, 0, original.outputs.size(), gradientOf});
+				continue;
+			}
+			auto parts = autodiff::split(unit.graph(), vjp, original.outputs.size());
+			if (!parts)
+				throw std::runtime_error(moduleName + "." + parts.error());
+			ContextBuffer context{
+					.name = name + "_ctx",
+					.sizeSymbol = mangledName(moduleName, name + "_ctx_size"),
+					.producer = true,
+					.ellipsisRank = ellipsisRank,
+			};
+			parts->train.name = name;
+			functions.push_back({name, &unit.keep(std::move(parts->train)), context, parts->numResiduals});
+			context.producer = false;
+			functions.push_back(
+					{name + "_backward", &unit.keep(std::move(parts->backward)), context, parts->numResiduals, 0,
+					 gradientOf}
+			);
 		}
 
-		for (const auto& [funcName, declPtr] : functions) {
+		for (const auto& function : functions) {
+			const std::string& funcName = function.name;
+			const FunctionDecl* declPtr = function.decl;
 			const FunctionDecl& decl = *declPtr;
 			if (!decl.templateParameters.empty())
 				continue;
@@ -200,6 +267,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 					.outputs = {},
 					.moduleWeights = order,
 					.hyperparameters = hyperparameters,
+					.context = function.context,
 			};
 
 			// Collect the graph nodes of the arguments and all weights reachable from the outputs.
@@ -246,6 +314,16 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 											  ? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])
 											  : getDataType(out);
 				fn.outputs.push_back(makeSignature(std::move(name), type, &out, argvals, ellipsisRank));
+			}
+			for (size_t i = function.firstGradient, k = 0; i < fn.outputs.size() && k < function.gradientOf.size(); ++i, ++k) {
+				fn.outputs[i].accumulate = gradients.accumulate;
+				fn.outputs[i].gradientOf = function.gradientOf[k];
+			}
+			if (function.context) {
+				auto& packed = function.context->producer ? fn.outputs : fn.inputs;
+				const size_t first = function.context->producer ? packed.size() - function.numPacked : 0;
+				for (size_t i = first; i < first + function.numPacked; ++i)
+					packed[i].packed = true;
 			}
 			exports.push_back(std::move(fn));
 		}

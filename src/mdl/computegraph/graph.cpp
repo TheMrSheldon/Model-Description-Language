@@ -119,6 +119,10 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 			return getDataType(args[0].get());
 		return fallback();
 
+	case FunctionIDs::SUM_ALL:
+	case FunctionIDs::MEAN_ALL:
+		return PrimitiveType::floating;
+
 	// VAR returns a scalar of the same element type.
 	case FunctionIDs::VAR:
 		if (!args.empty()) {
@@ -274,6 +278,9 @@ namespace {
 		void substitute(const Leaf& from, const Node& to) {
 			leafSubs[static_cast<const void*>(&from)] = &to;
 		}
+
+		/** @brief Replaces the node @p from (of any kind) by @p to. */
+		void replace(const Node& from, const Node& to) { memo[&from] = &to; }
 
 		const Node& clone(const Node& node) {
 			if (auto it = memo.find(&node); it != memo.end())
@@ -471,6 +478,20 @@ std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocat
 		call.outputs.push_back(&output.get());
 	addModuleCall(std::move(call));
 	return outputs;
+}
+
+Computegraph::Outputs Computegraph::substitute(
+		const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements
+) {
+	Inliner inliner{*this};
+	for (const auto& [from, to] : replacements)
+		inliner.replace(*from, *to);
+	Outputs result;
+	result.reserve(roots.size());
+	for (const auto& root : roots)
+		result.push_back(std::cref(inliner.clone(root.get())));
+	// Module calls are not propagated: a call whose outputs were replaced (e.g. by inputs) is no longer a unit.
+	return result;
 }
 
 const Node* Computegraph::findParameterNode(const std::string& scope, const std::string& path) const {

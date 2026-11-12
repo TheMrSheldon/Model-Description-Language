@@ -84,24 +84,49 @@ inline void mdl::bindings::PyBindingGenerator::generate(
 		for (const auto& fn : exports) {
 			if (fn.module != module)
 				continue;
-			out << "\n    def " << fn.function << "(self";
+			// Packed tensors are not arguments: they are stored in the context buffer `ctx`.
+			std::vector<const TensorSignature*> inputs, outputs;
 			for (const auto& in : fn.inputs)
-				out << ", " << in.name << ": " << tensorType();
+				if (!in.packed)
+					inputs.push_back(&in);
 			for (const auto& o : fn.outputs)
-				out << ", " << o.name << ": " << tensorOutputType();
+				if (!o.packed)
+					outputs.push_back(&o);
+			const auto& context = fn.context;
+			if (context && context->producer)
+				out << "\n    def " << context->name << "_size(self, *dims: int) -> int:\n"
+					<< "        \"\"\"Size in bytes of the context buffer for the given " << context->ellipsisRank
+					<< " dimension(s) of `...` (a buffer for the largest\n"
+					<< "        dimensions can be reused for all smaller ones; its data must be aligned to 64 bytes).\"\"\"\n"
+					<< "        return self._mod[\"" << context->sizeSymbol << "\"](*dims)\n";
+
+			out << "\n    def " << fn.function << "(self";
+			for (const auto* in : inputs)
+				out << ", " << in->name << ": " << tensorType();
+			for (const auto* o : outputs)
+				out << ", " << o->name << ": " << tensorOutputType();
+			if (context)
+				out << ", ctx: " << tensorType();
 			out << ") -> None:\n"
 				<< "        \"\"\"Outputs are written to the preallocated tensors (";
-			for (size_t i = 0; i < fn.outputs.size(); ++i)
-				out << (i > 0 ? ", " : "") << fn.outputs[i].name << ": " << detail::shapeStr(fn.outputs[i]);
-			out << ").\"\"\"\n"
+			for (size_t i = 0; i < outputs.size(); ++i)
+				out << (i > 0 ? ", " : "") << outputs[i]->name << ": " << detail::shapeStr(*outputs[i]);
+			out << ")";
+			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
+				out << ".\n        The gradients are added to the given tensors (accumulation): zero them before the first step";
+			if (context)
+				out << ".\n        `ctx` is the context buffer (1-D uint8, see " << context->name << "_size)";
+			out << ".\"\"\"\n"
 				<< "        self._mod[\"" << fn.symbol << "\"](";
 			std::vector<std::string> args;
-			for (const auto& in : fn.inputs)
-				args.push_back(toFfiArg(in.name));
+			for (const auto* in : inputs)
+				args.push_back(toFfiArg(in->name));
 			for (const auto& w : fn.weights)
 				args.push_back(toFfiArg("self.weights[\"" + w.name + "\"]"));
-			for (const auto& o : fn.outputs)
-				args.push_back(toFfiArg(o.name));
+			for (const auto* o : outputs)
+				args.push_back(toFfiArg(o->name));
+			if (context)
+				args.push_back(toFfiArg("ctx"));
 			for (size_t i = 0; i < args.size(); ++i)
 				out << (i > 0 ? ", " : "") << args[i];
 			out << ")\n";

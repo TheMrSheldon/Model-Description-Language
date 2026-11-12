@@ -21,4 +21,7 @@ module Block[dim: uint, hidden: uint, heads: uint] {
         auto h1 = norm(attn[h ... d -> ... (h d)] + x);
         return h1 + down(gelu(up(h1)));
     }
+
+    /** An objective: compiled with `--grad loss`, it returns the loss and the gradients in one call. */
+    float loss(x: float[..., dim], target: float[..., dim]) => mse(forward(x), target);
 }
