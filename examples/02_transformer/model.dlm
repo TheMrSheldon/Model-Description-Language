@@ -78,13 +78,40 @@ module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
 }
 
 /**
- * @brief The BERT model (like Hugging Face's `BertModel` without pooler): token, segment, and position ids to the
- * last hidden states. With `--ellipsis-rank 2`, the ids are [batch, seq] and the output is [batch, seq, model].
+ * @brief BERT's pooler: the first position of each sequence ([CLS]), transformed (the input of classification heads).
+ * For h: [batch, seq, model], the result is [batch, model].
+ */
+module BertPooler[conf: TransformerConf] {
+    dense: Linear[conf.dims.model, conf.dims.model, true]
+
+    float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(select(h, -2, 0)));
+}
+
+/**
+ * @brief The BERT model (like Hugging Face's `BertModel`): token, segment, and position ids to the last hidden states
+ * (`forward`) and to the pooled output (`pooled`). With `--ellipsis-rank 2`, the ids are [batch, seq], the hidden states
+ * [batch, seq, model], and the pooled output [batch, model].
  */
 module Bert[conf: TransformerConf, emb: EmbeddingConf] {
     embeddings: BertEmbeddings[conf, emb]
     encoder: BertEncoder[conf]
+    pooler: BertPooler[conf]
 
     float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
         encoder(embeddings(ids, types, positions));
+
+    float[..., conf.dims.model] pooled(ids: int[...], types: int[...], positions: int[...]) =>
+        pooler(forward(ids, types, positions));
+}
+
+/**
+ * @brief Sequence classification (like Hugging Face's `BertForSequenceClassification` in eval mode): the logits of
+ * `classes` classes from the pooled output. For ids: [batch, seq], the logits are [batch, classes].
+ */
+module BertForSequenceClassification[conf: TransformerConf, emb: EmbeddingConf, classes: uint] {
+    bert: Bert[conf, emb]
+    classifier: Linear[conf.dims.model, classes, true]
+
+    float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
+        classifier(bert.pooled(ids, types, positions));
 }

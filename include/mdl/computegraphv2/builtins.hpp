@@ -68,6 +68,9 @@ namespace mdl::builtins {
 		/** Masked tensors (resolved by the masking pass; backends never see them) **/
 		MASK_OF, /**< (x masked): `x.mask`, 1.0 at x's valid elements and 0.0 at masked ones (broadcastable to x) */
 		UNMASK,	 /**< (x masked): `x.data`, x's values with zeros at the masked elements (an unmasked tensor) */
+		/** Selection along an axis **/
+		SELECT,		   /**< (x, axis, index): x at `index` along `axis` (the axis is removed; negative: from the end) */
+		UNSELECT_LIKE, /**< (g, axis, index, like): zeros like `like`, g at `index` along `axis` (the adjoint) */
 
 		COUNT
 	};

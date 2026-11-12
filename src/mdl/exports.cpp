@@ -370,16 +370,54 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				const auto& pn = std::get<ParameterNode>(*weight);
 				fn.weights.push_back(makeSignature(pn.name, pn.type, weight, argvals, ellipsisRank));
 			}
+			// The exact output shapes (the `...` of an output may have fewer dimensions than that of the inputs, e.g.
+			// a sequence [batch, seq] pooled to [batch]). Not for functions with packed inputs (their types are
+			// imprecise); their declared types define the ABI.
+			std::optional<shapes::Shapes> inferred;
+			if (!function.context || function.context->producer)
+				if (auto r = shapes::infer(decl, ellipsisRank, evaluate))
+					inferred = std::move(*r);
 			for (size_t i = 0; i < decl.outputs.size(); ++i) {
 				const auto& out = decl.outputs[i].get();
 				auto name = i < decl.outputNames.size() ? decl.outputNames[i]
 						  : decl.outputs.size() == 1  ? std::string{"output"}
 													  : "output" + std::to_string(i);
-				// The declared return type defines the ABI (inferred node types may be less precise).
 				const DataType type = i < decl.returnTypes.size()
 											  ? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])
 											  : getDataType(out);
-				fn.outputs.push_back(makeSignature(std::move(name), type, &out, argvals, ellipsisRank));
+				auto signature = makeSignature(std::move(name), type, &out, argvals, ellipsisRank);
+				if (const shapes::Shape* exact = inferred ? inferred->find(out) : nullptr) {
+					std::vector<int64_t> shape;
+					for (const auto& d : *exact)
+						shape.push_back(d.isConstant() ? d.factor : -1);
+					// The declared dimensions after `...` (or all, without `...`) must match.
+					const auto* declared = std::get_if<TensorType>(&type);
+					if (declared != nullptr) {
+						auto ellipsis = std::find_if(declared->shape.begin(), declared->shape.end(), [](const auto& d) {
+							return std::holds_alternative<Elipsis>(d);
+						});
+						const size_t trailing = static_cast<size_t>(declared->shape.end() - ellipsis) - (ellipsis != declared->shape.end());
+						const size_t fixed = ellipsis == declared->shape.end() ? declared->shape.size() : trailing;
+						const auto& expected = signature.shape;
+						bool ok = ellipsis == declared->shape.end() ? shape.size() == expected.size() : shape.size() >= fixed;
+						for (size_t k = 1; ok && k <= fixed; ++k) {
+							const int64_t want = expected[expected.size() - k], have = shape[shape.size() - k];
+							ok = want < 0 || have < 0 || want == have;
+						}
+						if (!ok)
+							throw std::runtime_error(std::format(
+									"{}.{}: output {} has the shape [{}], which does not match its declared type", moduleName,
+									funcName, i, [&] {
+										std::string str;
+										for (const auto& d : *exact)
+											str += (str.empty() ? "" : ", ") + d.str();
+										return str;
+									}()
+							));
+					}
+					signature.shape = std::move(shape);
+				}
+				fn.outputs.push_back(std::move(signature));
 			}
 			for (size_t i = function.firstGradient, k = 0; i < fn.outputs.size() && k < function.gradientOf.size(); ++i, ++k) {
 				fn.outputs[i].accumulate = gradients.accumulate;

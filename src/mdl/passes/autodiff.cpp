@@ -273,6 +273,10 @@ namespace mdl::autodiff {
 												: b.op(FIDs::WHERE, getDataType(g), {x, zero, g});
 				return b.unbroadcast(selected, inv.arguments[arg].get());
 			}
+			case FIDs::SELECT: // the gradient goes to the selected position
+				return b.op(FIDs::UNSELECT_LIKE, getDataType(x), {g, inv.arguments[1], inv.arguments[2], x});
+			case FIDs::UNSELECT_LIKE:
+				return b.op(FIDs::SELECT, getDataType(x), {g, inv.arguments[1], inv.arguments[2]});
 			case FIDs::TAKE: // rows of a table: their gradients are added to the selected rows
 				return b.op(FIDs::SCATTER_ADD_ROWS, getDataType(x), {g, *other, x});
 			case FIDs::SCATTER_ADD_ROWS:
@@ -303,6 +307,9 @@ namespace mdl::autodiff {
 				return arg == 0; // not the (integer) indices
 			case FIDs::WHERE:
 				return arg != 0; // not the condition
+			case FIDs::SELECT:
+			case FIDs::UNSELECT_LIKE:
+				return arg == 0; // not the axis, index, or reference
 			default:
 				return true;
 			}

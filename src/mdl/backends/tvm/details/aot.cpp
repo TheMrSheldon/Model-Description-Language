@@ -247,25 +247,27 @@ namespace mdl::backend::tvm {
 				unsupported("expression " + std::string(e->GetTypeKey()));
 			}
 
-			/** @brief Small constants (e.g. scalars that were not inlined) are written into a stack buffer. */
+			/** @brief Small constants (e.g. scalars that were not inlined) are written into a workspace buffer. */
 			tirx::Buffer materializeConstant(const relax::ConstantNode& c) {
 				const auto& data = c.data;
 				const int64_t n = data.Shape().Product();
-				if (n > 1024 || data->dtype.code != kDLFloat || data->dtype.bits != 32)
-					unsupported("constant (only float32 constants with up to 1024 elements are supported)");
+				const DataType dtype(data->dtype);
+				const bool f32 = dtype == DataType::Float(32), i32 = dtype == DataType::Int(32);
+				if (n > 1024 || !(f32 || i32))
+					unsupported("constant (only float32 and int32 constants with up to 1024 elements are supported)");
 				Array<PrimExpr> shape;
 				for (int64_t d : data.Shape())
 					shape.push_back(IntImm(DataType::Int(64), d));
-				auto buffer = tirx::decl_buffer(shape, DataType::Float(32), freshName("const"), "global.workspace");
+				auto buffer = tirx::decl_buffer(shape, dtype, freshName("const"), "global.workspace");
 				stmts.push_back(tirx::AllocBuffer(buffer));
-				auto flat = tirx::decl_buffer({IntImm(DataType::Int(64), n)}, DataType::Float(32), freshName("const_flat"));
+				auto flat = tirx::decl_buffer({IntImm(DataType::Int(64), n)}, dtype, freshName("const_flat"));
 				flat.CopyOnWrite()->data = buffer->data;
 				stmts.push_back(tirx::DeclBuffer(flat));
-				const auto* values = static_cast<const float*>(data->data);
-				for (int64_t i = 0; i < n; ++i)
-					stmts.push_back(tirx::BufferStore(
-							flat, ::tvm::FloatImm(DataType::Float(32), values[i]), {IntImm(DataType::Int(64), i)}
-					));
+				for (int64_t i = 0; i < n; ++i) {
+					PrimExpr value = f32 ? PrimExpr(::tvm::FloatImm(dtype, static_cast<const float*>(data->data)[i]))
+										 : PrimExpr(IntImm(dtype, static_cast<const int32_t*>(data->data)[i]));
+					stmts.push_back(tirx::BufferStore(flat, value, {IntImm(DataType::Int(64), i)}));
+				}
 				return buffer;
 			}
 

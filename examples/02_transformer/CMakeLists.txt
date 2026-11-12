@@ -36,7 +36,8 @@ add_test(NAME example_02_transformer_bert COMMAND 02_transformer_bert)
 
 # Padded sequences: `Bert` as a masked function (`--mask forward`, an additional input mask: bool[batch, seq]) against
 # Hugging Face's BertModel with the same attention_mask.
-mdl_add_model(bert_model_masked SOURCE model.dlm CONFIG model_bert_tiny.yml OPTIONS --ellipsis-rank 2 --mask forward)
+mdl_add_model(bert_model_masked SOURCE model.dlm CONFIG model_bert_tiny.yml
+	OPTIONS --ellipsis-rank 2 --mask forward --mask pooled)
 add_executable(02_transformer_bert_masked bert_check.cpp)
 target_link_libraries(02_transformer_bert_masked PRIVATE bert_model_masked)
 target_compile_definitions(02_transformer_bert_masked PRIVATE MDL_BERT_MASKED
@@ -50,3 +51,12 @@ add_executable(02_transformer_grad_masked grad_check.cpp)
 target_compile_definitions(02_transformer_grad_masked PRIVATE MDL_GRAD_MASKED)
 target_link_libraries(02_transformer_grad_masked PRIVATE transformer_model_grad_masked)
 add_test(NAME example_02_transformer_grad_masked COMMAND 02_transformer_grad_masked)
+
+# Sequence classification (BERT + pooler + classifier) on padded sequences against Hugging Face's
+# BertForSequenceClassification.
+mdl_add_model(bert_cls_model SOURCE model.dlm CONFIG model_bert_tiny.yml OPTIONS --ellipsis-rank 2 --mask logits)
+add_executable(02_transformer_cls cls_check.cpp)
+target_link_libraries(02_transformer_cls PRIVATE bert_cls_model)
+target_compile_definitions(02_transformer_cls PRIVATE
+	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_cls.safetensors")
+add_test(NAME example_02_transformer_cls COMMAND 02_transformer_cls)

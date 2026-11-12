@@ -149,6 +149,31 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 		}
 		return fallback();
 
+	// SELECT removes the selected axis (if the type can express it: not when it is part of `...`).
+	case FunctionIDs::SELECT:
+		if (args.size() >= 2)
+			if (const auto* t = getTensor(args[0].get())) {
+				const auto* c = std::get_if<ConstNode>(&args[1].get());
+				const auto* axis = c ? std::get_if<int>(&c->value) : nullptr;
+				TensorType::Shape s = t->shape;
+				if (axis != nullptr) {
+					const int rank = static_cast<int>(s.size());
+					const int a = *axis < 0 ? *axis + rank : *axis;
+					// Only if no `...` lies between the axis and the end it is counted from.
+					bool exact = a >= 0 && a < rank;
+					for (int k = *axis < 0 ? a : 0; exact && k < (*axis < 0 ? rank : a + 1); ++k)
+						exact = !std::holds_alternative<Elipsis>(s[k]);
+					if (exact)
+						s.erase(s.begin() + a);
+				}
+				return TensorType{t->type, std::move(s)};
+			}
+		return fallback();
+	case FunctionIDs::UNSELECT_LIKE:
+		if (args.size() >= 4)
+			return getDataType(args[3].get());
+		return fallback();
+
 	// WHERE: the type of the selected values (the condition only broadcasts).
 	case FunctionIDs::WHERE:
 		if (args.size() >= 3) {

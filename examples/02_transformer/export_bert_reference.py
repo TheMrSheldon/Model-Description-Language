@@ -5,17 +5,21 @@ Exports a randomly initialized Hugging Face BertModel (without pooler) for the c
     python export_bert_reference.py --out data/bert_tiny.safetensors              # the tiny model of the tests
     python export_bert_reference.py --base --out bert_base.safetensors            # BERT-base (vocabulary 30522)
     python export_bert_reference.py --lengths 7 4 --out data/bert_tiny_padded.safetensors  # padded sequences
+    python export_bert_reference.py --classes 3 --out data/bert_tiny_cls.safetensors  # BertForSequenceClassification
 
 Keys: the MDL weight paths (float32), `input.ids`, `input.types`, `input.positions` (int32, [batch, seq]),
-`reference.output` (float32, [batch, seq, hidden]), and with --lengths `input.mask` (bool, [batch, seq]; true for the
-first `length` tokens of each sequence, Hugging Face's attention_mask).
+`reference.output` (float32, [batch, seq, hidden]), `reference.pooled` (float32, [batch, hidden]), and with --lengths
+`input.mask` (bool, [batch, seq]; true for the first `length` tokens of each sequence, Hugging Face's attention_mask).
+With --classes, the model is BertForSequenceClassification (the MDL weight paths of BERT get the prefix `bert.`, plus
+`classifier.W/b`), and the file also contains `input.labels` (int32, [batch]), `reference.logits` (float32,
+[batch, classes]), and `reference.loss` (float32, the mean cross-entropy of the logits and labels).
 """
 
 import argparse
 
 import torch
 from safetensors.torch import save_file
-from transformers import BertConfig, BertModel
+from transformers import BertConfig, BertForSequenceClassification, BertModel
 
 
 def mdl_weights(model: BertModel, layers: int) -> dict[str, torch.Tensor]:
@@ -27,6 +31,8 @@ def mdl_weights(model: BertModel, layers: int) -> dict[str, torch.Tensor]:
         "embeddings.tokenType.table": hf["embeddings.token_type_embeddings.weight"],
         "embeddings.norm.gamma": hf["embeddings.LayerNorm.weight"],
         "embeddings.norm.beta": hf["embeddings.LayerNorm.bias"],
+        "pooler.dense.W": hf["pooler.dense.weight"],
+        "pooler.dense.b": hf["pooler.dense.bias"],
     }
     linears = {
         "weightQuery": "attention.self.query",
@@ -61,6 +67,7 @@ def main() -> None:
     parser.add_argument("--seq", type=int, default=7)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lengths", type=int, nargs="+", help="valid length of each sequence (padding after it)")
+    parser.add_argument("--classes", type=int, help="export BertForSequenceClassification with this many classes")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -75,7 +82,13 @@ def main() -> None:
             vocab_size=args.vocab,
             max_position_embeddings=args.positions,
         )
-    model = BertModel(config, add_pooling_layer=False).eval()
+    if args.classes:
+        config.num_labels = args.classes
+        classifier = BertForSequenceClassification(config).eval()
+        model = classifier.bert
+    else:
+        classifier = None
+        model = BertModel(config).eval()
 
     ids = torch.randint(0, config.vocab_size, (args.batch, args.seq))
     types = torch.randint(0, config.type_vocab_size, (args.batch, args.seq))
@@ -86,18 +99,36 @@ def main() -> None:
             parser.error("--lengths needs one length per sequence (--batch)")
         mask = torch.arange(args.seq)[None, :] < torch.tensor(args.lengths)[:, None]
     with torch.no_grad():
-        output = model(
+        result = model(
             input_ids=ids,
             token_type_ids=types,
             position_ids=positions,
             attention_mask=None if mask is None else mask.to(torch.long),
-        ).last_hidden_state
+        )
+    output = result.last_hidden_state
 
     tensors = mdl_weights(model, config.num_hidden_layers)
+    if classifier is not None:
+        labels = torch.randint(0, args.classes, (args.batch,))
+        with torch.no_grad():
+            classified = classifier(
+                input_ids=ids,
+                token_type_ids=types,
+                position_ids=positions,
+                attention_mask=None if mask is None else mask.to(torch.long),
+                labels=labels,
+            )
+        tensors = {"bert." + path: t for path, t in tensors.items()}
+        tensors["classifier.W"] = classifier.classifier.weight.detach().float().contiguous()
+        tensors["classifier.b"] = classifier.classifier.bias.detach().float().contiguous()
+        tensors["input.labels"] = labels.to(torch.int32).contiguous()
+        tensors["reference.logits"] = classified.logits.float().contiguous()
+        tensors["reference.loss"] = classified.loss.float().reshape(())
     tensors["input.ids"] = ids.to(torch.int32).contiguous()
     tensors["input.types"] = types.to(torch.int32).contiguous()
     tensors["input.positions"] = positions.to(torch.int32).contiguous()
     tensors["reference.output"] = output.float().contiguous()
+    tensors["reference.pooled"] = result.pooler_output.float().contiguous()
     if mask is not None:
         tensors["input.mask"] = mask.contiguous()
     save_file(tensors, args.out)

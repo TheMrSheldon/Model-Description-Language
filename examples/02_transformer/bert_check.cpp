@@ -57,7 +57,21 @@ int main(int argc, char** argv) {
 		std::printf("masked positions: %zu (max |output| there: %.3g)\n", masked / hidden, maxMasked);
 	std::printf("batch %lld, seq %lld: max abs error vs Hugging Face %.3g (max |output| %.3g)\n",
 				(long long)ids.shape()[0], (long long)ids.shape()[1], maxErr, maxRef);
-	const bool ok = maxErr < 1e-4 * std::max(1.0, maxRef) && maxMasked == 0.0;
+	bool ok = maxErr < 1e-4 * std::max(1.0, maxRef) && maxMasked == 0.0;
+
+	// The pooled output (the transformed first position of each sequence): [batch, hidden].
+	const auto& referencePooled = floats.at("reference.pooled");
+	mdl::runtime::Tensor pooled(referencePooled.shape());
+#ifdef MDL_BERT_MASKED
+	Model::pooled(ids, types, positions, mask, weights, pooled);
+#else
+	Model::pooled(ids, types, positions, weights, pooled);
+#endif
+	double maxPooledErr = 0;
+	for (size_t i = 0; i < pooled.size(); ++i)
+		maxPooledErr = std::max(maxPooledErr, double(std::abs(pooled.data()[i] - referencePooled.data()[i])));
+	std::printf("pooled output: max abs error vs Hugging Face %.3g\n", maxPooledErr);
+	ok &= maxPooledErr < 1e-4;
 	std::puts(ok ? "OK" : "FAILED");
 	return ok ? 0 : 1;
 }

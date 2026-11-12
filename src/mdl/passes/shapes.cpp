@@ -285,6 +285,20 @@ namespace mdl::shapes {
 					arg(1);
 					return arg(2);
 
+				case FIDs::SELECT: {
+					Shape s = arg(0);
+					const int64_t rank = static_cast<int64_t>(s.size());
+					int64_t a = integer(inv.arguments.at(1).get());
+					a = a < 0 ? a + rank : a;
+					if (a < 0 || a >= rank)
+						fail("select: axis out of range");
+					s.erase(s.begin() + a);
+					return s;
+				}
+				case FIDs::UNSELECT_LIKE:
+					arg(0);
+					return arg(3);
+
 				case FIDs::TAKE: {
 					const Shape& table = arg(0);
 					if (table.empty())

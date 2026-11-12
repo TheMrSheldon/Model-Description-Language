@@ -12,3 +12,17 @@ Bert:
     vocab: 100
     positions: 16
     types: 2
+BertForSequenceClassification:
+  conf:
+    dims:
+      model: 32
+      key: 8
+      value: 8
+      inner: 64
+    numEncoders: 2
+    numAttnHeads: 4
+  emb:
+    vocab: 100
+    positions: 16
+    types: 2
+  classes: 3

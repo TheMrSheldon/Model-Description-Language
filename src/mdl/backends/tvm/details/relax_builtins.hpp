@@ -153,6 +153,47 @@ static inline ::tvm::relax::Expr scatterAddRows(
     return callRelaxOp("relax.op.reshape", out, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>(likeShape.begin(), likeShape.end())));
 }
 
+/**
+ * `out = zeros like `like``, then `out[..., index, ...] = g` along `axis` (the adjoint of selecting an index): a
+ * hand-written kernel over `like` flattened to [P, A, Q] (P: the dimensions before the axis, A: the axis, Q: after it).
+ * A negative index counts from the end of the axis.
+ */
+static inline ::tvm::relax::Expr unselectLike(
+    ::tvm::relax::BlockBuilder& bb, const ::tvm::relax::Expr& g, int64_t axis, int64_t index,
+    const ::tvm::relax::Expr& like)
+{
+    namespace tirx = ::tvm::tirx;
+    using ::tvm::IntImm;
+    const auto i64 = ::tvm::DataType::Int(64);
+    const auto likeShape = tensorShape(like);
+    const int64_t rank = static_cast<int64_t>(likeShape.size());
+    const int64_t a = axis < 0 ? axis + rank : axis;
+    const ::tvm::PrimExpr P = shapeProduct(std::vector<::tvm::PrimExpr>(likeShape.begin(), likeShape.begin() + a));
+    const ::tvm::PrimExpr A = likeShape.at(a);
+    const ::tvm::PrimExpr Q = shapeProduct(likeShape, a + 1);
+    auto g2 = bb->Emit(callRelaxOp("relax.op.reshape", g, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>{P, Q})), "g_flat");
+
+    tirx::Var p("p", i64), q("q", i64), n("n", i64);
+    auto G = tirx::decl_buffer({p, q}, ::tvm::DataType::Float(32), "g");
+    auto O = tirx::decl_buffer({p, n, q}, ::tvm::DataType::Float(32), "out");
+    tirx::Var hg("g_handle", ::tvm::DataType::Handle()), ho("out_handle", ::tvm::DataType::Handle());
+    tirx::Var i("i", i64), j("j", i64), k("k", i64);
+    const ::tvm::PrimExpr at = index < 0 ? n + IntImm(i64, index) : ::tvm::PrimExpr(IntImm(i64, index));
+    auto value = tirx::Select(j == at, tirx::BufferLoad(G, {i, k}), ::tvm::FloatImm(::tvm::DataType::Float(32), 0.0));
+    auto loops = tirx::For(i, IntImm(i64, 0), p, tirx::ForKind::kParallel,
+        tirx::For(j, IntImm(i64, 0), n, tirx::ForKind::kSerial,
+            tirx::For(k, IntImm(i64, 0), q, tirx::ForKind::kSerial, tirx::BufferStore(O, value, {i, j, k}))));
+    auto body = tirx::SBlockRealize({}, ::tvm::Bool(true), tirx::SBlock({}, {}, {}, "root", loops));
+    ::tvm::ffi::Map<tirx::Var, tirx::Buffer> buffers{{hg, G}, {ho, O}};
+    auto func = ::tvm::WithAttr(tirx::PrimFunc({hg, ho}, body, ::tvm::VoidType(), buffers), "op_pattern", ::tvm::Integer(8));
+    auto gv = bb->AddFunction(func, "unselect_like");
+    static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
+    auto out = bb->Emit(::tvm::relax::Call(callTir, {gv, ::tvm::relax::Tuple({g2})}, ::tvm::Attrs(),
+                                           {::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr({P, A, Q}), ::tvm::DataType::Float(32))}),
+                        "unselected");
+    return callRelaxOp("relax.op.reshape", out, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>(likeShape.begin(), likeShape.end())));
+}
+
 /** Emit a value into the BlockBuilder and return the bound Var. */
 static inline ::tvm::relax::Var emitAs(
     ::tvm::relax::BlockBuilder& bb,
@@ -452,12 +493,31 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     },
     /** WHERE — ts[1] where ts[0], else ts[2] **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return callRelaxOp("relax.op.where", ts[0], ts[1], ts[2]); },
-    /** MASK_OF, UNMASK — resolved by the masking pass **/
+    /** MASK_OF, UNMASK — resolved by the masking pass (placed after WHERE) **/
     [](auto& /*bb*/, auto /*ts*/) -> ::tvm::relax::Expr {
         throw std::runtime_error("`.mask` of a tensor that is not masked in the compiled function (see --mask)");
     },
     [](auto& /*bb*/, auto /*ts*/) -> ::tvm::relax::Expr {
         throw std::runtime_error("`.data` of a tensor that is not masked in the compiled function (see --mask)");
+    },
+    /** SELECT — ts[0] at the index ts[2] along the axis ts[1] (negative indices count from the end) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        const int64_t axis = extractPrim(ts[1]).template as<::tvm::IntImmNode>()->value;
+        const int64_t index = extractPrim(ts[2]).template as<::tvm::IntImmNode>()->value;
+        const int64_t rank = tensorNdim(ts[0]);
+        int32_t i = static_cast<int32_t>(index);
+        DLDevice dev{kDLCPU, 0};
+        auto data = ::tvm::runtime::Tensor::Empty(::tvm::ffi::Shape{}, ::tvm::DataType::Int(32), dev);
+        data.CopyFromBytes(&i, sizeof(i));
+        return callRelaxOp("relax.op.take", ts[0], ::tvm::relax::Constant(data),
+                           ::tvm::ffi::Optional<int64_t>(axis < 0 ? axis + rank : axis),
+                           ::tvm::ffi::String(index < 0 ? "wrap" : "clip"));
+    },
+    /** UNSELECT_LIKE — the adjoint of SELECT **/
+    [](auto& bb, auto ts) -> ::tvm::relax::Expr {
+        const int64_t axis = extractPrim(ts[1]).template as<::tvm::IntImmNode>()->value;
+        const int64_t index = extractPrim(ts[2]).template as<::tvm::IntImmNode>()->value;
+        return unselectLike(bb, ts[0], axis, index, ts[3]);
     },
 });
 

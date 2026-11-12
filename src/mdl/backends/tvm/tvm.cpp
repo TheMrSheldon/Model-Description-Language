@@ -352,7 +352,8 @@ static ::tvm::relax::Expr translateRelax(
 	// evaluated here and passed as float32 constants. (Relax's FoldConstant cannot evaluate operators without TVM's
 	// Python legalizations, and backend patterns rely on seeing the constant values.)
 	using FIDs = mdl::builtins::FunctionIDs;
-	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND);
+	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND ||
+					  node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE); // integer arguments stay integers
 	std::vector<::tvm::relax::Expr> translatedArgs;
 	translatedArgs.reserve(node.arguments.size());
 	for (const auto& argRef : node.arguments) {
