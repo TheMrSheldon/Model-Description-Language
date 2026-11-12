@@ -73,3 +73,15 @@ TEST_CASE("reductions, reshapes, and embeddings", "[shapes]") {
 	check("flat", "[B0*B1, 4]");
 	check("total", "[]");
 }
+
+TEST_CASE("the graph types of max/min/sum keep the reduced axis like the backend", "[shapes]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			float[...] squeezed(x: float[..., 4]) => __builtin_sum(x)[... 1 -> ...];
+		}
+	)");
+	const auto& f = std::get<ModuleType>(unit.definitions.at("M")).functions.at("squeezed");
+	auto r = shapes::infer(f, 2, evaluate);
+	REQUIRE(r.has_value());
+	CHECK(shapes::str(shapeAt(*r, f.outputs[0].get())) == "[B0, B1]");
+}

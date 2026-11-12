@@ -444,6 +444,8 @@ static std::vector<int> computePermutation(
 }
 
 static bool isIdentityPermutation(const std::vector<int>& perm) {
+	if (perm.size() == 1 && perm[0] == builtins::kEllipsisPermMarker)
+		return true; // only the ellipsis (all dims in their order), e.g. `... 1 -> ...`
 	for (int i = 0; i < static_cast<int>(perm.size()); ++i)
 		if (perm[i] != i)
 			return false;
@@ -628,6 +630,15 @@ static std::expected<const Node*, std::string> applyRemerge(
 			if (atom.kind == AtomKind::Ellipsis)
 				seen = true;
 			else if (atom.kind != AtomKind::Literal)
+				++(seen ? ellipsisAfter : ellipsisBefore);
+		}
+		// Size-1 dims of the input that are squeezed away (literals of the LHS, e.g. `... 1 -> ...`) are not part of the
+		// ellipsis either: the permutation leaves them next to the ellipsis dims (before or after them).
+		seen = false;
+		for (const auto& atom : flattenSpec(lhs)) {
+			if (atom.kind == AtomKind::Ellipsis)
+				seen = true;
+			else if (atom.kind == AtomKind::Literal)
 				++(seen ? ellipsisAfter : ellipsisBefore);
 		}
 	}

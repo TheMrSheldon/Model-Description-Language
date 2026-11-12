@@ -71,12 +71,30 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 		}
 		return fallback();
 
-	// Reduction ops: remove the last shape dimension.
-	// If shape has only one element (e.g. a bare Elipsis{}), keep it as-is.
+	// max/min/sum keep the reduced (last) axis with size 1, as the backends do (e.g. softmax's x - max(x) broadcasts).
+	// \todo If the last entry is `...`, the reduced dimension is part of it, which the type cannot express; the type
+	// then drops the last entry (as before), so that it differs from the argument's type (the gradient pass decides by
+	// the types whether a gradient must be summed; see mdl::shapes for exact shapes).
 	case FunctionIDs::MAX:
 	case FunctionIDs::MIN:
-	case FunctionIDs::MEAN:
 	case FunctionIDs::SUM:
+		if (!args.empty()) {
+			if (const auto* t = getTensor(args[0].get()); t != nullptr && !t->shape.empty()) {
+				TensorType::Shape s = t->shape;
+				if (std::holds_alternative<Elipsis>(s.back())) {
+					if (s.size() < 2)
+						return fallback();
+					s.pop_back();
+				} else {
+					s.back() = 1u;
+				}
+				return TensorType{t->type, std::move(s)};
+			}
+		}
+		return fallback();
+
+	// mean removes the last shape dimension. If the shape has only one element (e.g. a bare Elipsis{}), keep it.
+	case FunctionIDs::MEAN:
 		if (!args.empty()) {
 			if (const auto* t = getTensor(args[0].get())) {
 				if (t->shape.size() >= 2) {

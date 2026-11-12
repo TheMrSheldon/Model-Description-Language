@@ -4,6 +4,7 @@
 #include "../computegraphv2/datatype.hpp"
 #include "../computegraphv2/graph.hpp"
 #include "../utils/pathpattern.hpp"
+#include "./shapes.hpp"
 
 #include <expected>
 #include <string>
@@ -16,6 +17,12 @@ namespace mdl::autodiff {
 		PathPatterns trainable;
 		/** @brief Whether to also compute the gradients with respect to the function's inputs. */
 		bool inputs = false;
+		/**
+		 * @brief Exact shapes (optional; for the `...` rank the function is compiled with). Without them, the pass
+		 * decides from the declared types whether a gradient must be summed over broadcast dimensions, which is only
+		 * reliable if the types are exact.
+		 */
+		shapes::Oracle* shapes = nullptr;
 	};
 
 	/**

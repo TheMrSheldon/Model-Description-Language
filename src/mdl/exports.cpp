@@ -241,7 +241,11 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			if (it == decls.end())
 				throw std::runtime_error(std::format("{} has no member function '{}' to differentiate", moduleName, name));
 			const FunctionDecl& original = *it->second;
-			auto grad = autodiff::vjp(unit.graph(), original, order, gradients.options);
+			// Exact shapes for the compiled `...` rank, so that the gradient pass does not depend on imprecise types.
+			shapes::Oracle oracle{ellipsisRank, evaluate};
+			autodiff::Options options = gradients.options;
+			options.shapes = &oracle;
+			auto grad = autodiff::vjp(unit.graph(), original, order, options);
 			if (!grad)
 				throw std::runtime_error(moduleName + "." + grad.error());
 			if (auto mask = masks.find(name); mask != masks.end()) {

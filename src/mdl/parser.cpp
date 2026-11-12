@@ -83,6 +83,8 @@ namespace mdl {
 		std::deque<mdl::Namespace> instanceScopes;
 		/** @brief While specializing a function: which parameters take masked tensors (see specialize()). */
 		std::optional<std::vector<bool>> maskedParams;
+		/** @brief While specializing a function: the values of its template parameters (inferred at the call). */
+		std::map<std::string, int> templateValues;
 		/** @brief Specialized functions by definition and argument pattern. */
 		std::map<std::pair<const FunctionTemplate*, std::string>, const FunctionDecl*> specializations;
 		/** @brief Name of the module whose definition is currently parsed (scope of its weights); empty outside. */
@@ -751,6 +753,7 @@ namespace mdl {
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
 			const auto specialization = std::exchange(maskedParams, std::nullopt);
+			const auto boundTemplate = std::exchange(templateValues, {});
 			std::vector<std::reference_wrapper<const Node>> outputs;
 			std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> tparams;
 			std::vector<std::pair<std::string, std::reference_wrapper<const InputNode>>> params;
@@ -758,6 +761,11 @@ namespace mdl {
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
+					if (auto value = boundTemplate.find(name); value != boundTemplate.end()) {
+						// Specialized for a call: the template parameter is a constant in the body.
+						currentNamespace().put(name, Object{&graph().addConstNode(Atomic{value->second})});
+						continue;
+					}
 					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype, name)});
 					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
@@ -909,6 +917,15 @@ namespace mdl {
 					bestScore = score;
 				}
 			}
+			if (best != nullptr) {
+				auto values = inferTemplateValues(*best, argtypes);
+				if (!values.empty() && best->templ != nullptr) {
+					std::vector<bool> pattern;
+					for (size_t i = 0; i < best->parameters.size(); ++i)
+						pattern.push_back(masked(best->parameters[i].second.get().type) || masked(argtypes[i]));
+					return &specialize(*best, pattern, values);
+				}
+			}
 			if (best == nullptr) {
 				// Let the arity check report wrong argument counts; otherwise no overload takes the arguments.
 				const bool arityMatches = std::any_of(candidates.begin(), candidates.end(), [&](const FunctionDecl* c) {
@@ -930,12 +947,67 @@ namespace mdl {
 			return &specialize(*best, pattern);
 		}
 
-		/** @brief Elaborates @p decl again with the parameters marked in @p maskedPattern taking masked tensors. */
-		const FunctionDecl& specialize(const FunctionDecl& decl, const std::vector<bool>& maskedPattern) {
+		/**
+		 * @brief The values of the template parameters of @p decl that the argument types determine: a parameter
+		 * dimension that is a template parameter (e.g. N in `x: float[..., N]`) takes the size of the argument's
+		 * dimension (dimensions before `...` are matched from the front, those after it from the back).
+		 */
+		static std::map<std::string, int> inferTemplateValues(const FunctionDecl& decl, const std::vector<DataType>& argtypes) {
+			std::map<std::string, int> values;
+			if (decl.templateParameters.empty())
+				return values;
+			auto templateParameter = [&](const TensorType::Shape::value_type& dim) -> const std::string* {
+				const auto* node = std::get_if<const Node*>(&dim);
+				const auto* hp = node ? std::get_if<HyperparameterNode>(*node) : nullptr;
+				for (const auto& [name, tp] : decl.templateParameters)
+					if (hp == &tp.get())
+						return &name;
+				return nullptr;
+			};
+			auto size = [](const TensorType::Shape::value_type& dim) -> std::optional<int> {
+				if (const auto* u = std::get_if<unsigned>(&dim))
+					return static_cast<int>(*u);
+				if (const auto* node = std::get_if<const Node*>(&dim))
+					if (auto v = foldConstant(**node); v && std::holds_alternative<int>(*v))
+						return std::get<int>(*v);
+				return std::nullopt;
+			};
+			for (size_t i = 0; i < decl.parameters.size() && i < argtypes.size(); ++i) {
+				const auto* p = std::get_if<TensorType>(&decl.parameters[i].second.get().type);
+				const auto* a = std::get_if<TensorType>(&argtypes[i]);
+				if (p == nullptr || a == nullptr)
+					continue;
+				auto bind = [&](const auto& pdim, const auto& adim) {
+					if (const auto* name = templateParameter(pdim))
+						if (auto v = size(adim))
+							values.emplace(*name, *v);
+				};
+				auto ellipsis = std::find_if(p->shape.begin(), p->shape.end(), [](const auto& d) {
+					return std::holds_alternative<Elipsis>(d);
+				});
+				const size_t before = static_cast<size_t>(ellipsis - p->shape.begin());
+				for (size_t k = 0; k < before && k < a->shape.size(); ++k)
+					bind(p->shape[k], a->shape[k]);
+				if (ellipsis != p->shape.end())
+					for (size_t k = 1; k + before < p->shape.size() && k <= a->shape.size(); ++k)
+						bind(p->shape[p->shape.size() - k], a->shape[a->shape.size() - k]);
+			}
+			return values;
+		}
+
+		/**
+		 * @brief Elaborates @p decl again with the parameters marked in @p maskedPattern taking masked tensors and the
+		 * template parameters bound to @p values.
+		 */
+		const FunctionDecl& specialize(
+				const FunctionDecl& decl, const std::vector<bool>& maskedPattern, const std::map<std::string, int>& values = {}
+		) {
 			const auto& t = *decl.templ;
 			std::string key;
 			for (bool m : maskedPattern)
 				key += m ? 'm' : '-';
+			for (const auto& [name, v] : values)
+				key += ";" + name + "=" + std::to_string(v);
 			if (auto it = specializations.find({&t, key}); it != specializations.end())
 				return *it->second;
 
@@ -943,6 +1015,7 @@ namespace mdl {
 			const std::string outerScope = std::exchange(scope, t.weightScope);
 			nsstack.push(t.scope->createSubnamespace());
 			maskedParams = maskedPattern;
+			templateValues = values;
 			auto [name, specialized] = std::any_cast<std::pair<std::string, FunctionDecl>>(t.ctx->accept(this));
 			nsstack.pop();
 			scope = outerScope;

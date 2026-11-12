@@ -29,7 +29,7 @@ namespace mdl::autodiff {
 		/** @brief Helpers to emit nodes of the gradient computation. */
 		class Builder {
 		public:
-			explicit Builder(Computegraph& graph) : graph(graph) {}
+			Builder(Computegraph& graph, shapes::Oracle* shapes) : graph(graph), shapes(shapes) {}
 
 			const Node& op(FIDs id, const DataType& type, std::vector<NodeRef> args) {
 				return graph.addInvocationNode(id, type, std::move(args));
@@ -51,6 +51,12 @@ namespace mdl::autodiff {
 
 			/** @brief `x[... k -> (...) k]`: merges all dimensions but the last one. */
 			const Node* flattenLeading(const Node& x) {
+				// With exact shapes: reshape to [-2 (inferred), k] (the type of x may be imprecise).
+				if (const shapes::Shape* s = shapes ? shapes->shapeOf(x) : nullptr; s && !s->empty() && s->back().isConstant()) {
+					const int k = static_cast<int>(s->back().factor);
+					TensorType type{PrimitiveType::floating, {Elipsis{}, static_cast<unsigned>(k)}};
+					return &op(FIDs::RESHAPE, type, {x, graph.addConstNode(Atomic{-2}), graph.addConstNode(Atomic{k})});
+				}
 				using namespace einops;
 				const Spec lhs{{false, {{AtomKind::Ellipsis, "", 0}}}, {false, {{AtomKind::Named, "k", 0}}}};
 				const Spec rhs{{true, {{AtomKind::Ellipsis, "", 0}}}, {false, {{AtomKind::Named, "k", 0}}}};
@@ -63,6 +69,14 @@ namespace mdl::autodiff {
 
 			/** @brief Sums @p g to the shape of @p like (undoes broadcasting); identity if the shapes are equal. */
 			const Node& unbroadcast(const Node& g, const Node& like) {
+				// Exact shapes decide if available; the (possibly imprecise) types otherwise.
+				const shapes::Shape* sg = shapes ? shapes->shapeOf(g) : nullptr;
+				const shapes::Shape* sl = shapes ? shapes->shapeOf(like) : nullptr;
+				if (sg != nullptr && sl != nullptr) {
+					if (*sg == *sl)
+						return g;
+					return op(FIDs::COLLAPSE_SUM_LIKE, getDataType(like), {g, like});
+				}
 				if (sameShape(getDataType(g), getDataType(like)))
 					return g;
 				return op(FIDs::COLLAPSE_SUM_LIKE, getDataType(like), {g, like});
@@ -72,8 +86,12 @@ namespace mdl::autodiff {
 				return op(FIDs::BROADCAST_LIKE, getDataType(like), {constant(0.0), like});
 			}
 
+			/** @brief The exact shape of @p node, if shapes are available. */
+			const shapes::Shape* shapeOf(const Node& node) { return shapes ? shapes->shapeOf(node) : nullptr; }
+
 		private:
 			Computegraph& graph;
+			shapes::Oracle* shapes;
 
 			static DataType typeOfTensor(const Node& a, const Node& b) {
 				return std::holds_alternative<TensorType>(getDataType(a)) ? getDataType(a) : getDataType(b);
@@ -173,7 +191,11 @@ namespace mdl::autodiff {
 				}
 				// Activations times a matrix (e.g. a weight): dB = A^T @ g as one GEMM over all batch dimensions,
 				// flatten(A)^T @ flatten(g), instead of one product per batch element that is summed afterwards.
-				if (batched(ta) && !batched(tb) && tb->shape.size() == 2) {
+				const shapes::Shape* sa = b.shapeOf(x);
+				const shapes::Shape* sb = b.shapeOf(*other);
+				const bool flatten = sa != nullptr && sb != nullptr ? sa->size() > 2 && sb->size() == 2
+																	: batched(ta) && !batched(tb) && tb->shape.size() == 2;
+				if (flatten) {
 					const Node* a2 = b.flattenLeading(x);
 					const Node* g2 = b.flattenLeading(g);
 					if (a2 != nullptr && g2 != nullptr) {
@@ -487,7 +509,7 @@ namespace mdl::autodiff {
 				dependsOnTarget.insert(node);
 		}
 
-		Builder b{graph};
+		Builder b{graph, options.shapes};
 		FunctionDecl grad{
 				.name = func.name + "_vjp",
 				.templateParameters = func.templateParameters,

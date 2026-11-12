@@ -272,3 +272,29 @@ TEST_CASE("integer inputs get no gradient; the embedding table gets a scatter-ad
 	CHECK(grad->outputNames == std::vector<std::string>{"output", "d_table", "d_x"});
 	CHECK(countReachable(*grad, builtins::FunctionIDs::SCATTER_ADD_ROWS) == 1);
 }
+
+TEST_CASE("with exact shapes, weight gradients have the weights' shapes for a multi-dimensional `...`", "[autodiff][oracle]") {
+	auto unit = parseOrFail(R"(
+		module Layer[] {
+			W: float[3, 4]
+			b: float[3]
+			float[..., 3] forward(x: float[..., 4]) => x @ W.T() + b;
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("Layer"));
+	auto evaluate = [](const Node& n) -> std::optional<int64_t> {
+		if (const auto* c = std::get_if<ConstNode>(&n))
+			if (const auto* i = std::get_if<int>(&c->value))
+				return *i;
+		return std::nullopt;
+	};
+	shapes::Oracle oracle{2, evaluate};
+	autodiff::Options options;
+	options.shapes = &oracle;
+	auto grad = autodiff::vjp(unit.graph(), m.functions.at("forward"), weightPaths(m), options);
+	REQUIRE(grad.has_value());
+	auto shapes = shapes::infer(*grad, 2, evaluate);
+	REQUIRE(shapes.has_value());
+	CHECK(shapes::str(*shapes->find(grad->outputs[1].get())) == "[3, 4]");
+	CHECK(shapes::str(*shapes->find(grad->outputs[2].get())) == "[3]");
+}

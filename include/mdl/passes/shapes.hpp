@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -66,6 +67,25 @@ namespace mdl::shapes {
 	 * residuals of a backward pass have the shapes the forward pass inferred for them).
 	 * @return the shapes, or an error naming the first node whose shape could not be inferred.
 	 */
+	/**
+	 * @brief Infers shapes on demand, also of nodes that are created later (e.g. by the gradient pass); the shapes are
+	 * memoized. The rules are those of infer().
+	 */
+	class Oracle {
+	public:
+		Oracle(unsigned ellipsisRank, ConstantEvaluator evaluate, std::unordered_map<const Node*, Shape> known = {});
+		~Oracle();
+		Oracle(const Oracle&) = delete;
+		Oracle& operator=(const Oracle&) = delete;
+
+		/** @brief The shape of @p node, or nullptr if it cannot be inferred. */
+		const Shape* shapeOf(const Node& node);
+
+	private:
+		struct Impl;
+		std::unique_ptr<Impl> impl;
+	};
+
 	std::expected<Shapes, std::string> infer(
 			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
 			const std::unordered_map<const Node*, Shape>& known = {}

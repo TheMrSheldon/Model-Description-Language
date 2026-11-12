@@ -356,6 +356,27 @@ namespace mdl::shapes {
 		};
 	} // namespace
 
+	struct Oracle::Impl {
+		ConstantEvaluator evaluate;
+		Inference inference;
+		Impl(unsigned rank, ConstantEvaluator e) : evaluate(std::move(e)), inference(rank, evaluate) {}
+	};
+
+	Oracle::Oracle(unsigned ellipsisRank, ConstantEvaluator evaluate, std::unordered_map<const Node*, Shape> known)
+			: impl(std::make_unique<Impl>(ellipsisRank, std::move(evaluate))) {
+		impl->inference.result.of = std::move(known);
+	}
+
+	Oracle::~Oracle() = default;
+
+	const Shape* Oracle::shapeOf(const Node& node) {
+		try {
+			return &impl->inference.shapeOf(node);
+		} catch (const ShapeError&) {
+			return nullptr;
+		}
+	}
+
 	std::expected<Shapes, std::string> infer(
 			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
 			const std::unordered_map<const Node*, Shape>& known

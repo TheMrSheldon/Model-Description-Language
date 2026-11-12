@@ -418,7 +418,7 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
 	for (size_t d = 0; d < shape.size(); ++d) {
 		const auto* imm = shape[d].as<::tvm::IntImmNode>();
 		if (declared.shape[d] >= 0 && (imm == nullptr || imm->value != declared.shape[d]))
-			error(std::format("has a different size in dimension {}", d));
+			error(std::format("has a different size in dimension {}: {}", d, [&] { std::ostringstream o; o << shape; return o.str(); }()));
 	}
 }
 

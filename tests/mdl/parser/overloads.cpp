@@ -89,3 +89,25 @@ TEST_CASE("masked parameters need masked tensors, and `.mask` needs a masked ten
 		float[...] f(y: float[...]) => y;
 	)").has_value());
 }
+
+TEST_CASE("template parameters inferred at a call are constants in the body", "[parser][templates]") {
+	auto unit = parse(R"(
+		template<C: uint>
+		float[..., C] scaled(x: float[..., C]) => x * C;
+		module M[] {
+			float[..., 4] forward(x: float[..., 4]) => scaled(x);
+			float[..., 6] other(x: float[..., 6]) => scaled(x);
+		}
+	)");
+	REQUIRE(unit.has_value());
+	const auto& m = std::get<ModuleType>(unit->definitions.at("M"));
+	auto factor = [&](const char* fn) -> std::optional<int> {
+		const auto& out = std::get<InvocationNode>(m.functions.at(fn).outputs.at(0).get());
+		const auto* c = std::get_if<ConstNode>(&out.arguments.at(1).get());
+		if (c == nullptr || !std::holds_alternative<int>(c->value))
+			return std::nullopt;
+		return std::get<int>(c->value);
+	};
+	CHECK(factor("forward") == 4);
+	CHECK(factor("other") == 6);
+}
