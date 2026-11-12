@@ -2,6 +2,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
+#include <tvm/relax/attrs/datatype.h>
 #include <tvm/relax/attrs/manipulate.h>
 #include <tvm/relax/attrs/nn.h>
 #include <tvm/relax/attrs/statistical.h>
@@ -480,6 +481,23 @@ namespace mdl::backend::tvm {
 					TECall te{bb, "broadcast_to"};
 					auto x = te.tensor(call->args[0]);
 					return te.finish(topi::broadcast_to(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
+				}));
+
+		map.Set("relax.collapse_sum_to", wrap([](const BlockBuilder& bb, const Call& call) {
+					TECall te{bb, "collapse_sum"};
+					auto x = te.tensor(call->args[0]);
+					return te.finish(topi::collapse_sum(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
+				}));
+		map.Set("relax.equal", wrap([](const BlockBuilder& bb, const Call& call) {
+					TECall te{bb, "equal"};
+					auto a = te.tensor(call->args[0], "lhs");
+					auto b = te.tensor(call->args[1], "rhs");
+					return te.finish(topi::equal(a, b));
+				}));
+		map.Set("relax.astype", wrap([](const BlockBuilder& bb, const Call& call) {
+					const auto* attrs = call->attrs.as<::tvm::relax::AstypeAttrs>();
+					TECall te{bb, "cast"};
+					return te.finish(topi::cast(te.tensor(call->args[0]), attrs->dtype));
 				}));
 
 		map.Set("relax.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {

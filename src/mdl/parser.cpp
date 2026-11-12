@@ -14,6 +14,7 @@
 #include <cassert>
 #include <format>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -44,6 +45,7 @@ namespace mdl {
 	struct parser::FrontendState {
 		Computegraph graph;
 		std::vector<std::unique_ptr<ParsedFile>> files;
+		std::deque<FunctionDecl> derivedFunctions; ///< e.g. gradient functions (stable references)
 		std::unique_ptr<TranslatingVisitor> visitor; // destroyed first
 	};
 
@@ -1255,6 +1257,10 @@ std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::pa
 }
 
 mdl::Computegraph& mdl::CompilationUnit::graph() const { return state->graph; }
+
+const mdl::FunctionDecl& mdl::CompilationUnit::keep(FunctionDecl decl) const {
+	return state->derivedFunctions.emplace_back(std::move(decl));
+}
 
 std::expected<std::reference_wrapper<const mdl::ModuleType>, std::string>
 mdl::CompilationUnit::instantiate(const std::string& module, const std::map<std::string, Object>& values) const {

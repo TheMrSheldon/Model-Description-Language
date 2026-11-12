@@ -94,10 +94,57 @@ static inline ::tvm::relax::Var emitAs(
     return bb->Emit(std::move(e), hint);
 }
 
+/**
+ * The axes of a PERMUTE permutation (see mdl::builtins::FunctionIDs::PERMUTE) for a tensor of the given rank, or an
+ * empty array if the permutation is invalid.
+ */
+static inline ::tvm::ffi::Array<::tvm::Integer> permuteAxes(int rank, const ::tvm::relax::ShapeExprNode* se) {
+    int permSize = static_cast<int>(se->values.size());
+    std::vector<int64_t> perm;
+    for (const auto& v : se->values)
+        perm.push_back(v.template as<::tvm::IntImmNode>()->value);
+
+    ::tvm::ffi::Array<::tvm::Integer> axes;
+    const bool hasEllipsis =
+        std::find(perm.begin(), perm.end(), mdl::builtins::kEllipsisPermMarker) != perm.end();
+    if (hasEllipsis) {
+        // The ellipsis group starts after the dims listed with non-negative indices and covers all dims that
+        // are not listed.
+        const int64_t start = std::count_if(perm.begin(), perm.end(), [](int64_t p) { return p >= 0; });
+        const int64_t groupRank = rank - (permSize - 1);
+        for (int64_t p : perm) {
+            if (p == mdl::builtins::kEllipsisPermMarker) {
+                for (int64_t d = 0; d < groupRank; ++d)
+                    axes.push_back(::tvm::Integer(start + d));
+            } else {
+                axes.push_back(::tvm::Integer(p < 0 ? p + rank : p));
+            }
+        }
+    } else {
+        // A shorter permutation applies to the trailing dims.
+        int offset = (rank >= 0) ? (rank - permSize) : 0;
+        for (int i = 0; i < offset; ++i)
+            axes.push_back(::tvm::Integer(i));
+        for (int64_t p : perm)
+            axes.push_back(::tvm::Integer(p < 0 && rank > 0 ? p + rank : p));
+    }
+    // Validate: must be a permutation of all dims.
+    if (rank >= 0 && static_cast<int>(axes.size()) != rank)
+        return {};
+    std::vector<bool> seen(std::max(rank, 0), false);
+    for (const auto& ax : axes) {
+        int a = static_cast<int>(ax->value);
+        if (a < 0 || a >= rank || seen[a])
+            return {};
+        seen[a] = true;
+    }
+    return axes;
+}
+
 // ── op dispatch table ────────────────────────────────────────────────────────
 
-inline std::array<RelaxTranslateFunc, std::to_underlying(mdl::builtins::FunctionIDs::COUNT)>
-relaxFunctions{
+// The size is deduced from the initializers so that the static_assert below catches missing translations.
+inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     /** TENSOR_ADD **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
         return callRelaxOp("relax.op.add", ts[0], ts[1]);
@@ -218,60 +265,15 @@ relaxFunctions{
     },
 
     /**
-     * PERMUTE — ts[0] tensor, ts[1] ShapeExpr encoding the permutation.
-     *
-     * Negative indices are resolved relative to the actual tensor rank.
-     * Partial permutations (perm.size() < rank) map leading axes to themselves.
+     * PERMUTE — ts[0] tensor, ts[1] ShapeExpr encoding the permutation (see FunctionIDs::PERMUTE).
      */
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
         const auto& tensor = ts[0];
-        int rank = tensorNdim(tensor);
-
-        // ts[1] is a ShapeExpr encoding the int vector
         const auto* se = ts[1].template as<::tvm::relax::ShapeExprNode>();
         assert(se && "PERMUTE: expected ShapeExpr for permutation");
-        int permSize = static_cast<int>(se->values.size());
-        std::vector<int64_t> perm;
-        for (const auto& v : se->values)
-            perm.push_back(v.template as<::tvm::IntImmNode>()->value);
-
-        ::tvm::ffi::Array<::tvm::Integer> axes;
-        const bool hasEllipsis =
-            std::find(perm.begin(), perm.end(), mdl::builtins::kEllipsisPermMarker) != perm.end();
-        if (hasEllipsis) {
-            // The ellipsis group starts after the dims listed with non-negative indices and covers all dims that
-            // are not listed.
-            const int64_t start = std::count_if(perm.begin(), perm.end(), [](int64_t p) { return p >= 0; });
-            const int64_t groupRank = rank - (permSize - 1);
-            for (int64_t p : perm) {
-                if (p == mdl::builtins::kEllipsisPermMarker) {
-                    for (int64_t d = 0; d < groupRank; ++d)
-                        axes.push_back(::tvm::Integer(start + d));
-                } else {
-                    axes.push_back(::tvm::Integer(p < 0 ? p + rank : p));
-                }
-            }
-        } else {
-            // A shorter permutation applies to the trailing dims.
-            int offset = (rank >= 0) ? (rank - permSize) : 0;
-            for (int i = 0; i < offset; ++i)
-                axes.push_back(::tvm::Integer(i));
-            for (int64_t p : perm)
-                axes.push_back(::tvm::Integer(p < 0 && rank > 0 ? p + rank : p));
-        }
-
-        // Validate: must be a valid permutation
-        bool valid = (rank < 0 || static_cast<int>(axes.size()) == rank);
-        if (valid && rank > 0) {
-            std::vector<bool> seen(rank, false);
-            for (const auto& ax : axes) {
-                int a = static_cast<int>(ax->value);
-                if (a < 0 || a >= rank || seen[a]) { valid = false; break; }
-                seen[a] = true;
-            }
-        }
-        if (!valid) return tensor;  // identity fallback
-
+        auto axes = permuteAxes(tensorNdim(tensor), se);
+        if (axes.empty())
+            return tensor; // identity fallback
         ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>> opt_axes = axes;
         return callRelaxOp("relax.op.permute_dims", tensor, opt_axes);
     },
@@ -301,6 +303,47 @@ relaxFunctions{
         ::tvm::relax::Expr shape_expr = ::tvm::relax::ShapeExpr(outDims);
         return callRelaxOp("relax.op.broadcast_to", tensor, shape_expr);
     },
-};
+
+    // ── adjoints (gradient pass) ────────────────────────────────────────────
+    /** COLLAPSE_SUM_LIKE — sum ts[0] to the shape of ts[1] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[1]));
+        return callRelaxOp("relax.op.collapse_sum_to", ts[0], ::tvm::relax::ShapeExpr(shape));
+    },
+    /** BROADCAST_LIKE — broadcast ts[0] to the shape of ts[1] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[1]));
+        return callRelaxOp("relax.op.broadcast_to", ts[0], ::tvm::relax::ShapeExpr(shape));
+    },
+    /** RESHAPE_LIKE — reshape ts[0] to the shape of ts[1] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[1]));
+        return callRelaxOp("relax.op.reshape", ts[0], shape);
+    },
+    /** PERMUTE_INVERSE — permute ts[0] by the inverse of the permutation ts[1] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        const auto* se = ts[1].template as<::tvm::relax::ShapeExprNode>();
+        assert(se && "PERMUTE_INVERSE: expected ShapeExpr for permutation");
+        auto axes = permuteAxes(tensorNdim(ts[0]), se);
+        if (axes.empty())
+            return ts[0];
+        std::vector<int64_t> inverse(axes.size());
+        for (size_t i = 0; i < axes.size(); ++i)
+            inverse[axes[i]->value] = static_cast<int64_t>(i);
+        ::tvm::ffi::Array<::tvm::Integer> inv;
+        for (int64_t a : inverse)
+            inv.push_back(::tvm::Integer(a));
+        ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>> opt_axes = inv;
+        return callRelaxOp("relax.op.permute_dims", ts[0], opt_axes);
+    },
+    /** EQUAL_MASK — 1 where ts[0] == ts[1], else 0 (float32) **/
+    [](auto& bb, auto ts) -> ::tvm::relax::Expr {
+        auto eq = emitAs(bb, callRelaxOp("relax.op.equal", ts[0], ts[1]), "eq");
+        return callRelaxOp("relax.op.astype", eq, ::tvm::DataType::Float(32));
+    },
+});
+
+// Every builtin needs a translation (the table is positional).
+static_assert(std::tuple_size_v<decltype(relaxFunctions)> == std::to_underlying(mdl::builtins::FunctionIDs::COUNT));
 
 } // namespace mdl::backend::tvm

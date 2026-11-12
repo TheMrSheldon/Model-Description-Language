@@ -10,6 +10,8 @@ add_executable(tests
     mdl/parser/parser.cpp
     mdl/parser/imports.cpp
     mdl/backends/tvm_patterns.cpp
+    mdl/utils/pathpattern.cpp
+    mdl/passes/autodiff.cpp
 )
 
 target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl)

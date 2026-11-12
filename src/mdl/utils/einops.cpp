@@ -22,6 +22,17 @@ using DimSize = std::variant<int64_t, const Node*>;
 // Maps a named dim to its resolved size.
 using DimSizeMap = std::map<std::string, DimSize>;
 
+/// The size of a dimension if it is statically known: a literal or a constant node (e.g. a hyperparameter value).
+static std::optional<int64_t> staticSize(const TensorType::Shape::value_type& dim) {
+	if (const auto* u = std::get_if<unsigned>(&dim))
+		return static_cast<int64_t>(*u);
+	if (const auto* np = std::get_if<const Node*>(&dim))
+		if (const auto* cn = std::get_if<ConstNode>(*np))
+			if (const auto* i = std::get_if<int>(&cn->value))
+				return *i;
+	return std::nullopt;
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------
@@ -127,8 +138,7 @@ static std::expected<void, std::string> inferGroupSizes(
 		const TensorType::Shape::value_type& shapeDim,
 		DimSizeMap& sizes) {
 	// Merged size must be statically known for inference.
-	const unsigned* mergedSizePtr = std::get_if<unsigned>(&shapeDim);
-	int64_t mergedSize = mergedSizePtr ? static_cast<int64_t>(*mergedSizePtr) : -1;
+	int64_t mergedSize = staticSize(shapeDim).value_or(-1);
 
 	std::string unknownName;
 	int64_t knownProduct = 1;
@@ -211,8 +221,8 @@ static std::expected<DimSizeMap, std::string> buildDimSizes(
 			auto& shapeDim = shape[i];
 
 			auto extractSize = [&]() -> std::optional<DimSize> {
-				if (auto* u = std::get_if<unsigned>(&shapeDim))
-					return DimSize{static_cast<int64_t>(*u)};
+				if (auto size = staticSize(shapeDim))
+					return DimSize{*size};
 				if (auto* np = std::get_if<const Node*>(&shapeDim))
 					return DimSize{*np};
 				return std::nullopt; // Elipsis in shape
@@ -257,8 +267,8 @@ static std::expected<DimSizeMap, std::string> buildDimSizes(
 	// Helper: extract size for one non-grouped, non-ellipsis LHS item.
 	auto extractNamed = [&](const SpecItem& item, const TensorType::Shape::value_type& dim) {
 		if (item.atoms[0].kind == AtomKind::Named) {
-			if (auto* u = std::get_if<unsigned>(&dim))
-				sizes[item.atoms[0].name] = static_cast<int64_t>(*u);
+			if (auto size = staticSize(dim))
+				sizes[item.atoms[0].name] = *size;
 			else if (auto* np = std::get_if<const Node*>(&dim))
 				sizes[item.atoms[0].name] = *np;
 		}

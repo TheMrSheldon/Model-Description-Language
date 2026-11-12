@@ -21,6 +21,7 @@ target_sources(mdl
 		mdl/bindings/generator.cpp
 		mdl/compiler.cpp
 		mdl/exports.cpp
+		mdl/passes/autodiff.cpp
 		mdl/logging.cpp
 		mdl/computegraph/datatype.cpp
 		mdl/computegraph/graph.cpp
@@ -31,6 +32,7 @@ target_sources(mdl
 		mdl/parser/errorlistener.cpp
 		mdl/utils/utils.cpp
 		mdl/utils/einops.cpp
+		mdl/utils/pathpattern.cpp
 )
 
 # The Model Compiler

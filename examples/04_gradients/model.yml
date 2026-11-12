@@ -1,0 +1,4 @@
+Block:
+  dim: 8
+  hidden: 16
+  heads: 2

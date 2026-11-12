@@ -3,6 +3,7 @@
 
 #include "./computegraphv2/datatype.hpp"
 #include "./computegraphv2/node.hpp"
+#include "./passes/autodiff.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -55,8 +56,17 @@ namespace mdl {
 	 * @brief Lists the functions that are compiled: all non-template member functions of modules whose
 	 * hyperparameters are all given in @p argvals.
 	 */
-	std::vector<ExportedFunction>
-	exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1);
+	/** @brief Gradient functions to compile in addition to the module functions. */
+	struct GradientRequest {
+		/** @brief Member functions to differentiate (exported as `<function>_vjp`). */
+		std::vector<std::string> functions;
+		autodiff::Options options;
+	};
+
+	std::vector<ExportedFunction> exportedFunctions(
+			const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1,
+			const GradientRequest& gradients = {}
+	);
 
 	/**
 	 * @brief Evaluates a compile-time constant (integer) expression, looking up hyperparameters in @p argvals.

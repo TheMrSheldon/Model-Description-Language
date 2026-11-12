@@ -191,7 +191,7 @@ namespace mdl::backend::tvm {
 				Array<PrimExpr> shape;
 				for (int64_t d : data.Shape())
 					shape.push_back(IntImm(DataType::Int(64), d));
-				auto buffer = tirx::decl_buffer(shape, DataType::Float(32), freshName("const"));
+				auto buffer = tirx::decl_buffer(shape, DataType::Float(32), freshName("const"), "global.workspace");
 				stmts.push_back(tirx::AllocBuffer(buffer));
 				auto flat = tirx::decl_buffer({IntImm(DataType::Int(64), n)}, DataType::Float(32), freshName("const_flat"));
 				flat.CopyOnWrite()->data = buffer->data;
@@ -214,7 +214,9 @@ namespace mdl::backend::tvm {
 			}
 
 			tirx::Buffer allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
-				auto buffer = tirx::decl_buffer(std::move(shape), dtype, freshName(name));
+				// Workspace scope: allocated with TVMBackendAllocWorkspace even if small. (Small "global" allocations
+				// become stack allocations, which are not aligned as the kernels assume.)
+				auto buffer = tirx::decl_buffer(std::move(shape), dtype, freshName(name), "global.workspace");
 				stmts.push_back(tirx::AllocBuffer(buffer));
 				return buffer;
 			}

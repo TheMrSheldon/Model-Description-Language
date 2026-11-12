@@ -254,7 +254,11 @@ namespace {
 			}
 			// RESHAPE and EXPAND carry precise output shapes set by the einops layer. inferOutputType returns a 1-D
 			// fallback for these ops, which would lose the split/merge shape information.
-			const bool keepsType = invn.id == FunctionIDs::RESHAPE || invn.id == FunctionIDs::EXPAND;
+			// The adjoint builtins (created by the gradient pass with explicit types) also keep their type.
+			const bool keepsType = invn.id == FunctionIDs::RESHAPE || invn.id == FunctionIDs::EXPAND ||
+								   invn.id == FunctionIDs::COLLAPSE_SUM_LIKE || invn.id == FunctionIDs::BROADCAST_LIKE ||
+								   invn.id == FunctionIDs::RESHAPE_LIKE || invn.id == FunctionIDs::PERMUTE_INVERSE ||
+								   invn.id == FunctionIDs::EQUAL_MASK;
 			if (keepsType) {
 				DataType outType = cloneType(invn.type);
 				if (!changed && !shapeNodesDiffer(invn.type, outType))

@@ -139,8 +139,9 @@ static void flattenHyperparameter(
 	}
 }
 
-std::vector<ExportedFunction>
-mdl::exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank) {
+std::vector<ExportedFunction> mdl::exportedFunctions(
+		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients
+) {
 	std::vector<ExportedFunction> exports;
 	for (const auto& [moduleName, member] : unit.definitions) {
 		const auto* definition = std::get_if<ModuleType>(&member);
@@ -171,7 +172,22 @@ mdl::exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsi
 		}
 		const auto order = weightPaths(*module);
 
-		for (const auto& [funcName, decl] : module->functions) {
+		// The member functions plus the requested gradient functions.
+		std::vector<std::pair<std::string, const FunctionDecl*>> functions;
+		for (const auto& [funcName, decl] : module->functions)
+			functions.emplace_back(funcName, &decl);
+		for (const auto& name : gradients.functions) {
+			auto it = module->functions.find(name);
+			if (it == module->functions.end())
+				continue;
+			auto grad = autodiff::vjp(unit.graph(), it->second, order, gradients.options);
+			if (!grad)
+				throw std::runtime_error(moduleName + "." + grad.error());
+			functions.emplace_back(name + "_vjp", &unit.keep(std::move(*grad)));
+		}
+
+		for (const auto& [funcName, declPtr] : functions) {
+			const FunctionDecl& decl = *declPtr;
 			if (!decl.templateParameters.empty())
 				continue;
 			ExportedFunction fn{
@@ -222,7 +238,9 @@ mdl::exportedFunctions(const CompilationUnit& unit, const ArgVals& argvals, unsi
 			}
 			for (size_t i = 0; i < decl.outputs.size(); ++i) {
 				const auto& out = decl.outputs[i].get();
-				auto name = decl.outputs.size() == 1 ? std::string{"output"} : "output" + std::to_string(i);
+				auto name = i < decl.outputNames.size() ? decl.outputNames[i]
+						  : decl.outputs.size() == 1  ? std::string{"output"}
+													  : "output" + std::to_string(i);
 				// The declared return type defines the ABI (inferred node types may be less precise).
 				const DataType type = i < decl.returnTypes.size()
 											  ? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])

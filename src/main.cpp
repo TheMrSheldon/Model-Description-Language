@@ -4,6 +4,7 @@
 #include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
 #include <mdl/exports.hpp>
+#include <mdl/utils/pathpattern.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parser.hpp>
 #include <mdl/utils/utils.hpp>
@@ -39,6 +40,10 @@ struct CompileArgs {
 	std::optional<std::filesystem::path> output;
 	std::optional<std::filesystem::path> argvals;
 	std::optional<std::filesystem::path> depfile;
+	std::vector<std::string> gradFunctions;
+	std::vector<std::string> trainable;
+	std::optional<std::filesystem::path> trainableFile;
+	bool inputGrads = false;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -83,7 +88,18 @@ static void runCompileCommand(const CompileArgs& args) {
 	auto& program = result.value();
 	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
-	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank);
+	mdl::GradientRequest gradients{.functions = args.gradFunctions, .options = {}};
+	{
+		std::vector<std::string> patterns = args.trainable;
+		if (args.trainableFile) {
+			std::ifstream file{*args.trainableFile};
+			for (std::string line; std::getline(file, line);)
+				patterns.push_back(line);
+		}
+		gradients.options.trainable = mdl::PathPatterns{std::move(patterns)};
+		gradients.options.inputs = args.inputGrads;
+	}
+	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank, gradients);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
@@ -122,6 +138,19 @@ int main(int argc, char* argv[]) {
 	)
 			->type_name("TYPE[=PATH]");
 	app.add_option("--depfile", args.depfile, "Write a dependency file listing all (imported) source files.");
+	app.add_option(
+			"--grad", args.gradFunctions,
+			"Also compile the gradient (vector-Jacobian product) of this member function, exported as <function>_vjp. "
+			"Repeatable."
+	);
+	app.add_option(
+			"--trainable", args.trainable,
+			"gitignore-style pattern selecting the weights to differentiate (e.g. 'layers.**', '!layers.0.**'); "
+			"all weights if none is given. Repeatable; later patterns take precedence."
+	);
+	app.add_option("--trainable-file", args.trainableFile, "File with --trainable patterns (one per line).")
+			->check(CLI::ExistingFile);
+	app.add_flag("--input-grads", args.inputGrads, "Also compute the gradients with respect to the inputs.");
 	app.add_option(
 			"-O,--optimize", args.compileOpts.optimization,
 			"Optimization level. Use 'metaschedule' to enable MetaSchedule auto-tuning "

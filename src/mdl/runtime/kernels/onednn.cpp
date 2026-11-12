@@ -9,8 +9,16 @@
 
 #include <oneapi/dnnl/dnnl.hpp>
 
+#include <omp.h>
+
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
+#include <set>
+#include <string>
+#include <thread>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
@@ -22,7 +30,36 @@ namespace {
 	using dnnl::memory;
 	using dt = dnnl::memory::data_type;
 
+	/** @brief The number of physical cores (from the Linux CPU topology; the logical CPUs elsewhere). */
+	int physicalCores() {
+		std::set<std::pair<int, int>> cores; // (package, core)
+		for (unsigned cpu = 0;; ++cpu) {
+			const std::string topology = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/";
+			std::ifstream package{topology + "physical_package_id"}, core{topology + "core_id"};
+			int p = 0, c = 0;
+			if (!(package >> p) || !(core >> c))
+				break;
+			cores.emplace(p, c);
+		}
+		if (!cores.empty())
+			return static_cast<int>(cores.size());
+		return std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+	}
+
+	/**
+	 * @brief Unless OMP_NUM_THREADS is set, runs the kernels with one thread per physical core: SMT siblings only add
+	 * contention to these compute-bound kernels (and made latencies erratic in measurements). Applied per calling
+	 * thread, as OpenMP's thread count is a per-thread setting.
+	 */
+	void configureThreads() {
+		static const int threads = std::getenv("OMP_NUM_THREADS") != nullptr ? 0 : physicalCores();
+		thread_local bool configured = false;
+		if (!std::exchange(configured, true) && threads > 0)
+			omp_set_num_threads(threads);
+	}
+
 	dnnl::engine& engine() {
+		configureThreads();
 		static dnnl::engine e(dnnl::engine::kind::cpu, 0);
 		return e;
 	}

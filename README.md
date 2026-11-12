@@ -34,6 +34,14 @@ The object file exports one function per member function (`__tvm_ffi_<Module>__<
 convention: inputs, weights, preallocated outputs). Link it against `mdl_runtime` (TVM runtime) and, with the oneDNN
 kernels, `mdl_kernels`.
 
+## Gradients
+```bash
+mdlc model.dlm -a model.yml -o model.o --binding cpp=model.hpp --grad forward --trainable 'layers.**' --trainable '!layers.0.**'
+```
+`--grad forward` additionally compiles `forward_vjp(x, d_output) -> output, d_<weight>...` (reverse-mode gradient,
+computed on the computegraph; the backend only sees an ordinary function). `--trainable` takes gitignore-style patterns
+over weight paths (all weights by default); `--input-grads` adds gradients with respect to the inputs.
+
 ## CMake
 ```cmake
 include(MDL)

@@ -45,6 +45,9 @@ namespace mdl {
 		std::expected<std::reference_wrapper<const ModuleType>, std::string>
 		instantiate(const std::string& module, const std::map<std::string, Object>& values) const;
 
+		/** @brief Stores a derived function (e.g. a gradient) for the lifetime of the compilation unit. */
+		const FunctionDecl& keep(FunctionDecl decl) const;
+
 		std::shared_ptr<parser::FrontendState> state;
 	};
 } // namespace mdl

@@ -45,6 +45,8 @@ namespace mdl {
 		 * @details Functions return tensors or scalars only.
 		 */
 		std::vector<std::variant<PrimitiveType, TensorType>> returnTypes = {};
+		/** @brief Names of the outputs in the exported ABI (optional; e.g. set for gradient functions). */
+		std::vector<std::string> outputNames = {};
 	};
 
 	/**

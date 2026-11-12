@@ -47,6 +47,12 @@ namespace mdl::builtins {
 		 */
 		PERMUTE,
 		EXPAND,
+		/** Adjoints (used by the gradient pass; each is differentiable again) **/
+		COLLAPSE_SUM_LIKE, /**< (g, ref): sums g over the dimensions in which ref was broadcast (result: ref's shape) */
+		BROADCAST_LIKE,	   /**< (g, ref): broadcasts g to ref's shape */
+		RESHAPE_LIKE,	   /**< (g, ref): reshapes g to ref's shape */
+		PERMUTE_INVERSE,   /**< (g, perm): permutes g by the inverse of the PERMUTE permutation perm */
+		EQUAL_MASK,		   /**< (a, b): 1 where a == b (broadcasting), 0 elsewhere */
 
 		COUNT
 	};
