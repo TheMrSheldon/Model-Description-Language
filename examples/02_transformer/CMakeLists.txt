@@ -33,3 +33,20 @@ add_executable(02_transformer_bert bert_check.cpp)
 target_link_libraries(02_transformer_bert PRIVATE bert_model)
 target_compile_definitions(02_transformer_bert PRIVATE MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny.safetensors")
 add_test(NAME example_02_transformer_bert COMMAND 02_transformer_bert)
+
+# Padded sequences: `Bert` as a masked function (`--mask forward`, an additional input mask: bool[batch, seq]) against
+# Hugging Face's BertModel with the same attention_mask.
+mdl_add_model(bert_model_masked SOURCE model.dlm CONFIG model_bert_tiny.yml OPTIONS --ellipsis-rank 2 --mask forward)
+add_executable(02_transformer_bert_masked bert_check.cpp)
+target_link_libraries(02_transformer_bert_masked PRIVATE bert_model_masked)
+target_compile_definitions(02_transformer_bert_masked PRIVATE MDL_BERT_MASKED
+	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_padded.safetensors")
+add_test(NAME example_02_transformer_bert_masked COMMAND 02_transformer_bert_masked)
+
+# The same gradient check for the masked encoder (`--mask forward`) with padded sequences.
+mdl_add_model(transformer_model_grad_masked SOURCE model.dlm CONFIG model_grad.yml
+	OPTIONS --ellipsis-rank 2 --mask forward --grad forward)
+add_executable(02_transformer_grad_masked grad_check.cpp)
+target_compile_definitions(02_transformer_grad_masked PRIVATE MDL_GRAD_MASKED)
+target_link_libraries(02_transformer_grad_masked PRIVATE transformer_model_grad_masked)
+add_test(NAME example_02_transformer_grad_masked COMMAND 02_transformer_grad_masked)

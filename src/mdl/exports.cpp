@@ -6,11 +6,14 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
 #include <mdl/utils/overload.hpp>
+#include <mdl/passes/masking.hpp>
+#include <mdl/passes/shapes.hpp>
 
 #include <algorithm>
 #include <format>
 #include <functional>
 #include <limits>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -142,7 +145,8 @@ static void flattenHyperparameter(
 }
 
 std::vector<ExportedFunction> mdl::exportedFunctions(
-		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients
+		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients,
+		const std::vector<std::string>& masked
 ) {
 	std::vector<ExportedFunction> exports;
 	for (const auto& [moduleName, member] : unit.definitions) {
@@ -187,17 +191,48 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		auto requested = [&](const std::string& name) {
 			return std::find(gradients.functions.begin(), gradients.functions.end(), name) != gradients.functions.end();
 		};
+		auto evaluate = [&](const Node& n) { return evalConstant(n, argvals); };
+
+		// Masked functions replace the originals (also as the functions that are differentiated).
+		std::map<std::string, const FunctionDecl*> decls;
+		std::map<std::string, const Node*> masks;
 		for (const auto& [funcName, decl] : module->functions)
+			decls.emplace(funcName, &decl);
+		for (const auto& name : masked) {
+			auto it = decls.find(name);
+			if (it == decls.end())
+				continue;
+			auto shapes = shapes::infer(*it->second, ellipsisRank, evaluate);
+			if (!shapes)
+				throw std::runtime_error(moduleName + "." + shapes.error());
+			auto result = masking::apply(unit.graph(), *it->second, *shapes);
+			if (!result)
+				throw std::runtime_error(moduleName + "." + result.error());
+			it->second = &unit.keep(std::move(result->function));
+			masks.emplace(name, result->mask);
+		}
+
+		for (const auto& [funcName, decl] : decls)
 			if (!requested(funcName))
-				functions.push_back({funcName, &decl});
+				functions.push_back({funcName, decl});
 		for (const auto& name : gradients.functions) {
-			auto it = module->functions.find(name);
-			if (it == module->functions.end())
+			auto it = decls.find(name);
+			if (it == decls.end())
 				throw std::runtime_error(std::format("{} has no member function '{}' to differentiate", moduleName, name));
-			const FunctionDecl& original = it->second;
+			const FunctionDecl& original = *it->second;
 			auto grad = autodiff::vjp(unit.graph(), original, order, gradients.options);
 			if (!grad)
 				throw std::runtime_error(moduleName + "." + grad.error());
+			if (auto mask = masks.find(name); mask != masks.end()) {
+				// Zero the masked positions in the reductions of the backward pass as well (see masking::apply).
+				auto shapes = shapes::infer(*grad, ellipsisRank, evaluate);
+				if (!shapes)
+					throw std::runtime_error(moduleName + "." + shapes.error());
+				auto sanitized = masking::apply(unit.graph(), *grad, *shapes, mask->second);
+				if (!sanitized)
+					throw std::runtime_error(moduleName + "." + sanitized.error());
+				grad = std::move(sanitized->function);
+			}
 			const FunctionDecl& vjp = unit.keep(std::move(*grad));
 
 			// What the gradient outputs are gradients of (as selected by autodiff::vjp).

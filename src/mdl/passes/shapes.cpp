@@ -197,6 +197,8 @@ namespace mdl::shapes {
 				case FIDs::TENSOR_DIV:
 				case FIDs::EQUAL_MASK:
 					return broadcast(arg(0), arg(1));
+				case FIDs::WHERE:
+					return broadcast(arg(0), broadcast(arg(1), arg(2)));
 
 				case FIDs::COS:
 				case FIDs::SIN:

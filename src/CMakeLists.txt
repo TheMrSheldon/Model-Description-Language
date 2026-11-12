@@ -23,6 +23,7 @@ target_sources(mdl
 		mdl/exports.cpp
 		mdl/passes/autodiff.cpp
 		mdl/passes/shapes.cpp
+		mdl/passes/masking.cpp
 		mdl/logging.cpp
 		mdl/computegraph/datatype.cpp
 		mdl/computegraph/graph.cpp

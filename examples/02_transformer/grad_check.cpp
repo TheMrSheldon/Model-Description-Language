@@ -1,6 +1,8 @@
 // Checks a gradient build of the batched encoder (`...` = [batch, seq]): forward (which saves the residuals in a context
 // buffer) + forward_backward against central finite differences of L = sum(forward(x) * dy). The saved attention
 // probabilities grow with seq^2, so this also checks the context layout.
+// With MDL_GRAD_MASKED, the encoder is a masked function (`--mask forward`) and the sequences are padded: the gradients
+// are those of the masked function, and they do not depend on the padding, not even if it contains NaN.
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -63,6 +65,15 @@ int main() {
 	Tensor x(shapeOf(Model::forward_inputs[0], batch, seq)), dy(shapeOf(Model::forward_outputs[0], batch, seq));
 	randomize(x);
 	randomize(dy);
+#ifdef MDL_GRAD_MASKED
+	// The second sequence has two padding positions.
+	mdl::runtime::MaskTensor mask({batch, seq}, uint8_t{1});
+	for (int64_t s = seq - 2; s < seq; ++s)
+		mask.data()[seq + s] = 0;
+	auto forward = [&](const Tensor& input, Tensor& out, Model::Context& c) { Model::forward(input, mask, weights, out, c); };
+#else
+	auto forward = [&](const Tensor& input, Tensor& out, Model::Context& c) { Model::forward(input, weights, out, c); };
+#endif
 
 	// The required size grows with the dimensions; a buffer for larger dimensions is reused.
 	const size_t needed = Model::forward_ctx_size(batch, seq);
@@ -77,13 +88,13 @@ int main() {
 		std::fill(g.values().begin(), g.values().end(), 0.0f); // the gradients are accumulated
 	}
 	auto gradPtrs = pointers(grads);
-	Model::forward(x, weights, y, ctx);
+	forward(x, y, ctx);
 	std::apply([&](auto*... g) { Model::forward_backward(dy, weights, g..., ctx); }, gradPtrs);
 
 	// Central finite differences for a few elements of every weight.
 	Tensor scratch(shapeOf(Model::forward_outputs[0], batch, seq));
 	auto loss = [&] {
-		Model::forward(x, weights, scratch, ctx);
+		forward(x, scratch, ctx);
 		double l = 0;
 		for (size_t i = 0; i < scratch.size(); ++i)
 			l += double(scratch.data()[i]) * dy.data()[i];
@@ -112,10 +123,40 @@ int main() {
 	if (maxRelErr > 2e-2)
 		fail("gradients differ from finite differences");
 
+#ifdef MDL_GRAD_MASKED
+	// NaN in the padding changes neither the output's valid positions nor any gradient.
+	Tensor poisoned = x;
+	const int64_t hidden = poisoned.shape().back();
+	for (int64_t s = seq - 2; s < seq; ++s)
+		for (int64_t d = 0; d < hidden; ++d)
+			poisoned.data()[(seq + s) * hidden + d] = std::nanf("");
+	std::vector<Tensor> again;
+	for (const auto& info : Model::forward_backward_outputs) {
+		auto& g = again.emplace_back(shapeOf(info, batch, seq));
+		std::fill(g.values().begin(), g.values().end(), 0.0f);
+	}
+	auto againPtrs = pointers(again);
+	Tensor y2(y.shape());
+	forward(poisoned, y2, ctx);
+	std::apply([&](auto*... g) { Model::forward_backward(dy, weights, g..., ctx); }, againPtrs);
+	double maxDiff = 0;
+	bool finite = true;
+	for (size_t g = 0; g < numGrads; ++g)
+		for (size_t i = 0; i < grads[g].size(); ++i) {
+			finite &= std::isfinite(again[g].data()[i]);
+			maxDiff = std::max(maxDiff, double(std::abs(again[g].data()[i] - grads[g].data()[i])));
+		}
+	for (size_t i = 0; i < y.size(); ++i)
+		finite &= std::isfinite(y2.data()[i]);
+	std::printf("NaN in the padding: gradients finite: %s, max difference: %.3g\n", finite ? "yes" : "no", maxDiff);
+	if (!finite || maxDiff > 1e-5)
+		fail("the padding influences the gradients");
+#endif
+
 	// A buffer that is too small for the dimensions is rejected.
 	auto small = Model::forward_ctx_alloc(batch, seq - 1);
 	try {
-		Model::forward(x, weights, y, small);
+		forward(x, y, small);
 		fail("a too small context buffer was accepted");
 	} catch (const std::runtime_error& e) {
 		std::printf("too small context rejected: %s\n", e.what());

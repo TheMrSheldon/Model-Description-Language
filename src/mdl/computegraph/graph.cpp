@@ -131,6 +131,15 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 		}
 		return fallback();
 
+	// WHERE: the type of the selected values (the condition only broadcasts).
+	case FunctionIDs::WHERE:
+		if (args.size() >= 3) {
+			if (getTensor(args[1].get()))
+				return getDataType(args[1].get());
+			return getDataType(args[2].get());
+		}
+		return fallback();
+
 	// ONE_HOT_LIKE: the shape of the reference (the labels' shape followed by the number of classes).
 	case FunctionIDs::ONE_HOT_LIKE:
 		if (args.size() >= 2)

@@ -245,6 +245,12 @@ namespace mdl::autodiff {
 				return b.op(FIDs::RESHAPE_LIKE, getDataType(x), {g, x});
 			case FIDs::PERMUTE_INVERSE:
 				return b.op(FIDs::PERMUTE, getDataType(x), {g, *other});
+			case FIDs::WHERE: { // the gradient goes to the selected operand
+				const Node& zero = b.constant(0.0);
+				const Node& selected = arg == 1 ? b.op(FIDs::WHERE, getDataType(g), {x, g, zero})
+												: b.op(FIDs::WHERE, getDataType(g), {x, zero, g});
+				return b.unbroadcast(selected, inv.arguments[arg].get());
+			}
 			case FIDs::TAKE: // rows of a table: their gradients are added to the selected rows
 				return b.op(FIDs::SCATTER_ADD_ROWS, getDataType(x), {g, *other, x});
 			case FIDs::SCATTER_ADD_ROWS:
@@ -273,6 +279,8 @@ namespace mdl::autodiff {
 			case FIDs::TAKE:
 			case FIDs::SCATTER_ADD_ROWS:
 				return arg == 0; // not the (integer) indices
+			case FIDs::WHERE:
+				return arg != 0; // not the condition
 			default:
 				return true;
 			}

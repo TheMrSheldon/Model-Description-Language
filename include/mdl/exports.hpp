@@ -102,9 +102,14 @@ namespace mdl {
 		bool accumulate = true;
 	};
 
+	/**
+	 * @param masked member functions that become masked functions (see mdl::masking::apply): they take an additional
+	 * input `mask: bool[...]` (true: valid), and masked elements in the last dimension of `...` (e.g. padding) do not
+	 * influence the valid results. Masking is applied before differentiation.
+	 */
 	std::vector<ExportedFunction> exportedFunctions(
 			const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1,
-			const GradientRequest& gradients = {}
+			const GradientRequest& gradients = {}, const std::vector<std::string>& masked = {}
 	);
 
 	/**

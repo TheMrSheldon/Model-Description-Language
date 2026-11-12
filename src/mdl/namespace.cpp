@@ -32,6 +32,7 @@ static std::map<std::string, std::any> initBuiltins() {
 	/** \todo template the base type? **/
 	const auto tensor = mdl::TensorType{.type = PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
 	const auto intTensor = mdl::TensorType{.type = PrimitiveType::integer, .shape = {mdl::Elipsis{}}};
+	const auto boolTensor = mdl::TensorType{.type = PrimitiveType::boolean, .shape = {mdl::Elipsis{}}};
 	const Builtin table[] = {
 			{"__builtin_max", FunctionIDs::MAX},
 			{"__builtin_min", FunctionIDs::MIN},
@@ -54,6 +55,7 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_mean_all", FunctionIDs::MEAN_ALL},
 			{"__builtin_take", FunctionIDs::TAKE, {{"ids", intTensor}}, true},
 			{"__builtin_one_hot_like", FunctionIDs::ONE_HOT_LIKE, {{"like", tensor}}, true, intTensor},
+			{"__builtin_where", FunctionIDs::WHERE, {{"a", tensor}, {"b", tensor}}, true, boolTensor},
 	};
 
 	std::map<std::string, std::any> builtins;

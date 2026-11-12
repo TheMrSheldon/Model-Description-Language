@@ -634,6 +634,13 @@ namespace mdl::backend::tvm {
 					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
 					return te.finish(topi::take(table, ids, /*batch_dims=*/0, axis, std::string(attrs->mode)));
 				}));
+		map.Set("relax.where", wrap([](const BlockBuilder& bb, const Call& call) {
+					TECall te{bb, "where"};
+					auto c = te.tensor(call->args[0], "cond");
+					auto a = te.tensor(call->args[1], "a");
+					auto b = te.tensor(call->args[2], "b");
+					return te.finish(topi::where(c, a, b));
+				}));
 		map.Set("relax.one_hot", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::OneHotAttrs>();
 					const auto* on = call->args[1].as<::tvm::relax::PrimValueNode>();

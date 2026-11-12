@@ -46,6 +46,7 @@ struct CompileArgs {
 	bool inputGrads = false;
 	bool gradFused = false;
 	bool gradOverwrite = false;
+	std::vector<std::string> maskFunctions;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -103,7 +104,7 @@ static void runCompileCommand(const CompileArgs& args) {
 		gradients.options.trainable = mdl::PathPatterns{std::move(patterns)};
 		gradients.options.inputs = args.inputGrads;
 	}
-	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank, gradients);
+	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank, gradients, args.maskFunctions);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
@@ -153,6 +154,12 @@ int main(int argc, char* argv[]) {
 			"--grad-fused", args.gradFused,
 			"For functions without scalar output: compute the outputs and gradients in one call "
 			"<function>(inputs..., d_<output>...) instead of <function> + <function>_backward."
+	);
+	app.add_option(
+			"--mask", args.maskFunctions,
+			"Make this member function masked: it takes an additional input mask: bool[...] (true: valid), and masked "
+			"positions in the last dimension of `...` (e.g. the padding of shorter sequences) do not influence the "
+			"valid results; outputs are zero at masked positions. Repeatable."
 	);
 	app.add_flag(
 			"--grad-overwrite", args.gradOverwrite,

@@ -91,6 +91,19 @@ module Scale[dim: uint] {
 ```
 `std.autodiff` provides `sum_like(x, like)` (sums over broadcast dimensions), `broadcast_like` and `nograd(x)`.
 
+## Masked tensors (padding)
+```bash
+mdlc model.dlm -a model.yml --ellipsis-rank 2 --mask forward -o model.o --binding cpp=model.hpp
+```
+`--mask f` makes `f` a masked function with the semantics of `torch.masked`: it takes an additional input
+`mask: bool[...]` (true: valid; `mdl::runtime::MaskTensor`), and the elements at masked positions of the last
+dimension of `...` (e.g. the padding of shorter sequences in `[batch, seq]`) do not influence the valid results. The
+model itself is unchanged: the compiler inserts the masking where masked elements would mix with valid ones
+(reductions such as softmax, `sum`/`mean`, and contractions over the sequence; e.g. attention ignores padded keys), and
+the outputs are zero at masked positions. Functions without `--mask` have no masking and no cost. Masking composes with
+`--grad` (the gradient of the masked computation; padding, even NaN, cannot reach the weight gradients). The full BERT
+matches Hugging Face's `BertModel` with `attention_mask` on the valid positions.
+
 ## CMake
 ```cmake
 include(MDL)

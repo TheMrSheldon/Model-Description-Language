@@ -4,9 +4,11 @@ Exports a randomly initialized Hugging Face BertModel (without pooler) for the c
 
     python export_bert_reference.py --out data/bert_tiny.safetensors              # the tiny model of the tests
     python export_bert_reference.py --base --out bert_base.safetensors            # BERT-base (vocabulary 30522)
+    python export_bert_reference.py --lengths 7 4 --out data/bert_tiny_padded.safetensors  # padded sequences
 
-Keys: the MDL weight paths (float32), `input.ids`, `input.types`, `input.positions` (int32, [batch, seq]), and
-`reference.output` (float32, [batch, seq, hidden]).
+Keys: the MDL weight paths (float32), `input.ids`, `input.types`, `input.positions` (int32, [batch, seq]),
+`reference.output` (float32, [batch, seq, hidden]), and with --lengths `input.mask` (bool, [batch, seq]; true for the
+first `length` tokens of each sequence, Hugging Face's attention_mask).
 """
 
 import argparse
@@ -58,6 +60,7 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--seq", type=int, default=7)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--lengths", type=int, nargs="+", help="valid length of each sequence (padding after it)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -77,16 +80,29 @@ def main() -> None:
     ids = torch.randint(0, config.vocab_size, (args.batch, args.seq))
     types = torch.randint(0, config.type_vocab_size, (args.batch, args.seq))
     positions = torch.arange(args.seq).expand(args.batch, args.seq)
+    mask = None
+    if args.lengths:
+        if len(args.lengths) != args.batch:
+            parser.error("--lengths needs one length per sequence (--batch)")
+        mask = torch.arange(args.seq)[None, :] < torch.tensor(args.lengths)[:, None]
     with torch.no_grad():
-        output = model(input_ids=ids, token_type_ids=types, position_ids=positions).last_hidden_state
+        output = model(
+            input_ids=ids,
+            token_type_ids=types,
+            position_ids=positions,
+            attention_mask=None if mask is None else mask.to(torch.long),
+        ).last_hidden_state
 
     tensors = mdl_weights(model, config.num_hidden_layers)
     tensors["input.ids"] = ids.to(torch.int32).contiguous()
     tensors["input.types"] = types.to(torch.int32).contiguous()
     tensors["input.positions"] = positions.to(torch.int32).contiguous()
     tensors["reference.output"] = output.float().contiguous()
+    if mask is not None:
+        tensors["input.mask"] = mask.contiguous()
     save_file(tensors, args.out)
-    print(f"wrote {args.out}: {len(tensors) - 4} weights, output {tuple(output.shape)}")
+    print(f"wrote {args.out}: {len(model_weights := mdl_weights(model, config.num_hidden_layers))} weights, "
+          f"output {tuple(output.shape)}" + ("" if mask is None else f", lengths {args.lengths}"))
 
 
 if __name__ == "__main__":

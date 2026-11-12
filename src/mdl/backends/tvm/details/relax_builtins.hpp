@@ -450,6 +450,8 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         auto value = [](double x) { return ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(32), x)); };
         return callRelaxOp("relax.op.one_hot", ts[0], value(1.0), value(0.0), static_cast<int>(imm->value), -1);
     },
+    /** WHERE — ts[1] where ts[0], else ts[2] **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return callRelaxOp("relax.op.where", ts[0], ts[1], ts[2]); },
 });
 
 // Every builtin needs a translation (the table is positional).

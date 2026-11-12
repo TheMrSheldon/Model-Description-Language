@@ -63,6 +63,8 @@ namespace mdl::builtins {
 		SCATTER_ADD_ROWS, /**< (g [..., ...], ids int[...], like [V, ...]): zeros like `like`, plus g's rows added at ids
 							 (the adjoint of TAKE) */
 		ONE_HOT_LIKE,	  /**< (labels int[...], like [..., C]): 1.0 at labels, 0.0 elsewhere (like's shape; C classes) */
+		/** Selection **/
+		WHERE, /**< (cond bool[...], a, b): a where cond, b elsewhere (all three broadcast) */
 
 		COUNT
 	};

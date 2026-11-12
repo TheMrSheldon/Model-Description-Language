@@ -50,13 +50,18 @@ namespace mdl::runtime {
 		}
 	};
 
-	/** @brief The DLPack data type of the element type @p T (float32 or int32). */
+	/**
+	 * @brief The DLPack data type of the element type @p T: float32, int32, or bool (stored as uint8_t, 0 or 1; e.g.
+	 * masks).
+	 */
 	template <typename T>
 	constexpr DLDataType dlDataType() {
 		if constexpr (std::is_same_v<T, float>)
 			return {kDLFloat, 32, 1};
 		else if constexpr (std::is_same_v<T, int32_t>)
 			return {kDLInt, 32, 1};
+		else if constexpr (std::is_same_v<T, uint8_t>)
+			return {kDLBool, 8, 1};
 		else
 			static_assert(sizeof(T) == 0, "unsupported element type");
 	}
@@ -131,6 +136,8 @@ namespace mdl::runtime {
 
 	using Tensor = BasicTensor<float>;
 	using IntTensor = BasicTensor<int32_t>;
+	/** @brief A boolean tensor, e.g. the mask of a masked function (1: valid, 0: masked). */
+	using MaskTensor = BasicTensor<uint8_t>;
 
 	// ── safetensors ─────────────────────────────────────────────────────────────────────────────────────────────
 	// File layout: an 8-byte little-endian header size N, an N-byte JSON header {name: {dtype, shape, data_offsets}}
@@ -157,6 +164,8 @@ namespace mdl::runtime {
 				return "I32";
 			if (t.code == kDLUInt && t.bits == 8)
 				return "U8";
+			if (t.code == kDLBool && t.bits == 8)
+				return "BOOL";
 			return {};
 		}
 
