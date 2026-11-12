@@ -1,6 +1,7 @@
 #include <mdl/exports.hpp>
 
 #include "./argvals.hpp"
+#include "./logging.hpp"
 
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/function.hpp>
@@ -14,6 +15,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -146,9 +148,10 @@ static void flattenHyperparameter(
 
 std::vector<ExportedFunction> mdl::exportedFunctions(
 		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients,
-		const std::vector<std::string>& masked
+		const std::vector<std::string>& masked, const std::map<std::string, unsigned>& inputRanks
 ) {
 	std::vector<ExportedFunction> exports;
+	std::set<std::string> differentiated; // the requested gradient functions that some compiled module defines
 	for (const auto& [moduleName, member] : unit.definitions) {
 		const auto* definition = std::get_if<ModuleType>(&member);
 		if (definition == nullptr)
@@ -193,6 +196,47 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		};
 		auto evaluate = [&](const Node& n) { return evalConstant(n, argvals); };
 
+		// The shapes of the inputs whose `...` has fewer dimensions (the leading ones of the function's `...`).
+		auto knownInputs = [&](const FunctionDecl& f) {
+			std::unordered_map<const Node*, shapes::Shape> known;
+			if (inputRanks.empty())
+				return known;
+			std::unordered_set<const Node*> seen;
+			std::vector<const Node*> stack;
+			for (const auto& out : f.outputs)
+				stack.push_back(&out.get());
+			while (!stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!seen.insert(n).second)
+					continue;
+				if (const auto* inv = std::get_if<InvocationNode>(n)) {
+					for (const auto& a : inv->arguments)
+						stack.push_back(&a.get());
+					continue;
+				}
+				const auto* in = std::get_if<InputNode>(n);
+				auto rank = in ? inputRanks.find(in->name) : inputRanks.end();
+				const auto* t = in ? std::get_if<TensorType>(&in->type) : nullptr;
+				if (rank == inputRanks.end() || t == nullptr)
+					continue;
+				shapes::Shape shape;
+				for (const auto& dim : t->shape) {
+					if (std::holds_alternative<Elipsis>(dim)) {
+						for (unsigned k = 0; k < rank->second; ++k)
+							shape.push_back(shapes::Dim::symbol(ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(k)));
+					} else if (const auto* u = std::get_if<unsigned>(&dim)) {
+						shape.push_back(shapes::Dim::constant(*u));
+					} else {
+						auto v = evaluate(*std::get<const Node*>(dim));
+						shape.push_back(v ? shapes::Dim::constant(*v) : shapes::Dim::unknown());
+					}
+				}
+				known.emplace(n, std::move(shape));
+			}
+			return known;
+		};
+
 		// Masked functions replace the originals (also as the functions that are differentiated).
 		std::map<std::string, const FunctionDecl*> decls;
 		std::map<std::string, const Node*> masks;
@@ -223,7 +267,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			for (const auto& [_, p] : it->second->parameters)
 				pattern.push_back(isMasked(p.get().type) || hasEllipsis(p.get().type));
 			it->second = &unit.specializeMasked(*it->second, pattern);
-			auto shapes = shapes::infer(*it->second, ellipsisRank, evaluate);
+			auto shapes = shapes::infer(*it->second, ellipsisRank, evaluate, knownInputs(*it->second));
 			if (!shapes)
 				throw std::runtime_error(moduleName + "." + shapes.error());
 			auto result = masking::apply(unit.graph(), *it->second, *shapes);
@@ -239,10 +283,11 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		for (const auto& name : gradients.functions) {
 			auto it = decls.find(name);
 			if (it == decls.end())
-				throw std::runtime_error(std::format("{} has no member function '{}' to differentiate", moduleName, name));
+				continue; // another module may define it (checked below)
+			differentiated.insert(name);
 			const FunctionDecl& original = *it->second;
 			// Exact shapes for the compiled `...` rank, so that the gradient pass does not depend on imprecise types.
-			shapes::Oracle oracle{ellipsisRank, evaluate};
+			shapes::Oracle oracle{ellipsisRank, evaluate, knownInputs(original)};
 			autodiff::Options options = gradients.options;
 			options.shapes = &oracle;
 			auto grad = autodiff::vjp(unit.graph(), original, order, options);
@@ -250,7 +295,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				throw std::runtime_error(moduleName + "." + grad.error());
 			if (auto mask = masks.find(name); mask != masks.end()) {
 				// Zero the masked positions in the reductions of the backward pass as well (see masking::apply).
-				auto shapes = shapes::infer(*grad, ellipsisRank, evaluate);
+				auto shapes = shapes::infer(*grad, ellipsisRank, evaluate, knownInputs(*grad));
 				if (!shapes)
 					throw std::runtime_error(moduleName + "." + shapes.error());
 				auto sanitized = masking::apply(unit.graph(), *grad, *shapes, mask->second);
@@ -357,9 +402,14 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 
 			for (const auto& [pname, input] : decl.parameters) {
 				auto it = inputNodes.find(&input.get());
+				auto rank = inputRanks.find(pname);
+				const bool smaller = rank != inputRanks.end() && rank->second < ellipsisRank;
 				fn.inputs.push_back(makeSignature(
-						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals, ellipsisRank
+						pname, input.get().type, it == inputNodes.end() ? nullptr : it->second, argvals,
+						smaller ? rank->second : ellipsisRank
 				));
+				if (smaller)
+					fn.inputs.back().ellipsisRank = static_cast<int>(rank->second);
 			}
 			auto rank = [&](const Node* node) {
 				const auto& name = std::get<ParameterNode>(*node).name;
@@ -374,9 +424,12 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			// a sequence [batch, seq] pooled to [batch]). Not for functions with packed inputs (their types are
 			// imprecise); their declared types define the ABI.
 			std::optional<shapes::Shapes> inferred;
-			if (!function.context || function.context->producer)
-				if (auto r = shapes::infer(decl, ellipsisRank, evaluate))
+			if (!function.context || function.context->producer) {
+				if (auto r = shapes::infer(decl, ellipsisRank, evaluate, knownInputs(decl)))
 					inferred = std::move(*r);
+				else
+					log::getLogger("compiler")->warn("{}.{}: {}", moduleName, funcName, r.error());
+			}
 			for (size_t i = 0; i < decl.outputs.size(); ++i) {
 				const auto& out = decl.outputs[i].get();
 				auto name = i < decl.outputNames.size() ? decl.outputNames[i]
@@ -432,5 +485,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			exports.push_back(std::move(fn));
 		}
 	}
+	for (const auto& name : gradients.functions)
+		if (!differentiated.contains(name))
+			throw std::runtime_error(std::format("no compiled module has a member function '{}' to differentiate", name));
 	return exports;
 }

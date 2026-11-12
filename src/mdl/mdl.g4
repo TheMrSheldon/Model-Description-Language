@@ -59,6 +59,14 @@ templatespec
       : 'template' '<' vardecl* '>'
       ;
 
+// An index of an array (one integer) or of a tensor (NumPy-like: integers select and remove an axis, `:` keeps an axis,
+// `...` stands for the axes that are not listed).
+index_item
+      : '...'                                              # IndexEllipsis
+      | ':'                                                # IndexAll
+      | expr                                               # IndexValue
+      ;
+
 einops
       : einops_spec_full '->' einops_spec_full ('|' (keyvalue (',' keyvalue)*)?)?
       ;
@@ -88,7 +96,7 @@ expr
       // Postfix Expressions
       | expr '.' IDENT                                     # AccessExpression
       | expr '[' einops ']'                                # EinopsExpression
-      | base=expr '[' index=expr ']'                       # IndexExpression
+      | base=expr '[' indices+=index_item (',' indices+=index_item)* ']' # IndexExpression
       | func=expr '(' (args+=expr (',' args+=expr)*)? ')'  # MethodcallExpression
       // Prefix Expressions
       | '-' expr                                           # NegateExpression

@@ -6,6 +6,7 @@
 #include "./passes/autodiff.hpp"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -37,6 +38,8 @@ namespace mdl {
 		bool accumulate = false;
 		/** @brief For a gradient output: the weight path or input name it is the gradient of; else empty. */
 		std::string gradientOf = {};
+		/** @brief For an input: the number of dimensions of its `...` if smaller than the function's (else -1). */
+		int ellipsisRank = -1;
 	};
 
 	/**
@@ -109,7 +112,8 @@ namespace mdl {
 	 */
 	std::vector<ExportedFunction> exportedFunctions(
 			const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1,
-			const GradientRequest& gradients = {}, const std::vector<std::string>& masked = {}
+			const GradientRequest& gradients = {}, const std::vector<std::string>& masked = {},
+			const std::map<std::string, unsigned>& inputRanks = {}
 	);
 
 	/**

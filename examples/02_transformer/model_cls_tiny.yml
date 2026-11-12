@@ -1,0 +1,15 @@
+# The tiny BERT of model_bert_tiny.yml with a classification head of 3 classes (data/bert_tiny_cls.safetensors).
+BertForSequenceClassification:
+  conf:
+    dims:
+      model: 32
+      key: 8
+      value: 8
+      inner: 64
+    numEncoders: 2
+    numAttnHeads: 4
+  emb:
+    vocab: 100
+    positions: 16
+    types: 2
+  classes: 3

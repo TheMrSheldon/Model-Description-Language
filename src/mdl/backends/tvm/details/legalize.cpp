@@ -651,7 +651,10 @@ namespace mdl::backend::tvm {
 					const auto* off = call->args[2].as<::tvm::relax::PrimValueNode>();
 					TECall te{bb, "one_hot"};
 					auto labels = te.tensor(call->args[0], "labels");
-					return te.finish(topi::one_hot(labels, on->value, off->value, attrs->depth, attrs->axis, on->value.dtype()));
+					// The output shape as Relax inferred it (int64 dims; TOPI would use an int32 depth).
+					return te.finish(topi::one_hot(
+							labels, on->value, off->value, attrs->depth, attrs->axis, on->value.dtype(), shapeOf(call)
+					));
 				}));
 
 		map.Set("relax.nn.layer_norm", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {

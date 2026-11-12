@@ -50,10 +50,3 @@ float sum_all(x: float[...]) => __builtin_sum_all(x);
  * @ingroup Statistics
  */
 float mean_all(x: float[...]) => __builtin_mean_all(x);
-
-/**
- * @brief The element at `index` along the axis `axis` (the axis is removed; negative values count from the end),
- * e.g. `select(h, -2, 0)` is the first position of a sequence h: [..., seq, dim].
- * @ingroup Statistics
- */
-float[...] select(x: float[...], axis: int, index: int) => __builtin_select(x, axis, index);

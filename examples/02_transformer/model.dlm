@@ -84,7 +84,7 @@ module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
 module BertPooler[conf: TransformerConf] {
     dense: Linear[conf.dims.model, conf.dims.model, true]
 
-    float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(select(h, -2, 0)));
+    float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(h[..., 0, :]));
 }
 
 /**
@@ -114,4 +114,11 @@ module BertForSequenceClassification[conf: TransformerConf, emb: EmbeddingConf, 
 
     float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
         classifier(bert.pooled(ids, types, positions));
+
+    /**
+     * The training objective: the mean cross-entropy of the logits and the class labels (one per sequence; compile
+     * with `--ellipsis-rank labels=1` so that labels are [batch] while the ids are [batch, seq]).
+     */
+    float loss(ids: int[...], types: int[...], positions: int[...], labels: int[...]) =>
+        cross_entropy(logits(ids, types, positions), labels);
 }

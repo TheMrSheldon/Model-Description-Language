@@ -2,6 +2,7 @@
 #define MDL_COMPILER_HPP
 
 #include <filesystem>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -42,6 +43,12 @@ namespace mdl {
 		 * inputs of a function declared with `float[..., D]`). All `...` of a function denote the same dimensions.
 		 */
 		unsigned ellipsisRank = 1;
+
+		/**
+		 * Inputs (by parameter name) whose `...` stands for fewer dimensions: the leading ones (e.g. labels: int[...] as
+		 * [batch] while the token ids are [batch, seq]).
+		 */
+		std::map<std::string, unsigned> inputEllipsisRanks;
 
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;

@@ -85,3 +85,30 @@ TEST_CASE("the graph types of max/min/sum keep the reduced axis like the backend
 	REQUIRE(r.has_value());
 	CHECK(shapes::str(shapeAt(*r, f.outputs[0].get())) == "[B0, B1]");
 }
+
+TEST_CASE("tensor indexing selects and removes axes like NumPy", "[shapes][indexing]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			float[..., 4] first(x: float[..., 4]) => x[..., 0, :];
+			float[..., 4] leading(x: float[..., 4]) => x[0];
+			float[...] lastFeature(x: float[..., 4]) => x[..., -1];
+			float[...] two(x: float[..., 4]) => x[1, ..., 2];
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	auto check = [&](const char* fn, const char* expected) {
+		const auto& f = m.functions.at(fn);
+		auto r = shapes::infer(f, 2, evaluate);
+		REQUIRE(r.has_value());
+		CHECK(shapes::str(shapeAt(*r, f.outputs[0].get())) == expected);
+	};
+	check("first", "[B0, 4]");
+	check("leading", "[B1, 4]");
+	check("lastFeature", "[B0, B1]");
+	check("two", "[B1]");
+}
+
+TEST_CASE("an index has at most one ellipsis", "[indexing]") {
+	std::istringstream stream{"module M[] { float[...] f(x: float[..., 4]) => x[..., 0, ...]; }"};
+	CHECK_FALSE(parser::parse(stream, "<test>").has_value());
+}

@@ -8,6 +8,7 @@
 #include <map>
 #include <numeric>
 #include <unordered_map>
+#include <utility>
 
 namespace mdl::masking {
 
@@ -62,8 +63,13 @@ namespace mdl::masking {
 
 			const shapes::Shape& shapeOf(const Node& node) const {
 				const auto* s = shapes.find(node);
-				if (s == nullptr)
-					throw MaskError{"missing shape"};
+				if (s == nullptr) {
+					const auto* inv = std::get_if<InvocationNode>(&node);
+					throw MaskError{std::format(
+							"no shape for {} (masking needs the shapes of all nodes)",
+							inv ? "builtin #" + std::to_string(std::to_underlying(inv->id)) : std::string{"a leaf"}
+					)};
+				}
 				return *s;
 			}
 

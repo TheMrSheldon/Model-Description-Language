@@ -28,6 +28,8 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 - `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`, `json` (metadata).
 - `--kernels onednn|tvm` selects the kernels for recognized operations (oneDNN via `mdl_kernels`, or TVM-generated only).
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
+  `--ellipsis-rank NAME=K` gives the input `NAME` only the leading `K` of them (e.g. `labels=1`: labels `[batch]` next
+  to token ids `[batch, seq]`). Outputs get their shapes from shape inference (e.g. pooled `[batch, dim]`).
 - `-i DIR` adds import search paths; the standard library (`std/`) is always available.
 
 The object file exports one function per member function (`__tvm_ffi_<Module>__<function>`, TVM FFI calling
@@ -112,6 +114,11 @@ float[...] average(x: float[...]) => mean(x);
 float[...] average(x: masked float[...]) => mean(x.data) / mean(x.mask);
 ```
 See [examples/06_masking](examples/06_masking/).
+
+Tensors are indexed like in NumPy: `h[..., 0, :]` is the first position of each sequence of `h: [..., seq, dim]`
+(integers select and remove an axis, `:` keeps one, `...` stands for the others). The BERT example
+([examples/02_transformer](examples/02_transformer/)) contains the full model with pooler, sequence classification,
+and its training objective, all checked against Hugging Face (with padding).
 
 ## CMake
 ```cmake

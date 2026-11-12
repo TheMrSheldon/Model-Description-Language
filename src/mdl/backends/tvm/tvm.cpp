@@ -147,7 +147,7 @@ struct TranslationContext {
 	}
 };
 
-static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const TranslationContext& ctx) {
+static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const TranslationContext& ctx, int rank = -1) {
 	const auto& argVals = ctx.argVals;
 	return std::visit(
 			mdl::overloaded{
@@ -156,8 +156,10 @@ static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const Tr
 						::tvm::ffi::Array<::tvm::PrimExpr> shape;
 						for (const auto i : ttype.shape) {
 							if (std::holds_alternative<mdl::Elipsis>(i)) {
-								for (const auto& var : ctx.ellipsis)
-									shape.push_back(var);
+								// The leading `rank` dimensions for an input with a smaller rank (see ExportedFunction).
+								const size_t n = rank < 0 ? ctx.ellipsis.size() : static_cast<size_t>(rank);
+								for (size_t k = 0; k < n && k < ctx.ellipsis.size(); ++k)
+									shape.push_back(ctx.ellipsis[k]);
 								continue;
 							}
 							auto expr = std::visit(
@@ -392,8 +394,10 @@ static ::tvm::relax::Expr translateRelax(
 
 // ── per-function Relax IR builder ─────────────────────────────────────────────
 
-static ::tvm::relax::Var makeRelaxParam(const std::string& name, const mdl::DataType& dtype, const TranslationContext& ctx) {
-	auto sinfo = ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(getShape(dtype, ctx)), toUnderlyingTVMType(dtype));
+static ::tvm::relax::Var makeRelaxParam(
+		const std::string& name, const mdl::DataType& dtype, const TranslationContext& ctx, int rank = -1
+) {
+	auto sinfo = ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(getShape(dtype, ctx, rank)), toUnderlyingTVMType(dtype));
 	return ::tvm::relax::Var(name, sinfo);
 }
 
@@ -458,7 +462,7 @@ static void verifyShapes(const mdl::ExportedFunction& fn, const RelaxCache& cach
 	// The packed inputs (residuals) have the shapes their producer computed; their declared types are imprecise.
 	std::unordered_map<const mdl::Node*, mdl::shapes::Shape> known;
 	for (const auto& t : fn.inputs)
-		if (t.packed && t.node != nullptr)
+		if ((t.packed || t.ellipsisRank >= 0) && t.node != nullptr)
 			if (auto it = cache.find(t.node); it != cache.end())
 				if (const auto* si = ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(it->second)) {
 					mdl::shapes::Shape shape;
@@ -534,7 +538,7 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 	for (size_t i = 0; i < fn.inputs.size(); ++i) {
 		const auto& t = fn.inputs[i];
 		if (!t.packed) {
-			bind(t, makeRelaxParam(t.name, fn.decl->parameters[i].second.get().type, ctx), false);
+			bind(t, makeRelaxParam(t.name, fn.decl->parameters[i].second.get().type, ctx, t.ellipsisRank), false);
 			continue;
 		}
 		// A packed input has the shape its producer computed, in this function's dimension variables.

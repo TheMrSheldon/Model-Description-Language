@@ -235,6 +235,7 @@ namespace mdl::shapes {
 				}
 				case FIDs::SUM_ALL:
 				case FIDs::MEAN_ALL:
+					arg(0); // (the shapes of the whole function are inferred)
 					return {};
 
 				case FIDs::RESHAPE: return reshape(inv);
@@ -277,9 +278,20 @@ namespace mdl::shapes {
 				case FIDs::COLLAPSE_SUM_LIKE:
 				case FIDs::BROADCAST_LIKE:
 				case FIDs::RESHAPE_LIKE:
-				case FIDs::ONE_HOT_LIKE:
 					arg(0);
 					return arg(1);
+				case FIDs::ONE_HOT_LIKE: {
+					// The labels have the shape of `like` without its last dimension (the classes).
+					const Shape& labels = arg(0);
+					const Shape& like = arg(1);
+					if (like.empty() || labels != Shape(like.begin(), like.end() - 1))
+						fail(std::format(
+								"the labels {} do not match the classes {} (one label per row; is the rank of the "
+								"labels' `...` right? see --ellipsis-rank NAME=K)",
+								str(labels), str(like)
+						));
+					return like;
+				}
 				case FIDs::SCATTER_ADD_ROWS:
 					arg(0);
 					arg(1);

@@ -47,6 +47,7 @@ struct CompileArgs {
 	bool gradFused = false;
 	bool gradOverwrite = false;
 	std::vector<std::string> maskFunctions;
+	std::vector<std::string> ellipsisRanks;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -104,7 +105,30 @@ static void runCompileCommand(const CompileArgs& args) {
 		gradients.options.trainable = mdl::PathPatterns{std::move(patterns)};
 		gradients.options.inputs = args.inputGrads;
 	}
-	auto exports = mdl::exportedFunctions(program, argvals, args.compileOpts.ellipsisRank, gradients, args.maskFunctions);
+	mdl::CompileOptions compileOpts = args.compileOpts;
+	for (const auto& value : args.ellipsisRanks) {
+		const auto eq = value.find('=');
+		const std::string number = eq == std::string::npos ? value : value.substr(eq + 1);
+		unsigned rank = 0;
+		try {
+			rank = static_cast<unsigned>(std::stoul(number));
+		} catch (const std::exception&) {
+			throw std::runtime_error("--ellipsis-rank: expected N or NAME=K, got " + value);
+		}
+		if (eq == std::string::npos) {
+			if (rank < 1 || rank > 8)
+				throw std::runtime_error("--ellipsis-rank: the rank must be in 1..8");
+			compileOpts.ellipsisRank = rank;
+		} else {
+			compileOpts.inputEllipsisRanks[value.substr(0, eq)] = rank;
+		}
+	}
+	for (const auto& [name, rank] : compileOpts.inputEllipsisRanks)
+		if (rank > compileOpts.ellipsisRank)
+			throw std::runtime_error("--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`");
+	auto exports = mdl::exportedFunctions(
+			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks
+	);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
@@ -113,7 +137,7 @@ static void runCompileCommand(const CompileArgs& args) {
 				fn.outputs.size()
 		);
 
-	mdl::compileToFile(exports, output, argvals, args.compileOpts);
+	mdl::compileToFile(exports, output, argvals, compileOpts);
 
 	for (const auto& binding : args.bindings) {
 		auto generator = binding.factory();
@@ -192,10 +216,12 @@ int main(int argc, char* argv[]) {
 					{"tvm", mdl::Kernels::Tvm},
 			}));
 	app.add_option(
-			   "--ellipsis-rank", args.compileOpts.ellipsisRank,
-			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, seq])"
+			   "--ellipsis-rank", args.ellipsisRanks,
+			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, seq]). "
+			   "NAME=K gives the input NAME a smaller rank: its `...` are the leading K dimensions (e.g. labels=1 for "
+			   "labels [batch] next to token ids [batch, seq]). Repeatable."
 	)
-			->check(CLI::Range(1u, 8u));
+			->type_name("N|NAME=K");
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,

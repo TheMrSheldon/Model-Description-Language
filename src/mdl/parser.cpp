@@ -1485,28 +1485,76 @@ namespace mdl {
 
 		virtual std::any visitIndexExpression(mdlParser::IndexExpressionContext* ctx) override {
 			auto base = asObject(ctx->base->accept(this), ctx->base->start);
-			auto index = constantInt(ctx->index);
-			if (!index)
-				return &graph().addErrorNode();
-			if (const auto* array = std::get_if<ArrayInstance>(&base)) {
-				if (*index < 0 || *index >= static_cast<int>(array->elements.size())) {
-					errorlistener->semanticError(
-							PrettyErrorListener::ErrorLevel::Error, ctx->index->start, ctx->index->start->getLine(),
-							ctx->index->start->getCharPositionInLine(),
-							std::format("Index {} is out of bounds (array of {} elements)", *index, array->elements.size())
-					);
-					return &graph().addErrorNode();
-				}
-				return array->elements[*index];
-			}
 			if (const auto* node = std::get_if<const Node*>(&base); node && std::holds_alternative<ErrorNode>(**node))
 				return &graph().addErrorNode();
-			errorlistener->semanticError(
-					PrettyErrorListener::ErrorLevel::Error, ctx->base->start, ctx->base->start->getLine(),
-					ctx->base->start->getCharPositionInLine(),
-					"Only arrays can be indexed (indexing tensors is not yet supported)"
-			);
-			return &graph().addErrorNode();
+			auto error = [&](antlr4::Token* tok, const std::string& message) -> std::any {
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(), message
+				);
+				return &graph().addErrorNode();
+			};
+
+			if (const auto* array = std::get_if<ArrayInstance>(&base)) {
+				auto* value = ctx->indices.size() == 1 ? dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[0]) : nullptr;
+				if (value == nullptr)
+					return error(ctx->start, "An array takes one index");
+				auto index = constantInt(value->expr());
+				if (!index)
+					return &graph().addErrorNode();
+				if (*index < 0 || *index >= static_cast<int>(array->elements.size()))
+					return error(
+							value->start,
+							std::format("Index {} is out of bounds (array of {} elements)", *index, array->elements.size())
+					);
+				return array->elements[*index];
+			}
+
+			// Tensors: integers select (and remove) an axis, `:` keeps it, `...` stands for the axes not listed.
+			const auto* node = std::get_if<const Node*>(&base);
+			if (node == nullptr || !std::holds_alternative<TensorType>(mdl::getDataType(**node)))
+				return error(ctx->base->start, "Only arrays and tensors can be indexed");
+			std::vector<std::pair<int, int>> leading, trailing; // (axis, index); trailing axes count from the end
+			std::optional<size_t> ellipsis;
+			for (size_t i = 0; i < ctx->indices.size(); ++i) {
+				if (dynamic_cast<mdlParser::IndexEllipsisContext*>(ctx->indices[i])) {
+					if (ellipsis)
+						return error(ctx->indices[i]->start, "An index has at most one `...`");
+					ellipsis = i;
+				}
+			}
+			const size_t count = ctx->indices.size();
+			for (size_t i = 0; i < count; ++i) {
+				auto* value = dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[i]);
+				if (value == nullptr)
+					continue; // `:` or `...`
+				auto index = constantInt(value->expr());
+				if (!index)
+					return &graph().addErrorNode();
+				if (ellipsis && i > *ellipsis)
+					trailing.emplace_back(static_cast<int>(i) - static_cast<int>(count), *index);
+				else
+					leading.emplace_back(static_cast<int>(i), *index);
+			}
+			// Remove the leading axes from the back and the trailing ones from the front, so that the axis numbers of
+			// the remaining selections stay valid.
+			// (Inlined from the builtin function, so that the result gets its type from the type rules.)
+			auto builtin = currentNamespace().get<Object>("__builtin_select");
+			const auto* selectDecl = builtin ? std::get_if<FunctionDecl>(&builtin->get()) : nullptr;
+			if (selectDecl == nullptr)
+				return error(ctx->start, "internal error: __builtin_select is not defined");
+			const Node* result = *node;
+			auto select = [&](int axis, int index) {
+				auto outputs = graph().addInvocationNode(
+						*selectDecl, {std::cref(*result), std::cref(graph().addConstNode(Atomic{axis})),
+									  std::cref(graph().addConstNode(Atomic{index}))}
+				);
+				result = outputs ? &outputs->front().get() : &graph().addErrorNode();
+			};
+			for (auto it = leading.rbegin(); it != leading.rend(); ++it)
+				select(it->first, it->second);
+			for (const auto& [axis, index] : trailing)
+				select(axis, index);
+			return result;
 		}
 
 		virtual std::any visitReturnStatement(mdlParser::ReturnStatementContext* ctx) override {
