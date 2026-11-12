@@ -13,6 +13,7 @@
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
+#include <mdl/passes/shapes.hpp>
 #include <mdl/utils/utils.hpp>
 
 #include <tvm/ir/cast.h>
@@ -421,6 +422,76 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
 	}
 }
 
+/** @brief A Relax dimension as a shape-inference dimension (constants, symbols, and their products). */
+static mdl::shapes::Dim toDim(const ::tvm::PrimExpr& e) {
+	if (const auto* imm = e.as<::tvm::IntImmNode>())
+		return mdl::shapes::Dim::constant(imm->value);
+	if (const auto* var = e.as<::tvm::tirx::VarNode>())
+		return mdl::shapes::Dim::symbol(std::string(var->name_hint));
+	if (const auto* mul = e.as<::tvm::tirx::MulNode>())
+		return toDim(mul->a) * toDim(mul->b);
+	if (const auto* cast = e.as<::tvm::tirx::CastNode>())
+		return toDim(cast->value);
+	return mdl::shapes::Dim::unknown();
+}
+
+/** @brief A short description of a node for diagnostics. */
+static std::string describe(const mdl::Node& node) {
+	return std::visit(
+			mdl::overloaded{
+					[](const mdl::InvocationNode& inv) { return std::format("builtin #{}", std::to_underlying(inv.id)); },
+					[](const mdl::InputNode& in) { return "input " + in.name; },
+					[](const mdl::ParameterNode& p) { return "weight " + p.name; },
+					[](const auto&) { return std::string{"constant"}; },
+			},
+			node
+	);
+}
+
+/**
+ * @brief Checks the shapes inferred on the computegraph (mdl::shapes::infer) against the shapes Relax computed for the
+ * translated nodes (enabled with the environment variable MDL_VERIFY_SHAPES=1; a development aid for the inference).
+ */
+static void verifyShapes(const mdl::ExportedFunction& fn, const RelaxCache& cache, const mdl::ArgVals& argVals,
+						 unsigned ellipsisRank) {
+	// The packed inputs (residuals) have the shapes their producer computed; their declared types are imprecise.
+	std::unordered_map<const mdl::Node*, mdl::shapes::Shape> known;
+	for (const auto& t : fn.inputs)
+		if (t.packed && t.node != nullptr)
+			if (auto it = cache.find(t.node); it != cache.end())
+				if (const auto* si = ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(it->second)) {
+					mdl::shapes::Shape shape;
+					for (const auto& d : si->GetShape().value())
+						shape.push_back(toDim(d));
+					known.emplace(t.node, std::move(shape));
+				}
+	auto shapes = mdl::shapes::infer(
+			*fn.decl, ellipsisRank, [&](const mdl::Node& n) { return mdl::evalConstant(n, argVals); }, known
+	);
+	if (!shapes)
+		throw std::runtime_error("shape inference failed: " + shapes.error());
+	std::string mismatches;
+	size_t checked = 0;
+	for (const auto& [node, expr] : cache) {
+		const auto* sinfo = ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(expr);
+		const auto* inferred = shapes->find(*node);
+		if (sinfo == nullptr || !sinfo->GetShape().defined() || inferred == nullptr)
+			continue;
+		mdl::shapes::Shape actual;
+		for (const auto& d : sinfo->GetShape().value())
+			actual.push_back(toDim(d));
+		bool same = actual.size() == inferred->size();
+		for (size_t i = 0; same && i < actual.size(); ++i)
+			same = !actual[i].known || !(*inferred)[i].known || actual[i] == (*inferred)[i];
+		++checked;
+		if (!same)
+			mismatches += std::format("\n  {}: inferred {}, Relax {}", describe(*node), mdl::shapes::str(*inferred), mdl::shapes::str(actual));
+	}
+	if (!mismatches.empty())
+		throw std::runtime_error(fn.symbol + ": inferred shapes differ from Relax:" + mismatches);
+	mdl::log::getLogger("compiler")->info("{}: {} inferred shapes match Relax", fn.symbol, checked);
+}
+
 /**
  * @brief The packed tensors of a context buffer, as produced by its producer (see mdl::ContextBuffer).
  * @details The consumer declares its packed inputs with exactly these shapes (in its own dimension variables), so that
@@ -503,6 +574,8 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 		}
 		results.push_back(result);
 	}
+	if (std::getenv("MDL_VERIFY_SHAPES"))
+		verifyShapes(fn, cache, argVals, ellipsisRank);
 	if (fn.context && fn.context->producer) {
 		contexts[fn.context->name] = produced;
 		packing.sizeSymbol = fn.context->sizeSymbol;

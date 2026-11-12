@@ -13,6 +13,7 @@ add_executable(tests
     mdl/backends/tvm_patterns.cpp
     mdl/utils/pathpattern.cpp
     mdl/passes/autodiff.cpp
+    mdl/passes/shapes.cpp
     mdl/runtime/safetensors.cpp
 )
 

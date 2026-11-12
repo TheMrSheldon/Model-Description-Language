@@ -84,9 +84,15 @@ function(mdl_add_model target)
 		set(compiler "${MDLC_EXECUTABLE}")
 	endif()
 
+	# Development aid: check the compiler's shape inference against the backend (see mdl::shapes::infer).
+	set(launcher)
+	if(MDL_VERIFY_SHAPES)
+		set(launcher ${CMAKE_COMMAND} -E env MDL_VERIFY_SHAPES=1)
+	endif()
+
 	add_custom_command(
 		OUTPUT "${object}" "${header}"
-		COMMAND ${compiler} ${args}
+		COMMAND ${launcher} ${compiler} ${args}
 		DEPENDS ${depends}
 		DEPFILE "${object}.d"
 		COMMENT "Compiling MDL model ${ARG_SOURCE}"

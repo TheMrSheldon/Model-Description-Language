@@ -1,3 +1,5 @@
+# The examples double as tests of the compiler: check its shape inference against the backend while compiling them.
+set(MDL_VERIFY_SHAPES ON)
 add_subdirectory(01_ffn)
 add_subdirectory(02_transformer)
 add_subdirectory(03_pytorch)
