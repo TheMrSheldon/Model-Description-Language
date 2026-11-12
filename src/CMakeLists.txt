@@ -132,6 +132,7 @@ add_library(mdl_kernels STATIC)
 target_include_directories(mdl_kernels PUBLIC ${CMAKE_CURRENT_LIST_DIR}/../include)
 target_compile_features(mdl_kernels PUBLIC cxx_std_20)
 set_property(TARGET mdl_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_sources(mdl_kernels PRIVATE mdl/runtime/kernels/profile.cpp)
 if(MDL_ENABLE_ONEDNN)
 	# Only build the primitive kinds that mdl_kernels uses (forward and backward) to keep the build short.
 	set(DNNL_ENABLE_PRIMITIVE "MATMUL;SOFTMAX;ELTWISE;LAYER_NORMALIZATION;REORDER" CACHE STRING "" FORCE)

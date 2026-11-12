@@ -54,8 +54,11 @@ namespace mdl::backend::tvm {
 		/** @brief Builds the entry PrimFunc of one Relax function. */
 		class EntryBuilder {
 		public:
-			EntryBuilder(const IRModule& mod, const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols)
-					: mod(mod), symbols(symbols) {}
+			EntryBuilder(
+					const IRModule& mod, const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols,
+					bool profile
+			)
+					: mod(mod), symbols(symbols), profile(profile) {}
 
 			tirx::PrimFunc build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
 				if (packing != nullptr && packing->context)
@@ -141,6 +144,7 @@ namespace mdl::backend::tvm {
 		private:
 			const IRModule& mod;
 			const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols;
+			bool profile;
 			Array<tirx::Var> params;
 			::tvm::ffi::Map<tirx::Var, tirx::Buffer> bufferMap;
 			std::vector<tirx::Buffer> outputs;
@@ -354,9 +358,18 @@ namespace mdl::backend::tvm {
 						callArgs.push_back(packedArg(arg));
 					}
 				}
+				auto hook = [&](const char* fn) {
+					return tirx::Evaluate(tirx::Call(
+							DataType::Int(32), tirx::builtin::call_extern(), {tirx::StringImm(fn), tirx::StringImm(it->second)}
+					));
+				};
+				if (profile)
+					stmts.push_back(hook("mdl_profile_begin"));
 				stmts.push_back(
 						tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs))
 				);
+				if (profile)
+					stmts.push_back(hook("mdl_profile_end"));
 			}
 
 			static DataType dtypeArg(const relax::Expr& e) {
@@ -458,7 +471,8 @@ namespace mdl::backend::tvm {
 	} // namespace
 
 	IRModule lowerToAOT(
-			IRModule mod, const std::string& kernelPrefix, const std::unordered_map<std::string, EntrySignature>& packing
+			IRModule mod, const std::string& kernelPrefix, const std::unordered_map<std::string, EntrySignature>& packing,
+			bool profile
 	) {
 		// Give every kernel a unique global symbol.
 		std::unordered_map<const ::tvm::GlobalVarNode*, std::string> symbols;
@@ -476,7 +490,7 @@ namespace mdl::backend::tvm {
 				auto symbol = fn->GetAttr<::tvm::ffi::String>(::tvm::attr::kGlobalSymbol);
 				if (!symbol)
 					continue; // internal helper function
-				EntryBuilder builder{mod, symbols};
+				EntryBuilder builder{mod, symbols, profile};
 				auto packed = packing.find(std::string(symbol.value()));
 				const EntrySignature* signature = packed == packing.end() ? nullptr : &packed->second;
 				auto entry = builder.build(::tvm::ffi::GetRef<relax::Function>(fn), symbol.value(), signature);

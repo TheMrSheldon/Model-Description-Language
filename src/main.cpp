@@ -190,6 +190,10 @@ int main(int argc, char* argv[]) {
 	)
 			->check(CLI::Range(1u, 8u));
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
+	app.add_flag(
+			"--profile", args.compileOpts.profile,
+			"Time every kernel call; the times per kernel are printed at program exit (requires mdl_kernels)."
+	);
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
 	app.callback([&args]() { runCompileCommand(args); });
 

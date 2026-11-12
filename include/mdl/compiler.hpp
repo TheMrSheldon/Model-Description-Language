@@ -46,6 +46,9 @@ namespace mdl {
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;
 
+		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/kernels.h). */
+		bool profile = false;
+
 		/** Directory for intermediate debug artifacts (IR dumps); empty to disable. */
 		std::filesystem::path dumpDir;
 	};

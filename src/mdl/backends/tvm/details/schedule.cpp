@@ -90,6 +90,19 @@ namespace mdl::backend::tvm {
 			Schedule sch = Schedule::Concrete(mod, /*seed=*/0, /*debug_mask=*/0,
 											  ::tvm::s_tir::ScheduleErrorRenderLevel::kNone);
 			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
+			// Fused kernels consist of one block per operation: inline the elementwise producers into their consumers,
+			// so that intermediates are not materialized (one pass over the data instead of one per operation).
+			for (const auto& block : sch->GetChildBlocks(root)) {
+				bool spatialOnly = true;
+				for (const auto& iv : sch->Get(block)->iter_vars)
+					spatialOnly &= iv->iter_type == tirx::kDataPar;
+				if (!spatialOnly)
+					continue;
+				try {
+					sch->ComputeInline(block); // fails (and leaves the schedule unchanged) e.g. for the output block
+				} catch (const std::exception&) {
+				}
+			}
 			for (const auto& block : sch->GetChildBlocks(root)) {
 				size_t numSpatial = 0;
 				bool reductionSeen = false, spatialAfterReduction = false, other = false;

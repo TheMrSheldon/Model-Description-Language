@@ -226,9 +226,24 @@ namespace mdl::backend::tvm {
 			return {"matmul (B^T)", pattern, rewriter};
 		}
 
+		/** A^T @ b (e.g. weight gradients x^T @ g): a 2-D a with a 2-D b, or batched a and b of equal rank. */
+		PatternEntry makeMatmulTransposedA() {
+			auto a = Wildcard(), b = Wildcard();
+			auto perm = IsOp("relax.permute_dims")(a);
+			DFPattern pattern = IsOp("relax.matmul")(perm, b);
+			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
+				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
+				const int ra = rankOf(m.at(a)), rb = rankOf(m.at(b));
+				if (ra < 2 || rb < 2 || !swapsLastTwoAxes(at(perm)) || (rb == 2 && ra != 2) || (rb > 2 && ra != rb))
+					return call;
+				return makeMatmul(m.at(a), m.at(b), std::nullopt, false, 1.0, /*transA=*/true);
+			};
+			return {"matmul (A^T)", pattern, rewriter};
+		}
+
 		/** (a @ op(B)) / c → mdl.matmul with alpha = 1/c (e.g. the attention scale 1/sqrt(d)). */
 		PatternEntry makeScaledMatmul() {
-			auto product = IsOp("mdl.matmul")(Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard());
+			auto product = IsOp("mdl.matmul")(Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard());
 			auto c = Wildcard();
 			DFPattern pattern = IsOp("relax.divide")(product, c);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
@@ -241,7 +256,10 @@ namespace mdl::backend::tvm {
 				if (!divisor || *divisor == 0.0 || !alpha || mm->args[2].as<PrimValueNode>() == nullptr)
 					return call;
 				const auto* transB = mm->args[3].as<PrimValueNode>()->value.as<::tvm::IntImmNode>();
-				return makeMatmul(mm->args[0], mm->args[1], std::nullopt, transB->value != 0, *alpha / *divisor);
+				const auto* transA = mm->args[5].as<PrimValueNode>()->value.as<::tvm::IntImmNode>();
+				return makeMatmul(
+						mm->args[0], mm->args[1], std::nullopt, transB->value != 0, *alpha / *divisor, transA->value != 0
+				);
 			};
 			return {"matmul scale", pattern, rewriter};
 		}
@@ -255,6 +273,7 @@ namespace mdl::backend::tvm {
 				makeLinear(true),		// a @ W^T + b (std.Linear)
 				makeLinear(false),		// a @ W + b
 				makeMatmulTransposed(), // remaining a @ B^T
+				makeMatmulTransposedA(), // A^T @ b
 				makeScaledMatmul(),		// (a @ B^T) / c
 		};
 	}

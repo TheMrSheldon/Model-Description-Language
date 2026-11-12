@@ -272,8 +272,11 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         const auto* se = ts[1].template as<::tvm::relax::ShapeExprNode>();
         assert(se && "PERMUTE: expected ShapeExpr for permutation");
         auto axes = permuteAxes(tensorNdim(tensor), se);
-        if (axes.empty())
-            return tensor; // identity fallback
+        bool identity = true;
+        for (size_t i = 0; i < axes.size(); ++i)
+            identity &= axes[i]->value == static_cast<int64_t>(i);
+        if (identity)
+            return tensor; // also for an invalid permutation (empty axes); identities would hide patterns
         ::tvm::ffi::Optional<::tvm::ffi::Array<::tvm::Integer>> opt_axes = axes;
         return callRelaxOp("relax.op.permute_dims", tensor, opt_axes);
     },

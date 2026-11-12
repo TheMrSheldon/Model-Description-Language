@@ -11,6 +11,7 @@
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/te/operation.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/function.h>
@@ -93,6 +94,38 @@ namespace mdl::backend::tvm {
 		bool isLastAxis(int64_t axis, size_t ndim) { return axis == -1 || axis == static_cast<int64_t>(ndim) - 1; }
 
 		/**
+		 * @brief The symbolic variables in @p shapes that no shape determines directly (as a whole dimension), e.g. `B0`
+		 * and `B1` of a flattened dimension `B0 * B1`. A kernel cannot recover them from its buffers, so they are passed
+		 * as extra arguments (`tir_vars` of `call_tir`).
+		 */
+		Array<tirx::Var> unboundVars(const std::vector<Array<PrimExpr>>& shapes) {
+			std::vector<const tirx::VarNode*> direct;
+			for (const auto& shape : shapes)
+				for (const auto& d : shape)
+					if (const auto* v = d.as<tirx::VarNode>())
+						direct.push_back(v);
+			Array<tirx::Var> unbound;
+			for (const auto& shape : shapes)
+				for (const auto& d : shape)
+					for (const auto& v : tirx::UndefinedVars(d))
+						if (std::find(direct.begin(), direct.end(), v.get()) == direct.end() &&
+							std::find_if(unbound.begin(), unbound.end(), [&](const tirx::Var& u) { return u.same_as(v); }) ==
+									unbound.end())
+							unbound.push_back(v);
+			return unbound;
+		}
+
+		/** @brief `call_tir(gv, inputs, out)`, with the unbound symbolic variables as `tir_vars`. */
+		Expr callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const TensorStructInfo& out,
+					 const Array<tirx::Var>& vars) {
+			static const auto& op = ::tvm::Op::Get("relax.call_tir");
+			if (vars.empty())
+				return Call(op, {gv, ::tvm::relax::Tuple(inputs)}, ::tvm::Attrs(), {out});
+			Array<PrimExpr> values(vars.begin(), vars.end());
+			return Call(op, {gv, ::tvm::relax::Tuple(inputs), ShapeExpr(values)}, ::tvm::Attrs(), {out});
+		}
+
+		/**
 		 * @brief C++ counterpart of Python's `BlockBuilder.call_te`: lowers a TE computation over the call's arguments
 		 * to a PrimFunc and emits a `call_tir` to it.
 		 */
@@ -104,6 +137,7 @@ namespace mdl::backend::tvm {
 			te::Tensor tensor(const Expr& arg, const std::string& argName = "x") {
 				const auto* info = tensorInfo(arg);
 				auto placeholder = te::placeholder(shapeOf(arg), info->dtype, argName);
+				shapes.push_back(placeholder->shape);
 				inputs.push_back(arg);
 				argList.push_back(placeholder);
 				return placeholder;
@@ -119,12 +153,14 @@ namespace mdl::backend::tvm {
 
 			Expr finish(const te::Tensor& out) {
 				argList.push_back(out);
+				shapes.push_back(out->shape);
+				auto vars = unboundVars(shapes);
+				for (const auto& v : vars)
+					argList.push_back(v);
 				static const auto createPrimFunc = Function::GetGlobalRequired("te.CreatePrimFunc");
 				auto func = createPrimFunc(argList, nullptr).cast<tirx::PrimFunc>();
 				auto gv = bb->AddFunction(func, name);
-				static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
-				auto outInfo = TensorStructInfo(ShapeExpr(out->shape), out->dtype);
-				return Call(callTir, {gv, ::tvm::relax::Tuple(inputs)}, ::tvm::Attrs(), {outInfo});
+				return callTir(gv, inputs, TensorStructInfo(ShapeExpr(out->shape), out->dtype), vars);
 			}
 
 		private:
@@ -132,6 +168,7 @@ namespace mdl::backend::tvm {
 			std::string name;
 			Array<Expr> inputs;
 			Array<::tvm::ffi::ObjectRef> argList;
+			std::vector<Array<PrimExpr>> shapes;
 		};
 
 		/** @brief Builds a PrimFunc that calls an extern kernel and emits a `call_tir` to it. */
@@ -160,6 +197,8 @@ namespace mdl::backend::tvm {
 					if (!p.same_as(outputHandle))
 						ordered.push_back(p);
 				ordered.push_back(outputHandle);
+				auto vars = unboundVars(shapes);
+				ordered.insert(ordered.end(), vars.begin(), vars.end());
 				Array<PrimExpr> callArgs{tirx::StringImm(kernel)};
 				for (auto& arg : kernelArgs)
 					callArgs.push_back(std::move(arg));
@@ -176,8 +215,7 @@ namespace mdl::backend::tvm {
 				// Opaque (kOpaque = 8): extern calls must not be fused with other kernels.
 				func = ::tvm::WithAttr(std::move(func), "op_pattern", ::tvm::Integer(8));
 				auto gv = bb->AddFunction(func, kernel);
-				static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
-				return Call(callTir, {gv, ::tvm::relax::Tuple(inputs)}, ::tvm::Attrs(), {outInfo.value()});
+				return callTir(gv, inputs, outInfo.value(), vars);
 			}
 
 		private:
@@ -186,6 +224,7 @@ namespace mdl::backend::tvm {
 			Array<Expr> inputs;
 			std::vector<tirx::Var> params;
 			Map<tirx::Var, tirx::Buffer> bufferMap;
+			std::vector<Array<PrimExpr>> shapes;
 			std::optional<TensorStructInfo> outInfo;
 			PrimExpr outputPtr;
 			tirx::Var outputHandle;
@@ -194,6 +233,7 @@ namespace mdl::backend::tvm {
 				// The parameter is the DLTensor handle; the buffer has its own data pointer (bound by MakePackedAPI).
 				auto handle = tirx::Var(n + "_handle", ::tvm::DataType::Handle());
 				auto buf = tirx::decl_buffer(shape, dtype, n);
+				shapes.push_back(shape);
 				params.push_back(handle);
 				bufferMap.Set(handle, buf);
 				return buf.access_ptr(write ? 2 : 1);
@@ -249,12 +289,13 @@ namespace mdl::backend::tvm {
 
 		/** @brief TE matmul with NumPy semantics plus optional transposition of b, scaling, and bias. */
 		te::Tensor matmulCompute(
-				const te::Tensor& a, const te::Tensor& b, std::optional<te::Tensor> bias, bool transB, double alpha
+				const te::Tensor& a, const te::Tensor& b, std::optional<te::Tensor> bias, bool transB, double alpha,
+				bool transA
 		) {
 			const size_t ra = a->shape.size(), rb = b->shape.size();
 			if (ra < 2 || rb < 2)
 				throw std::runtime_error("mdl backend: matmul of 1-D tensors must be handled by the default path");
-			PrimExpr K = a->shape[ra - 1];
+			PrimExpr K = transA ? a->shape[ra - 2] : a->shape[ra - 1];
 			PrimExpr N = transB ? b->shape[rb - 2] : b->shape[rb - 1];
 			// Output: broadcast batch dims of a and b, then [M, N].
 			const size_t batchRank = std::max(ra, rb) - 2;
@@ -267,7 +308,7 @@ namespace mdl::backend::tvm {
 				const auto* imm = da.as<::tvm::IntImmNode>();
 				outShape.push_back(imm && imm->value == 1 ? db : da);
 			}
-			outShape.push_back(a->shape[ra - 2]);
+			outShape.push_back(transA ? a->shape[ra - 1] : a->shape[ra - 2]);
 			outShape.push_back(N);
 			auto k = te::reduce_axis(::tvm::Range(0, K), "k");
 			const auto dtype = a->dtype;
@@ -285,8 +326,13 @@ namespace mdl::backend::tvm {
 							return index;
 						};
 						auto ai = batchIndex(a, ra);
-						ai.push_back(idx[batchRank]);
-						ai.push_back(k);
+						if (transA) {
+							ai.push_back(k);
+							ai.push_back(idx[batchRank]);
+						} else {
+							ai.push_back(idx[batchRank]);
+							ai.push_back(k);
+						}
 						auto bi = batchIndex(b, rb);
 						if (transB) {
 							bi.push_back(idx[batchRank + 1]);
@@ -324,7 +370,7 @@ namespace mdl::backend::tvm {
 		 */
 		std::optional<Expr> matmulKernel(
 				const BlockBuilder& bb, const Expr& a, const Expr& b, std::optional<Expr> bias, bool transB,
-				double alpha
+				double alpha, bool transA
 		) {
 			const auto* ai = tensorInfo(a);
 			const auto* bi = tensorInfo(b);
@@ -334,10 +380,16 @@ namespace mdl::backend::tvm {
 			const size_t ra = as.size(), rb = bs.size();
 			if (ra < 2 || rb < 2)
 				return std::nullopt;
-			PrimExpr M, K = as[ra - 1], N = transB ? bs[rb - 2] : bs[rb - 1];
+			PrimExpr M, K = transA ? as[ra - 2] : as[ra - 1], N = transB ? bs[rb - 2] : bs[rb - 1];
 			PrimExpr batch, batchB;
 			Array<PrimExpr> outShape;
-			if (rb == 2) {
+			if (rb == 2 && transA) {
+				if (ra != 2)
+					return std::nullopt;
+				M = as[1];
+				batch = batchB = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+				outShape.push_back(M);
+			} else if (rb == 2) {
 				M = product(as, 0, ra - 1); // fold all leading dims of a into M
 				batch = batchB = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
 				for (size_t i = 0; i + 1 < ra; ++i)
@@ -352,7 +404,7 @@ namespace mdl::backend::tvm {
 				}
 				if (!bBroadcast && !sameBatch)
 					return std::nullopt;
-				M = as[ra - 2];
+				M = transA ? as[ra - 1] : as[ra - 2];
 				batch = product(as, 0, ra - 2);
 				batchB = bBroadcast ? PrimExpr(::tvm::IntImm(::tvm::DataType::Int(64), 1)) : batch;
 				outShape.push_back(M);
@@ -369,14 +421,15 @@ namespace mdl::backend::tvm {
 			auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
 			return ext.finish(
 					{pout, pa, pb, pbias, ::tvm::IntImm(::tvm::DataType::Int(32), bias ? 1 : 0), i64(batch),
-					 i64(batchB), i64(M), i64(K), i64(N), ::tvm::IntImm(::tvm::DataType::Int(32), transB ? 1 : 0),
+					 i64(batchB), i64(M), i64(K), i64(N), ::tvm::IntImm(::tvm::DataType::Int(32), transA ? 1 : 0),
+					 ::tvm::IntImm(::tvm::DataType::Int(32), transB ? 1 : 0),
 					 ::tvm::FloatImm(::tvm::DataType::Float(32), alpha)}
 			);
 		}
 
 		Expr matmulTE(
 				const BlockBuilder& bb, const Expr& a, const Expr& b, std::optional<Expr> bias, bool transB,
-				double alpha
+				double alpha, bool transA
 		) {
 			TECall te{bb, "matmul"};
 			auto ta = te.tensor(a, "A");
@@ -384,20 +437,22 @@ namespace mdl::backend::tvm {
 			std::optional<te::Tensor> tbias;
 			if (bias)
 				tbias = te.tensor(*bias, "bias");
-			return te.finish(matmulCompute(ta, tb, tbias, transB, alpha));
+			return te.finish(matmulCompute(ta, tb, tbias, transB, alpha, transA));
 		}
 
-		/** @brief Splits mdl.matmul's arguments: (a, b, bias or PrimValue(0), trans_b, alpha). */
+		/** @brief Splits mdl.matmul's arguments: (a, b, bias or PrimValue(0), trans_b, alpha, trans_a). */
 		struct MatmulArgs {
 			Expr a, b;
 			std::optional<Expr> bias;
 			bool transB;
 			double alpha;
+			bool transA;
 
 			explicit MatmulArgs(const Call& call)
 					: a(call->args[0]), b(call->args[1]),
 					  bias(tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt),
-					  transB(intValue(call->args[3]) != 0), alpha(floatValue(call->args[4])) {}
+					  transB(intValue(call->args[3]) != 0), alpha(floatValue(call->args[4])),
+					  transA(intValue(call->args[5]) != 0) {}
 		};
 
 		// ── mdl.matmul operator ───────────────────────────────────────────────────
@@ -407,29 +462,32 @@ namespace mdl::backend::tvm {
 			const auto* ai = tensorInfo(args.a);
 			auto as = shapeOf(args.a), bs = shapeOf(args.b);
 			Array<PrimExpr> out;
-			for (size_t i = 0; i + 1 < as.size(); ++i)
+			for (size_t i = 0; i + 2 < as.size(); ++i)
 				out.push_back(as[i]);
+			out.push_back(args.transA ? as[as.size() - 1] : as[as.size() - 2]);
 			out.push_back(args.transB ? bs[bs.size() - 2] : bs[bs.size() - 1]);
 			return TensorStructInfo(ShapeExpr(out), ai->dtype, ai->vdevice);
 		}
 	} // namespace
 
-	Expr makeMatmul(Expr a, Expr b, std::optional<Expr> bias, bool transB, double alpha) {
+	Expr makeMatmul(Expr a, Expr b, std::optional<Expr> bias, bool transB, double alpha, bool transA) {
 		static const auto& op = ::tvm::Op::Get("mdl.matmul");
 		Expr biasArg = bias ? *bias : Expr(::tvm::relax::PrimValue::Int64(0));
 		return Call(
 				op, {a, b, biasArg, ::tvm::relax::PrimValue::Int64(transB ? 1 : 0),
-					 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), alpha))}
+					 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), alpha)),
+					 ::tvm::relax::PrimValue::Int64(transA ? 1 : 0)}
 		);
 	}
 
 	TVM_REGISTER_OP("mdl.matmul")
-			.set_num_inputs(5)
+			.set_num_inputs(6)
 			.add_argument("a", "Tensor", "The left operand [..., M, K].")
 			.add_argument("b", "Tensor", "The right operand [K, N] (or [N, K] if transposed), possibly batched.")
 			.add_argument("bias", "Tensor | PrimValue", "The bias [N] or PrimValue(0) for no bias.")
 			.add_argument("trans_b", "PrimValue", "Whether b is transposed (last two dims).")
 			.add_argument("alpha", "PrimValue", "Scale applied to the product.")
+			.add_argument("trans_a", "PrimValue", "Whether a is transposed (last two dims).")
 			.set_attr<::tvm::relax::FInferStructInfo>("FInferStructInfo", inferMatmul)
 			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
 
@@ -503,7 +561,7 @@ namespace mdl::backend::tvm {
 		map.Set("relax.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const Expr &a = call->args[0], &b = call->args[1];
 					if (vendor)
-						if (auto e = matmulKernel(bb, a, b, std::nullopt, false, 1.0))
+						if (auto e = matmulKernel(bb, a, b, std::nullopt, false, 1.0, false))
 							return *e;
 					if (shapeOf(a).size() < 2 || shapeOf(b).size() < 2) {
 						// Vector operands: unsqueeze to matrices, multiply, squeeze the result.
@@ -512,7 +570,7 @@ namespace mdl::backend::tvm {
 						auto ta = te.tensor(a, "A"), tb = te.tensor(b, "B");
 						auto ma = as.size() == 1 ? topi::reshape(ta, {1, as[0]}) : ta;
 						auto mb = bs.size() == 1 ? topi::reshape(tb, {bs[0], 1}) : tb;
-						auto product = matmulCompute(ma, mb, std::nullopt, false, 1.0);
+						auto product = matmulCompute(ma, mb, std::nullopt, false, 1.0, false);
 						Array<PrimExpr> outShape;
 						for (size_t i = 0; i < product->shape.size(); ++i) {
 							const bool squeezed = (as.size() == 1 && i == product->shape.size() - 2) ||
@@ -522,14 +580,14 @@ namespace mdl::backend::tvm {
 						}
 						return te.finish(topi::reshape(product, outShape));
 					}
-					return matmulTE(bb, a, b, std::nullopt, false, 1.0);
+					return matmulTE(bb, a, b, std::nullopt, false, 1.0, false);
 				}));
 		map.Set("mdl.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					MatmulArgs args{call};
 					if (vendor)
-						if (auto e = matmulKernel(bb, args.a, args.b, args.bias, args.transB, args.alpha))
+						if (auto e = matmulKernel(bb, args.a, args.b, args.bias, args.transB, args.alpha, args.transA))
 							return *e;
-					return matmulTE(bb, args.a, args.b, args.bias, args.transB, args.alpha);
+					return matmulTE(bb, args.a, args.b, args.bias, args.transB, args.alpha, args.transA);
 				}));
 
 		map.Set("relax.nn.softmax", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {

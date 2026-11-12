@@ -47,9 +47,10 @@ namespace mdl::backend::tvm {
 	};
 
 	/** @param packing the packed tensors of the exported functions by global symbol (see EntrySignature). */
+	/** @param profile whether to call mdl_profile_begin/end around every kernel call. */
 	::tvm::IRModule lowerToAOT(
 			::tvm::IRModule mod, const std::string& kernelPrefix,
-			const std::unordered_map<std::string, EntrySignature>& packing = {}
+			const std::unordered_map<std::string, EntrySignature>& packing = {}, bool profile = false
 	);
 
 } // namespace mdl::backend::tvm

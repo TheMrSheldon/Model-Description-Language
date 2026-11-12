@@ -16,17 +16,24 @@ extern "C" {
 #endif
 
 /**
- * @brief Batched matrix multiplication `dst[b] = alpha * (A[b] @ op(B[b])) + bias`.
+ * @brief Batched matrix multiplication `dst[b] = alpha * (op(A[b]) @ op(B[b])) + bias`.
  * @param dst   [batch, M, N]
- * @param A     [batch, M, K]
+ * @param A     [batch, M, K] (or [batch, K, M] if @p trans_a)
  * @param B     [batchB, K, N] (or [batchB, N, K] if @p trans_b); batchB is either @p batch or 1 (broadcast)
  * @param bias  [N]; only read if @p has_bias is non-zero
  * @param batchB batch size of B (1 or @p batch)
  */
 int mdl_matmul_f32(
 		float* dst, const float* A, const float* B, const float* bias, int32_t has_bias, int64_t batch,
-		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_b, float alpha
+		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
 );
+
+/**
+ * @brief Profiling hooks: models compiled with `mdlc --profile` call these around every kernel call. The times are
+ * summed per kernel kind and printed to stderr at program exit.
+ */
+int mdl_profile_begin(const char* kernel);
+int mdl_profile_end(const char* kernel);
 
 /** @brief Softmax over the last axis of a [outer, axis] tensor (in-place allowed). */
 int mdl_softmax_f32(float* dst, const float* src, int64_t outer, int64_t axis);

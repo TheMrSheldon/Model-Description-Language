@@ -104,15 +104,16 @@ namespace {
 
 extern "C" int mdl_matmul_f32(
 		float* dst, const float* A, const float* B, const float* bias, int32_t has_bias, int64_t batch,
-		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_b, float alpha
+		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
 ) {
 	if (!has_bias)
 		bias = nullptr;
 	return guarded([&] {
-		using Key = std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, bool, float>;
+		using Key = std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, int32_t, bool, float>;
 		static PrimitiveCache<Key, dnnl::matmul> cache;
 
-		const memory::desc srcMd({batch, M, K}, dt::f32, {M * K, K, 1});
+		// A[b] is [M, K] row-major, or [K, M] row-major (viewed as a column-major [M, K]) if transposed.
+		const memory::desc srcMd({batch, M, K}, dt::f32, trans_a ? memory::dims{M * K, 1, M} : memory::dims{M * K, K, 1});
 		// B[b] is [K, N] row-major, or [N, K] row-major (viewed as a column-major [K, N]) if transposed.
 		const memory::dims wStrides = trans_b ? memory::dims{batchB == 1 ? 0 : N * K, 1, K}
 											  : memory::dims{batchB == 1 ? 0 : K * N, N, 1};
@@ -120,7 +121,7 @@ extern "C" int mdl_matmul_f32(
 		const memory::desc biasMd({1, 1, N}, dt::f32, {N, N, 1});
 		const memory::desc dstMd({batch, M, N}, dt::f32, {M * N, N, 1});
 
-		const auto& prim = cache.get(Key{batch, batchB, M, K, N, trans_b, bias != nullptr, alpha}, [&] {
+		const auto& prim = cache.get(Key{batch, batchB, M, K, N, trans_a, trans_b, bias != nullptr, alpha}, [&] {
 			dnnl::primitive_attr attr;
 			if (alpha != 1.0f)
 				attr.set_scales_mask(DNNL_ARG_SRC, 0);

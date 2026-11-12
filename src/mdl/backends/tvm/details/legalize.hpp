@@ -20,14 +20,14 @@
 namespace mdl::backend::tvm {
 
 	/**
-	 * @brief Creates a call of the backend operator `mdl.matmul`: `alpha * (a @ op(b)) + bias` with `op(b) = b^T` if
-	 * @p transB (transposing the last two dimensions).
+	 * @brief Creates a call of the backend operator `mdl.matmul`: `alpha * (op(a) @ op(b)) + bias` with
+	 * `op(x) = x^T` (transposing the last two dimensions) if @p transA / @p transB.
 	 * @details Shapes: a `[..., M, K]` with b `[K, N]` (or `[N, K]`), or a and b batched with the same rank (b's batch
-	 * dimensions may be 1). bias is `[N]`.
+	 * dimensions may be 1). bias is `[N]`. A transposed a (`[..., K, M]`) with a 2-D b must be 2-D.
 	 */
 	::tvm::relax::Expr makeMatmul(
 			::tvm::relax::Expr a, ::tvm::relax::Expr b, std::optional<::tvm::relax::Expr> bias, bool transB,
-			double alpha
+			double alpha, bool transA = false
 	);
 
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */

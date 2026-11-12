@@ -3,6 +3,8 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/utils/overload.hpp>
 
+#include "../utils/einops.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -41,7 +43,19 @@ namespace mdl::autodiff {
 			const Node& neg(const Node& a) { return op(FIDs::TENSOR_SUB, getDataType(a), {constant(0.0), a}); }
 			const Node& unary(FIDs id, const Node& a) { return op(id, getDataType(a), {a}); }
 			const Node& transposed(const Node& a) {
+				// (a^T)^T = a (e.g. the gradient of `x @ W.T()` with respect to x is `g @ W`)
+				if (const auto* inv = std::get_if<InvocationNode>(&a); inv && inv->id == FIDs::PERMUTE && isSwapLastTwo(*inv))
+					return inv->arguments[0].get();
 				return op(FIDs::PERMUTE, swapLastTwo(getDataType(a)), {a, graph.addConstNode(Atomic{std::vector<int>{-1, -2}})});
+			}
+
+			/** @brief `x[... k -> (...) k]`: merges all dimensions but the last one. */
+			const Node* flattenLeading(const Node& x) {
+				using namespace einops;
+				const Spec lhs{{false, {{AtomKind::Ellipsis, "", 0}}}, {false, {{AtomKind::Named, "k", 0}}}};
+				const Spec rhs{{true, {{AtomKind::Ellipsis, "", 0}}}, {false, {{AtomKind::Named, "k", 0}}}};
+				auto result = apply(graph, x, lhs, rhs, {});
+				return result ? &result->get() : nullptr;
 			}
 			const Node& matmul(const Node& a, const Node& b, const DataType& type) {
 				return op(FIDs::TENSOR_DOT, type, {a, b});
@@ -73,6 +87,17 @@ namespace mdl::autodiff {
 				std::swap(result.shape[result.shape.size() - 1], result.shape[result.shape.size() - 2]);
 				return result;
 			}
+
+		public:
+			static bool isSwapLastTwo(const InvocationNode& permute) {
+				if (permute.arguments.size() != 2)
+					return false;
+				const auto* c = std::get_if<ConstNode>(&permute.arguments[1].get());
+				const auto* perm = c ? std::get_if<std::vector<int>>(&c->value) : nullptr;
+				return perm != nullptr && *perm == std::vector<int>{-1, -2};
+			}
+
+		private:
 
 			static bool sameShape(const DataType& a, const DataType& b) {
 				const auto* ta = std::get_if<TensorType>(&a);
@@ -146,6 +171,20 @@ namespace mdl::autodiff {
 					DataType type = batched(tb) && !batched(ta) ? withBatch(ta) : getDataType(x);
 					return b.unbroadcast(b.matmul(g, b.transposed(*other), type), x);
 				}
+				// Activations times a matrix (e.g. a weight): dB = A^T @ g as one GEMM over all batch dimensions,
+				// flatten(A)^T @ flatten(g), instead of one product per batch element that is summed afterwards.
+				if (batched(ta) && !batched(tb) && tb->shape.size() == 2) {
+					const Node* a2 = b.flattenLeading(x);
+					const Node* g2 = b.flattenLeading(g);
+					if (a2 != nullptr && g2 != nullptr) {
+						// y = A @ W^T (std.Linear): d(W^T) = (g^T @ A)^T, so that the rule of the transposition yields
+						// dW = g^T @ A without a transposed copy.
+						const auto* perm = std::get_if<InvocationNode>(other);
+						if (perm != nullptr && perm->id == FIDs::PERMUTE && Builder::isSwapLastTwo(*perm))
+							return b.transposed(b.matmul(b.transposed(*g2), *a2, getDataType(perm->arguments[0].get())));
+						return b.matmul(b.transposed(*a2), *g2, getDataType(*other));
+					}
+				}
 				DataType type = batched(ta) && !batched(tb) ? withBatch(tb) : getDataType(*other);
 				return b.unbroadcast(b.matmul(b.transposed(x), g, type), *other);
 			}
@@ -193,6 +232,8 @@ namespace mdl::autodiff {
 			case FIDs::RESHAPE:
 				return b.op(FIDs::RESHAPE_LIKE, getDataType(x), {g, x});
 			case FIDs::PERMUTE:
+				if (Builder::isSwapLastTwo(inv))
+					return b.transposed(g); // its own inverse; cancels a transposed gradient
 				return b.op(FIDs::PERMUTE_INVERSE, getDataType(x), {g, *other});
 			case FIDs::EXPAND:
 				return b.op(FIDs::COLLAPSE_SUM_LIKE, getDataType(x), {g, x});

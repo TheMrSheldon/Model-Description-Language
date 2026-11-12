@@ -563,7 +563,7 @@ void mdl::backends::tvm::compileToFile(
 	mod = backend::runRelaxPipeline(mod, target, opts);
 	dump(mod, "relax-lowered");
 	const auto prefix = symbolPrefix(output);
-	mod = backend::lowerToAOT(mod, prefix + "k_", packing);
+	mod = backend::lowerToAOT(mod, prefix + "k_", packing, opts.profile);
 	dump(mod, "tir");
 	backend::buildObject(mod, target, prefix, output);
 }
