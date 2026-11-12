@@ -258,6 +258,21 @@ namespace mdl::masking {
 					args[0] = std::cref(fill(args[0].get(), sg, dims, 0.0));
 					return graph.addInvocationNode(inv.id, inv.type, std::vector<NodeRef>(args));
 				}
+				case FIDs::MASK_OF: { // x.mask: 1.0 at the valid elements, 0.0 at the masked ones
+					const auto& s = argShape(0);
+					auto dims = maskedDims(s);
+					if (dims.empty())
+						return graph.addConstNode(Atomic{1.0});
+					return graph.addInvocationNode(
+							FIDs::WHERE, floatType(),
+							{combinedMask(s, dims), graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
+					);
+				}
+				case FIDs::UNMASK: { // x.data: zeros at the masked elements
+					const auto& s = argShape(0);
+					auto dims = maskedDims(s);
+					return dims.empty() ? args[0].get() : fill(args[0].get(), s, dims, 0.0);
+				}
 				default:
 					return make();
 				}

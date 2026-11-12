@@ -196,12 +196,33 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		// Masked functions replace the originals (also as the functions that are differentiated).
 		std::map<std::string, const FunctionDecl*> decls;
 		std::map<std::string, const Node*> masks;
-		for (const auto& [funcName, decl] : module->functions)
+		auto hasEllipsis = [](const DataType& type) {
+			const auto* t = std::get_if<TensorType>(&type);
+			return t != nullptr && std::any_of(t->shape.begin(), t->shape.end(), [](const auto& d) {
+				return std::holds_alternative<Elipsis>(d);
+			});
+		};
+		auto isMasked = [](const DataType& type) {
+			const auto* t = std::get_if<TensorType>(&type);
+			return t != nullptr && t->masked;
+		};
+		std::vector<std::string> maskedHere = masked; // requested, plus functions that declare masked parameters
+		for (const auto& [funcName, decl] : module->functions) {
 			decls.emplace(funcName, &decl);
-		for (const auto& name : masked) {
+			if (std::any_of(decl.parameters.begin(), decl.parameters.end(), [&](const auto& p) {
+					return isMasked(p.second.get().type);
+				}) && std::find(maskedHere.begin(), maskedHere.end(), funcName) == maskedHere.end())
+				maskedHere.push_back(funcName);
+		}
+		for (const auto& name : maskedHere) {
 			auto it = decls.find(name);
 			if (it == decls.end())
 				continue;
+			// Elaborate the function for masked inputs (its `...` parameters), so that it calls masked overloads.
+			std::vector<bool> pattern;
+			for (const auto& [_, p] : it->second->parameters)
+				pattern.push_back(isMasked(p.get().type) || hasEllipsis(p.get().type));
+			it->second = &unit.specializeMasked(*it->second, pattern);
 			auto shapes = shapes::infer(*it->second, ellipsisRank, evaluate);
 			if (!shapes)
 				throw std::runtime_error(moduleName + "." + shapes.error());

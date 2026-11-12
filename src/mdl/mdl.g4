@@ -22,7 +22,8 @@ param
       ;
 
 type
-      : typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
+      // `masked` marks a masked tensor (dense values plus a mask of the valid elements, see the masking pass)
+      : masked='masked'? typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
       | 'struct' '{' vardecl* '}'                               # AnonType
       // Array of `element` for var = lo, ..., hi-1 (e.g. a stack of modules)
       | '[' element=type 'for' var=IDENT 'in' lo=expr '..' hi=expr ']' # ComprehensionType

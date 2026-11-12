@@ -48,6 +48,13 @@ namespace mdl {
 		/** @brief Stores a derived function (e.g. a gradient) for the lifetime of the compilation unit. */
 		const FunctionDecl& keep(FunctionDecl decl) const;
 
+		/**
+		 * @brief The function to call when the parameters marked in @p maskedParams get masked tensors: the matching
+		 * overload, elaborated for these argument types (so that the calls in its body choose masked overloads too).
+		 * @return @p decl itself if no specialization is needed (valid as long as the compilation unit).
+		 */
+		const FunctionDecl& specializeMasked(const FunctionDecl& decl, const std::vector<bool>& maskedParams) const;
+
 		std::shared_ptr<parser::FrontendState> state;
 	};
 } // namespace mdl

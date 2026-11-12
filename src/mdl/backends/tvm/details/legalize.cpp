@@ -99,14 +99,16 @@ namespace mdl::backend::tvm {
 		 * and `B1` of a flattened dimension `B0 * B1`. A kernel cannot recover them from its buffers, so they are passed
 		 * as extra arguments (`tir_vars` of `call_tir`).
 		 */
-		Array<tirx::Var> unboundVars(const std::vector<Array<PrimExpr>>& shapes) {
+		Array<tirx::Var> unboundVars(const std::vector<Array<PrimExpr>>& shapes, const std::vector<PrimExpr>& scalars = {}) {
 			std::vector<const tirx::VarNode*> direct;
 			for (const auto& shape : shapes)
 				for (const auto& d : shape)
 					if (const auto* v = d.as<tirx::VarNode>())
 						direct.push_back(v);
+			std::vector<Array<PrimExpr>> all = shapes;
+			all.emplace_back(scalars.begin(), scalars.end()); // e.g. a runtime dimension as a divisor
 			Array<tirx::Var> unbound;
-			for (const auto& shape : shapes)
+			for (const auto& shape : all)
 				for (const auto& d : shape)
 					for (const auto& v : tirx::UndefinedVars(d))
 						if (std::find(direct.begin(), direct.end(), v.get()) == direct.end() &&
@@ -144,18 +146,19 @@ namespace mdl::backend::tvm {
 				return placeholder;
 			}
 
-			/** @brief The value of a scalar (PrimValue) argument. */
-			static PrimExpr scalar(const Expr& arg, ::tvm::DataType dtype) {
+			/** @brief The value of a scalar (PrimValue) argument (its symbolic variables become kernel arguments). */
+			PrimExpr scalar(const Expr& arg, ::tvm::DataType dtype) {
 				const auto* pv = arg.as<::tvm::relax::PrimValueNode>();
 				if (pv == nullptr)
 					throw std::runtime_error("mdl backend: expected a tensor or PrimValue operand");
+				scalars.push_back(pv->value);
 				return ::tvm::cast(dtype, pv->value);
 			}
 
 			Expr finish(const te::Tensor& out) {
 				argList.push_back(out);
 				shapes.push_back(out->shape);
-				auto vars = unboundVars(shapes);
+				auto vars = unboundVars(shapes, scalars);
 				for (const auto& v : vars)
 					argList.push_back(v);
 				static const auto createPrimFunc = Function::GetGlobalRequired("te.CreatePrimFunc");
@@ -170,6 +173,7 @@ namespace mdl::backend::tvm {
 			Array<Expr> inputs;
 			Array<::tvm::ffi::ObjectRef> argList;
 			std::vector<Array<PrimExpr>> shapes;
+			std::vector<PrimExpr> scalars;
 		};
 
 		/** @brief Builds a PrimFunc that calls an extern kernel and emits a `call_tir` to it. */
@@ -262,10 +266,10 @@ namespace mdl::backend::tvm {
 				return te.finish(TT(te.tensor(call->args[0], "lhs"), te.tensor(call->args[1], "rhs"), "T_" + name,
 									topi::kBroadcast));
 			if (lhsInfo)
-				return te.finish(TS(te.tensor(call->args[0], "lhs"), TECall::scalar(call->args[1], lhsInfo->dtype),
+				return te.finish(TS(te.tensor(call->args[0], "lhs"), te.scalar(call->args[1], lhsInfo->dtype),
 									"T_" + name, topi::kElementWise));
 			if (rhsInfo)
-				return te.finish(ST(TECall::scalar(call->args[0], rhsInfo->dtype), te.tensor(call->args[1], "rhs"),
+				return te.finish(ST(te.scalar(call->args[0], rhsInfo->dtype), te.tensor(call->args[1], "rhs"),
 									"T_" + name, topi::kElementWise));
 			return call; // scalar arithmetic is handled by ComputePrimValue
 		}

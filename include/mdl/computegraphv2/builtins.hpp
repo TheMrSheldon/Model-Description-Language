@@ -65,6 +65,9 @@ namespace mdl::builtins {
 		ONE_HOT_LIKE,	  /**< (labels int[...], like [..., C]): 1.0 at labels, 0.0 elsewhere (like's shape; C classes) */
 		/** Selection **/
 		WHERE, /**< (cond bool[...], a, b): a where cond, b elsewhere (all three broadcast) */
+		/** Masked tensors (resolved by the masking pass; backends never see them) **/
+		MASK_OF, /**< (x masked): `x.mask`, 1.0 at x's valid elements and 0.0 at masked ones (broadcastable to x) */
+		UNMASK,	 /**< (x masked): `x.data`, x's values with zeros at the masked elements (an unmasked tensor) */
 
 		COUNT
 	};

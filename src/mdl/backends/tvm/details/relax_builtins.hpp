@@ -452,6 +452,13 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     },
     /** WHERE — ts[1] where ts[0], else ts[2] **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return callRelaxOp("relax.op.where", ts[0], ts[1], ts[2]); },
+    /** MASK_OF, UNMASK — resolved by the masking pass **/
+    [](auto& /*bb*/, auto /*ts*/) -> ::tvm::relax::Expr {
+        throw std::runtime_error("`.mask` of a tensor that is not masked in the compiled function (see --mask)");
+    },
+    [](auto& /*bb*/, auto /*ts*/) -> ::tvm::relax::Expr {
+        throw std::runtime_error("`.data` of a tensor that is not masked in the compiled function (see --mask)");
+    },
 });
 
 // Every builtin needs a translation (the table is positional).

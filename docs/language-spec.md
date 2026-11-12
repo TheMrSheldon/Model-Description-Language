@@ -103,6 +103,20 @@ shared with the forward pass (the computegraph interns nodes), so this costs not
 `nograd` (stops gradients).
 
 
+## Overloads and masked tensors
+Functions can be overloaded on whether their tensor parameters are `masked`. A masked tensor (`masked float[..., D]`)
+has dense values plus a mask of the valid elements in the last dimension of `...` (like torch.masked); operations on it
+yield masked tensors. A call with a masked argument uses the `masked` overload if there is one; otherwise a plain
+parameter takes the masked tensor, and the function is elaborated again for it, so that the calls in its body see the
+masked type as well. A `masked` parameter does not take plain tensors.
+```dlm
+float[...] average(x: float[...]) => mean(x);
+float[...] average(x: masked float[...]) => mean(x.data) / mean(x.mask);
+```
+`x.data` is x with zeros at the masked elements, `x.mask` is 1.0 at valid and 0.0 at masked elements (broadcastable to
+x). A compiled function with masked parameters (or `mdlc --mask f`) takes an additional input `mask: bool[...]`.
+
+
 # Structs
 - Represent POD datatypes: structs contain members that are either themselves structs or atomics.
 

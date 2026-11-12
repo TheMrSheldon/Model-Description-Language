@@ -28,7 +28,15 @@ namespace mdl {
 		using Shape = std::vector<std::variant<unsigned, Elipsis, const Node*>>;
 		PrimitiveType type;
 		Shape shape;
+		/**
+		 * @brief Whether the tensor is masked (`masked float[...]`): dense values plus a mask of the valid elements
+		 * (like torch.masked). Operations on masked tensors yield masked tensors; see the masking pass.
+		 */
+		bool masked = false;
 	};
+
+	/** @brief The definition of a function (opaque to the IR; owned by the frontend), see FunctionDecl::templ. */
+	struct FunctionTemplate;
 
 	/**
 	 * @brief Represents a function definition.
@@ -47,6 +55,17 @@ namespace mdl {
 		std::vector<std::variant<PrimitiveType, TensorType>> returnTypes = {};
 		/** @brief Names of the outputs in the exported ABI (optional; e.g. set for gradient functions). */
 		std::vector<std::string> outputNames = {};
+		/**
+		 * @brief Other definitions with the same name (overloads). A call uses the one whose parameter types match the
+		 * arguments best: a `masked` parameter takes only masked tensors, a plain one any tensor.
+		 */
+		std::vector<FunctionDecl> overloads = {};
+		/**
+		 * @brief The definition this function is elaborated from. A call with argument types that differ from the
+		 * declared ones (e.g. a masked tensor for a plain parameter) elaborates the body again for these types, so that
+		 * the calls in the body see them as well (and e.g. choose masked overloads).
+		 */
+		std::shared_ptr<FunctionTemplate> templ = nullptr;
 	};
 
 	/**

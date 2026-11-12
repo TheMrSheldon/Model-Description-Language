@@ -210,6 +210,8 @@ namespace mdl::shapes {
 				case FIDs::LOG:
 				case FIDs::TANH:
 				case FIDs::STOP_GRADIENT:
+				case FIDs::MASK_OF:
+				case FIDs::UNMASK:
 					return arg(0);
 
 				case FIDs::TENSOR_DOT: return matmul(arg(0), arg(1));

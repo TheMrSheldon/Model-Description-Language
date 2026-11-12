@@ -155,6 +155,15 @@ static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference
 	case FunctionIDs::MEAN_ALL:
 		return PrimitiveType::floating;
 
+	case FunctionIDs::MASK_OF:
+		if (const auto* x = args.empty() ? nullptr : getTensor(args[0].get()))
+			return TensorType{PrimitiveType::floating, x->shape};
+		return fallback();
+	case FunctionIDs::UNMASK:
+		if (const auto* x = args.empty() ? nullptr : getTensor(args[0].get()))
+			return TensorType{x->type, x->shape};
+		return fallback();
+
 	// VAR returns a scalar of the same element type.
 	case FunctionIDs::VAR:
 		if (!args.empty()) {
@@ -224,6 +233,7 @@ namespace {
 			return false;
 		appendKey(key, char{'t'});
 		appendKey(key, tensor->type);
+		appendKey(key, tensor->masked);
 		appendKey(key, tensor->shape.size());
 		for (const auto& dim : tensor->shape) {
 			appendKey(key, static_cast<char>(dim.index()));
@@ -260,7 +270,26 @@ const Node& Computegraph::addConstNode(Atomic&& value) {
 	return *it->second;
 }
 
+namespace {
+	/** @brief Whether the result of @p func is masked if an argument is (like torch.masked: masked in, masked out). */
+	bool propagatesMask(FunctionIDs func) {
+		switch (func) {
+		case FunctionIDs::SUM_ALL:
+		case FunctionIDs::MEAN_ALL:
+		case FunctionIDs::MASK_OF:
+		case FunctionIDs::UNMASK:
+			return false;
+		default:
+			return true;
+		}
+	}
+} // namespace
+
 const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, std::vector<NodeRef>&& args) {
+	if (auto* tensor = std::get_if<TensorType>(&dtype); tensor != nullptr && propagatesMask(func))
+		for (const auto& arg : args)
+			if (const auto* t = std::get_if<TensorType>(&getDataType(arg.get())); t != nullptr && t->masked)
+				tensor->masked = true;
 	std::string key = "i";
 	appendKey(key, func);
 	appendKey(key, args.size());

@@ -42,6 +42,14 @@ namespace mdl {
 		PrettyErrorListener* errors; ///< Error listener of the defining file
 	};
 
+	/** @brief The definition of a function, from which it is elaborated again for other argument types. */
+	struct FunctionTemplate {
+		antlr4::mdlParser::FuncdefContext* ctx;
+		Namespace* scope;			 ///< The namespace the function is defined in (persistent)
+		std::string weightScope;	 ///< The weight scope at the definition (TranslatingVisitor::scope)
+		PrettyErrorListener* errors; ///< Error listener of the defining file
+	};
+
 	struct parser::FrontendState {
 		Computegraph graph;
 		std::vector<std::unique_ptr<ParsedFile>> files;
@@ -71,6 +79,12 @@ namespace mdl {
 
 		std::stack<mdl::Computegraph*> graphstack;
 		std::stack<mdl::Namespace> nsstack;
+		/** @brief The namespaces of module instances (kept so that their functions can be specialized later). */
+		std::deque<mdl::Namespace> instanceScopes;
+		/** @brief While specializing a function: which parameters take masked tensors (see specialize()). */
+		std::optional<std::vector<bool>> maskedParams;
+		/** @brief Specialized functions by definition and argument pattern. */
+		std::map<std::pair<const FunctionTemplate*, std::string>, const FunctionDecl*> specializations;
 		/** @brief Name of the module whose definition is currently parsed (scope of its weights); empty outside. */
 		std::string scope;
 
@@ -512,9 +526,23 @@ namespace mdl {
 				declareMember(m, var);
 			for (auto& func : t.ctx->funcdef()) {
 				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
-				m.functions.insert_or_assign(std::move(name), std::move(decl));
+				if (auto it = m.functions.find(name); it != m.functions.end())
+					it->second.overloads.push_back(std::move(decl)); // (duplicates were reported by registerFunction)
+				else
+					m.functions.emplace(std::move(name), std::move(decl));
 			}
 
+			// The member functions can be specialized later (e.g. for masked tensors): keep the instance's namespace.
+			Namespace& persistent = instanceScopes.emplace_back(nsstack.top());
+			for (auto& [_, f] : m.functions)
+				for (FunctionDecl* d : [&] {
+						 std::vector<FunctionDecl*> all{&f};
+						 for (auto& o : f.overloads)
+							 all.push_back(&o);
+						 return all;
+					 }())
+					if (d->templ != nullptr && d->templ->scope == &nsstack.top())
+						d->templ->scope = &persistent;
 			nsstack.pop();
 			errorlistener = outerErrors;
 			scope = outerScope;
@@ -580,6 +608,21 @@ namespace mdl {
 		}
 
 		virtual std::any visitTypeSpec(mdlParser::TypeSpecContext* ctx) override {
+			auto dtype = std::any_cast<DataType>(unqualifiedTypeSpec(ctx));
+			if (ctx->masked != nullptr) {
+				if (auto* tensor = std::get_if<TensorType>(&dtype)) {
+					tensor->masked = true;
+				} else {
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, ctx->masked, ctx->masked->getLine(),
+							ctx->masked->getCharPositionInLine(), "Only tensors can be masked"
+					);
+				}
+			}
+			return dtype;
+		}
+
+		std::any unqualifiedTypeSpec(mdlParser::TypeSpecContext* ctx) {
 			auto dtype = currentNamespace().getType(ctx->typename_->getText());
 			if (!dtype.has_value()) {
 				errorlistener->semanticError(
@@ -707,6 +750,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitFuncdef(mdlParser::FuncdefContext* ctx) override {
+			const auto specialization = std::exchange(maskedParams, std::nullopt);
 			std::vector<std::reference_wrapper<const Node>> outputs;
 			std::vector<std::pair<std::string, std::reference_wrapper<const HyperparameterNode>>> tparams;
 			std::vector<std::pair<std::string, std::reference_wrapper<const InputNode>>> params;
@@ -718,8 +762,10 @@ namespace mdl {
 					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
 			}
-			for (auto& param : ctx->param()) {
-				auto [name, dtype] = std::any_cast<VarDecl>(param->accept(this));
+			for (size_t i = 0; i < ctx->param().size(); ++i) {
+				auto [name, dtype] = std::any_cast<VarDecl>(ctx->param()[i]->accept(this));
+				if (auto* tensor = std::get_if<TensorType>(&dtype); tensor && specialization && i < specialization->size())
+					tensor->masked |= (*specialization)[i];
 				auto& p = currentNamespace().put(name, Object{&graph().addInputNode(dtype, name)});
 				params.emplace_back(name, std::get<mdl::InputNode>(*std::get<const mdl::Node*>(p)));
 			}
@@ -784,10 +830,148 @@ namespace mdl {
 						)
 				);
 			}
-			if (!checkRedefinition(ctx->IDENT()))
-				currentNamespace().put<mdl::Object>(ctx->IDENT()->getText(), Object{decl});
+			if (specialization)
+				return std::make_pair(ctx->IDENT()->getText(), std::move(decl)); // the caller sets the template
+			decl.templ = std::make_shared<FunctionTemplate>(
+					FunctionTemplate{.ctx = ctx, .scope = &currentNamespace(), .weightScope = scope, .errors = errorlistener}
+			);
+			registerFunction(ctx->IDENT(), decl);
 			return std::make_pair(ctx->IDENT()->getText(), std::move(decl));
 		}
+
+		/** @brief Which parameters of @p decl take masked tensors (the overload's signature). */
+		static std::vector<bool> maskedSignature(const FunctionDecl& decl) {
+			std::vector<bool> signature;
+			for (const auto& [_, p] : decl.parameters) {
+				const auto* t = std::get_if<TensorType>(&p.get().type);
+				signature.push_back(t != nullptr && t->masked);
+			}
+			return signature;
+		}
+
+		/** @brief Defines the function @p decl in the current namespace, as an overload if the name is a function. */
+		void registerFunction(antlr4::tree::TerminalNode* ident, const FunctionDecl& decl) {
+			const std::string name = ident->getText();
+			if (!currentNamespace().definesLocally(name)) {
+				currentNamespace().put<mdl::Object>(name, Object{decl});
+				return;
+			}
+			auto existing = currentNamespace().get<Object>(name);
+			const auto* function = existing ? std::get_if<FunctionDecl>(&existing->get()) : nullptr;
+			if (function == nullptr) {
+				checkRedefinition(ident);
+				return;
+			}
+			auto sameSignature = [&](const FunctionDecl& other) {
+				return other.parameters.size() == decl.parameters.size() && maskedSignature(other) == maskedSignature(decl);
+			};
+			bool duplicate = sameSignature(*function);
+			for (const auto& o : function->overloads)
+				duplicate |= sameSignature(o);
+			if (duplicate) {
+				checkRedefinition(ident);
+				return;
+			}
+			FunctionDecl merged = *function;
+			merged.overloads.push_back(decl);
+			currentNamespace().assign(name, Object{std::move(merged)});
+		}
+
+		/**
+		 * @brief The function to call for arguments of the given types: the best matching overload of @p decl,
+		 * specialized for the argument types if they differ from its parameter types (a masked tensor passed to a plain
+		 * parameter). Without masked arguments, this is @p decl itself (or its matching overload).
+		 * @return nullptr if no overload takes these arguments (e.g. a plain tensor for a masked parameter).
+		 */
+		const FunctionDecl* resolveCall(const FunctionDecl& decl, const std::vector<DataType>& argtypes) {
+			auto masked = [](const DataType& t) {
+				const auto* tensor = std::get_if<TensorType>(&t);
+				return tensor != nullptr && tensor->masked;
+			};
+			const FunctionDecl* best = nullptr;
+			int bestScore = -1;
+			std::vector<const FunctionDecl*> candidates{&decl};
+			for (const auto& o : decl.overloads)
+				candidates.push_back(&o);
+			for (const auto* c : candidates) {
+				if (c->parameters.size() != argtypes.size())
+					continue;
+				int score = 0;
+				bool viable = true;
+				for (size_t i = 0; i < argtypes.size(); ++i) {
+					const bool param = masked(c->parameters[i].second.get().type), arg = masked(argtypes[i]);
+					if (param && !arg)
+						viable = false; // a masked parameter needs a masked tensor
+					score += (param == arg) ? 2 : 1;
+				}
+				if (viable && score > bestScore) {
+					best = c;
+					bestScore = score;
+				}
+			}
+			if (best == nullptr) {
+				// Let the arity check report wrong argument counts; otherwise no overload takes the arguments.
+				const bool arityMatches = std::any_of(candidates.begin(), candidates.end(), [&](const FunctionDecl* c) {
+					return c->parameters.size() == argtypes.size();
+				});
+				if (arityMatches)
+					return nullptr;
+				best = &decl;
+			}
+			std::vector<bool> pattern;
+			bool differs = false;
+			for (size_t i = 0; i < best->parameters.size() && i < argtypes.size(); ++i) {
+				const bool param = masked(best->parameters[i].second.get().type), arg = masked(argtypes[i]);
+				pattern.push_back(param || arg);
+				differs |= arg && !param;
+			}
+			if (!differs || best->templ == nullptr)
+				return best;
+			return &specialize(*best, pattern);
+		}
+
+		/** @brief Elaborates @p decl again with the parameters marked in @p maskedPattern taking masked tensors. */
+		const FunctionDecl& specialize(const FunctionDecl& decl, const std::vector<bool>& maskedPattern) {
+			const auto& t = *decl.templ;
+			std::string key;
+			for (bool m : maskedPattern)
+				key += m ? 'm' : '-';
+			if (auto it = specializations.find({&t, key}); it != specializations.end())
+				return *it->second;
+
+			auto* outerErrors = std::exchange(errorlistener, t.errors);
+			const std::string outerScope = std::exchange(scope, t.weightScope);
+			nsstack.push(t.scope->createSubnamespace());
+			maskedParams = maskedPattern;
+			auto [name, specialized] = std::any_cast<std::pair<std::string, FunctionDecl>>(t.ctx->accept(this));
+			nsstack.pop();
+			scope = outerScope;
+			errorlistener = outerErrors;
+
+			specialized.templ = decl.templ;
+			state.derivedFunctions.push_back(std::move(specialized));
+			const FunctionDecl& result = state.derivedFunctions.back();
+			specializations.emplace(std::pair{&t, key}, &result);
+			return result;
+		}
+
+	public:
+		/** @brief See CompilationUnit::specialize. */
+		const FunctionDecl& specializeMasked(const FunctionDecl& decl, const std::vector<bool>& maskedPattern) {
+			if (decl.templ == nullptr)
+				return decl;
+			std::vector<DataType> argtypes;
+			for (size_t i = 0; i < decl.parameters.size(); ++i) {
+				DataType t = decl.parameters[i].second.get().type;
+				if (auto* tensor = std::get_if<TensorType>(&t); tensor && i < maskedPattern.size())
+					tensor->masked |= maskedPattern[i];
+				argtypes.push_back(std::move(t));
+			}
+			const FunctionDecl* resolved = resolveCall(decl, argtypes);
+			return resolved != nullptr ? *resolved : decl;
+		}
+
+	public:
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
 			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
@@ -856,6 +1040,20 @@ namespace mdl {
 					}
 					return Object{it->second};
 				} else if (auto* tensor = std::get_if<TensorType>(&mdl::getDataType(**nodePtr))) {
+					// Masked tensors: `x.mask` (1.0 valid, 0.0 masked) and `x.data` (the values, zeros where masked).
+					if (memberName == "mask" || memberName == "data") {
+						if (!tensor->masked) {
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
+									memberTok->getCharPositionInLine(),
+									std::format("`.{}` of a tensor that is not masked", memberName)
+							);
+							return &graph().addErrorNode();
+						}
+						const auto id = memberName == "mask" ? builtins::FunctionIDs::MASK_OF : builtins::FunctionIDs::UNMASK;
+						TensorType type{memberName == "mask" ? PrimitiveType::floating : tensor->type, tensor->shape};
+						return &graph().addInvocationNode(id, DataType{type}, {std::cref(**nodePtr)});
+					}
 					auto member = mdl::getMember(mdl::Object{*nodePtr}, memberName, {mdl::getDataType(**nodePtr)});
 					if (!member.has_value()) {
 						errorlistener->semanticError(
@@ -1024,6 +1222,18 @@ namespace mdl {
 			/** \todo For member function calls (obj.func(...)), obj should be passed as the first ("this") argument.
 			 *  This is not yet implemented. */
 
+			// The overload that matches the argument types, specialized for them if needed (e.g. masked tensors).
+			const FunctionDecl* resolved = resolveCall(decl.value().get(), argtypes);
+			if (resolved == nullptr) {
+				auto* tok = ctx->func->start;
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						"No overload takes these arguments (a `masked` parameter needs a masked tensor)"
+				);
+				return &graph().addErrorNode();
+			}
+			const FunctionDecl& callee = *resolved;
+
 			// If the callee is a module instance node, use addModuleInvocationNode so that each instance (weightQuery,
 			// weightKey, ...) gets its own weights (with fully qualified paths, e.g. `weightQuery.W`) instead of sharing
 			// the module type's nodes.
@@ -1033,7 +1243,7 @@ namespace mdl {
 					if (const auto* pn = std::get_if<ParameterNode>(receiver))
 						instanceName = pn->name;
 					return graph().addModuleInvocationNode(
-							std::get<BoundModuleType>(mdl::getDataType(*receiver)), scope, instanceName, decl.value(),
+							std::get<BoundModuleType>(mdl::getDataType(*receiver)), scope, instanceName, callee,
 							std::move(args)
 					);
 				}
@@ -1044,12 +1254,12 @@ namespace mdl {
 							if (const auto* pn = std::get_if<ParameterNode>(*calleeNodePtr))
 								instanceName = pn->name;
 							return graph().addModuleInvocationNode(
-									*bmt, scope, instanceName, decl.value(), std::move(args)
+									*bmt, scope, instanceName, callee, std::move(args)
 							);
 						}
 					}
 				}
-				return graph().addInvocationNode(decl.value(), std::move(args));
+				return graph().addInvocationNode(callee, std::move(args));
 			}();
 			if (!resultOrErr.has_value()) {
 				auto* tok = ctx->func->start;
@@ -1284,6 +1494,11 @@ mdl::Computegraph& mdl::CompilationUnit::graph() const { return state->graph; }
 
 const mdl::FunctionDecl& mdl::CompilationUnit::keep(FunctionDecl decl) const {
 	return state->derivedFunctions.emplace_back(std::move(decl));
+}
+
+const mdl::FunctionDecl&
+mdl::CompilationUnit::specializeMasked(const FunctionDecl& decl, const std::vector<bool>& maskedParams) const {
+	return state->visitor->specializeMasked(decl, maskedParams);
 }
 
 std::expected<std::reference_wrapper<const mdl::ModuleType>, std::string>

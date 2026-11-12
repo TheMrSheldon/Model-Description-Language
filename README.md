@@ -104,6 +104,15 @@ the outputs are zero at masked positions. Functions without `--mask` have no mas
 `--grad` (the gradient of the masked computation; padding, even NaN, cannot reach the weight gradients). The full BERT
 matches Hugging Face's `BertModel` with `attention_mask` on the valid positions.
 
+In the language, `masked float[...]` declares a masked tensor. A function with masked parameters is compiled as a masked
+function, and a masked argument selects a `masked` overload, also in nested calls (functions are elaborated again for
+masked arguments), where `x.data` (zeros at masked elements) and `x.mask` (1.0 valid, 0.0 masked) are available:
+```dlm
+float[...] average(x: float[...]) => mean(x);
+float[...] average(x: masked float[...]) => mean(x.data) / mean(x.mask);
+```
+See [examples/06_masking](examples/06_masking/).
+
 ## CMake
 ```cmake
 include(MDL)
