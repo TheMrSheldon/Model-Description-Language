@@ -19,25 +19,28 @@ extern "C" {
 #endif
 
 /**
- * @brief Batched matrix multiplication `dst[b] = alpha * (op(A[b]) @ op(B[b])) + bias`.
- * @param dst   [batch, M, N]
- * @param A     [batch, M, K] (or [batch, K, M] if @p trans_a)
- * @param B     [batchB, K, N] (or [batchB, N, K] if @p trans_b); batchB is either @p batch or 1 (broadcast)
+ * @brief Strided batched matrix multiplication `dst[i, j] = alpha * (A[i, j] @ B[i, j]) + bias` over two batch
+ * dimensions i < b0, j < b1.
+ * @details Every operand is a strided view (strides in elements): A[i, j][m, k] is at
+ * `A + i * a_s0 + j * a_s1 + m * a_sM + k * a_sK`, B[i, j][k, n] at `B + i * b_s0 + j * b_s1 + k * b_sK + n * b_sN`
+ * (a batch stride of 0 broadcasts B), dst[i, j][m, n] at `dst + i * d_s0 + j * d_s1 + m * d_sM + n * d_sN`. So
+ * transposed and permuted operands (e.g. the heads of attention) are read and written in place.
+ * The epilogue computes `act(alpha * A @ B + bias) + addend`.
  * @param bias  [N]; only read if @p has_bias is non-zero
- * @param batchB batch size of B (1 or @p batch)
+ * @param addend a tensor with the result's layout (strides d_*), e.g. a residual; only read if @p has_addend is non-zero
+ * @param activation 0: none, 1: GELU (erf)
  */
-int mdl_matmul_f32(
-		float* dst, const float* A, const float* B, const float* bias, int32_t has_bias, int64_t batch,
-		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
-);
-int mdl_matmul_bf16(
-		uint16_t* dst, const uint16_t* A, const uint16_t* B, const uint16_t* bias, int32_t has_bias, int64_t batch,
-		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
-);
-int mdl_matmul_f16(
-		uint16_t* dst, const uint16_t* A, const uint16_t* B, const uint16_t* bias, int32_t has_bias, int64_t batch,
-		int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
-);
+#define MDL_MATMUL_DECLARE(suffix, type)                                                                               \
+	int mdl_matmul_##suffix(                                                                                           \
+			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,      \
+			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,    \
+			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
+			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
+	);
+MDL_MATMUL_DECLARE(f32, float)
+MDL_MATMUL_DECLARE(bf16, uint16_t)
+MDL_MATMUL_DECLARE(f16, uint16_t)
+#undef MDL_MATMUL_DECLARE
 
 /**
  * @brief Profiling hooks: models compiled with `mdlc --profile` call these around every kernel call. The times are

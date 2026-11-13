@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -196,45 +197,66 @@ namespace {
 
 	// ── kernels for one element type ──────────────────────────────────────────────────────────────────────────
 
-	void matmul(
-			dt t, void* dst, const void* A, const void* B, const void* bias, int64_t batch, int64_t batchB, int64_t M,
-			int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha
-	) {
-		using Key = std::tuple<int, int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, int32_t, bool, float>;
-		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
+	/** @brief A strided view of a matrix operand: two batch dimensions and the two matrix dimensions. */
+	struct View {
+		memory::dims dims, strides;
 
-		// A[b] is [M, K] row-major, or [K, M] row-major (viewed as a column-major [M, K]) if transposed.
-		const memory::desc srcMd({batch, M, K}, t, trans_a ? memory::dims{M * K, 1, M} : memory::dims{M * K, K, 1});
-		// B[b] is [K, N] row-major, or [N, K] row-major (viewed as a column-major [K, N]) if transposed.
-		const memory::dims wStrides = trans_b ? memory::dims{batchB == 1 ? 0 : N * K, 1, K}
-											  : memory::dims{batchB == 1 ? 0 : K * N, N, 1};
-		const memory::desc wMd({batchB, K, N}, t, wStrides);
-		const memory::desc biasMd({1, 1, N}, t, {N, N, 1});
-		const memory::desc dstMd({batch, M, N}, t, {M * N, N, 1});
+		/** @brief The elements spanned (from the first to past the last element), e.g. to convert a copy. */
+		int64_t extent() const {
+			int64_t last = 0;
+			for (size_t i = 0; i < dims.size(); ++i)
+				last += (dims[i] - 1) * strides[i];
+			return last + 1;
+		}
+	};
+
+	void matmul(
+			dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
+			const void* addend, int activation, float alpha
+	) {
+		using Key = std::tuple<
+				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool, int, float>;
+		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
+		const memory::desc srcMd(a.dims, t, a.strides), wMd(b.dims, t, b.strides), dstMd(d.dims, t, d.strides);
+		const memory::dim N = d.dims.back();
+		memory::dims biasDims(d.dims.size(), 1), biasStrides(d.dims.size(), N);
+		biasDims.back() = N;
+		biasStrides.back() = 1;
+		const memory::desc biasMd(biasDims, t, biasStrides);
 
 		const auto& prim = cache.get(
-				Key{static_cast<int>(t), batch, batchB, M, K, N, trans_a, trans_b, bias != nullptr, alpha},
+				Key{static_cast<int>(t), a.dims, a.strides, b.dims, b.strides, d.dims, d.strides, bias != nullptr,
+					addend != nullptr, activation, alpha},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					if (alpha != 1.0f)
 						attr.set_scales_mask(DNNL_ARG_SRC, 0);
+					// The epilogue: act(...) + addend.
+					dnnl::post_ops ops;
+					if (activation == 1)
+						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
+					if (addend != nullptr)
+						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
+					attr.set_post_ops(ops);
 					auto create = [&] {
 						return bias ? dnnl::matmul::primitive_desc(engine(), srcMd, wMd, biasMd, dstMd, attr)
 									: dnnl::matmul::primitive_desc(engine(), srcMd, wMd, dstMd, attr);
 					};
 					if (t != dt::f32 && !implemented(create))
 						return std::nullopt;
-					return dnnl::matmul(create());
+					auto pd = create();
+					return dnnl::matmul(pd);
 				}
 		);
-		if (!prim) { // not implemented for the type: in float32 on converted copies
+		if (!prim) { // not implemented for the type: in float32 on converted copies (same strides)
 			thread_local Scratch scratch;
-			const float* a = widened(scratch, 0, t, A, batch * M * K);
-			const float* b = widened(scratch, 1, t, B, batchB * K * N);
-			const float* c = bias ? widened(scratch, 2, t, bias, N) : nullptr;
-			float* out = scratch.get(3, batch * M * N);
-			matmul(dt::f32, out, a, b, c, batch, batchB, M, K, N, trans_a, trans_b, alpha);
-			convert(dt::f32, out, t, dst, batch * M * N);
+			const float* a32 = widened(scratch, 0, t, A, a.extent());
+			const float* b32 = widened(scratch, 1, t, B, b.extent());
+			const float* c32 = bias ? widened(scratch, 2, t, bias, N) : nullptr;
+			const float* r32 = addend ? widened(scratch, 4, t, addend, d.extent()) : nullptr;
+			float* out = scratch.get(3, d.extent());
+			matmul(dt::f32, out, a32, b32, c32, a, b, d, r32, activation, alpha);
+			convert(dt::f32, out, t, dst, d.extent());
 			return;
 		}
 
@@ -244,6 +266,11 @@ namespace {
 		std::unordered_map<int, memory> args{{DNNL_ARG_SRC, src}, {DNNL_ARG_WEIGHTS, wei}, {DNNL_ARG_DST, out}};
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
+		if (addend != nullptr)
+			args.emplace(
+					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
+					memory(dstMd, engine(), const_cast<void*>(addend))
+			);
 		float scale = alpha;
 		if (alpha != 1.0f)
 			args.emplace(DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, memory({{1}, dt::f32, {1}}, engine(), &scale));
@@ -358,11 +385,37 @@ namespace {
 
 #define MDL_MATMUL(suffix, type, dtype)                                                                                \
 	extern "C" int mdl_matmul_##suffix(                                                                                \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t batch,                \
-			int64_t batchB, int64_t M, int64_t K, int64_t N, int32_t trans_a, int32_t trans_b, float alpha             \
+			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,      \
+			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,    \
+			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
+			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
-			matmul(dtype, dst, A, B, has_bias ? bias : nullptr, batch, batchB, M, K, N, trans_a, trans_b, alpha);    \
+			/* A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not  \
+			   with a bias along N, or a broadcast B, which would become the left operand). */                         \
+			const bool broadcastB = (b0 > 1 && b_s0 == 0) || (b1 > 1 && b_s1 == 0);                                   \
+			if (d_sM == 1 && d_sN != 1 && !has_bias && !broadcastB) {                                                  \
+				const int64_t aM = a_sM, aK = a_sK, bK = b_sK, bN = b_sN;                                              \
+				std::swap(A, B), std::swap(M, N), std::swap(a_s0, b_s0), std::swap(a_s1, b_s1);                         \
+				a_sM = bN, a_sK = bK, b_sK = aK, b_sN = aM;                                                            \
+				std::swap(d_sM, d_sN);                                                                                 \
+			}                                                                                                          \
+			/* Batch dimensions of size 1 are left out (oneDNN's brgemm computes wrong results for some strided   \
+			   layouts with them); B's broadcast batch dimensions (stride 0) have size 1 for oneDNN. */                  \
+			View a{{}, {}}, b{{}, {}}, d{{}, {}};                                                                      \
+			const int64_t sizes[2] = {b0, b1}, as[2] = {a_s0, a_s1}, bs[2] = {b_s0, b_s1}, ds[2] = {d_s0, d_s1};      \
+			for (int i = 0; i < 2; ++i) {                                                                              \
+				if (sizes[i] == 1)                                                                                     \
+					continue;                                                                                          \
+				a.dims.push_back(sizes[i]), a.strides.push_back(as[i]);                                                \
+				b.dims.push_back(bs[i] == 0 ? 1 : sizes[i]), b.strides.push_back(bs[i]);                               \
+				d.dims.push_back(sizes[i]), d.strides.push_back(ds[i]);                                                \
+			}                                                                                                          \
+			a.dims.insert(a.dims.end(), {M, K}), a.strides.insert(a.strides.end(), {a_sM, a_sK});                      \
+			b.dims.insert(b.dims.end(), {K, N}), b.strides.insert(b.strides.end(), {b_sK, b_sN});                      \
+			d.dims.insert(d.dims.end(), {M, N}), d.strides.insert(d.strides.end(), {d_sM, d_sN});                      \
+			matmul(dtype, dst, A, B, has_bias ? bias : nullptr, a, b, d, has_addend ? addend : nullptr, activation,    \
+				   alpha);                                                                                             \
 		});                                                                                                            \
 	}                                                                                                                  \
 	extern "C" int mdl_softmax_##suffix(type* dst, const type* src, int64_t outer, int64_t axis) {                    \

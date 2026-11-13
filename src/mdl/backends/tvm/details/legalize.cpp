@@ -9,6 +9,8 @@
 #include <tvm/relax/attrs/statistical.h>
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
+#include <tvm/relax/expr_functor.h>
+#include <tvm/relax/transform.h>
 #include <tvm/relax/op_attr_types.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/te/operation.h>
@@ -29,6 +31,8 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <numeric>
+#include <unordered_map>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -317,6 +321,8 @@ namespace mdl::backend::tvm {
 			outShape.push_back(N);
 			auto k = te::reduce_axis(::tvm::Range(0, K), "k");
 			const auto dtype = a->dtype;
+			const auto f32 = ::tvm::DataType::Float(32);
+			const bool wide = dtype.bits() == 16 && (dtype.is_float() || dtype.is_bfloat16());
 			te::Tensor product = te::compute(
 					outShape,
 					[&](const Array<tirx::Var>& idx) {
@@ -346,22 +352,26 @@ namespace mdl::backend::tvm {
 							bi.push_back(k);
 							bi.push_back(idx[batchRank + 1]);
 						}
+						// 16-bit floats accumulate in float32.
+						if (wide)
+							return ::tvm::sum(::tvm::cast(f32, a(ai)) * ::tvm::cast(f32, b(bi)), {k});
 						return ::tvm::sum(a(ai) * b(bi), {k});
 					},
 					"T_matmul", "opaque"
 			);
-			if (alpha == 1.0 && !bias)
+			if (alpha == 1.0 && !bias && !wide)
 				return product;
 			// Epilogue as a separate stage (a reduction must be the top-level expression of a compute).
 			return te::compute(
 					outShape,
 					[&](const Array<tirx::Var>& idx) {
 						PrimExpr v = product(Array<PrimExpr>{idx.begin(), idx.end()});
+						const auto accumulator = wide ? f32 : dtype;
 						if (alpha != 1.0)
-							v = v * ::tvm::tirx::make_const(dtype, alpha);
+							v = v * ::tvm::tirx::make_const(accumulator, alpha);
 						if (bias)
-							v = v + (*bias)(Array<PrimExpr>{idx[batchRank + 1]});
-						return v;
+							v = v + ::tvm::cast(accumulator, (*bias)(Array<PrimExpr>{idx[batchRank + 1]}));
+						return wide ? ::tvm::cast(dtype, v) : v;
 					},
 					"T_matmul_epilogue", topi::kElementWise
 			);
@@ -380,130 +390,403 @@ namespace mdl::backend::tvm {
 			return std::nullopt;
 		}
 
+		/** @brief A permutation of the dimensions of a tensor (empty: none). */
+		using Perm = std::vector<int64_t>;
+
+		Perm permOf(const Expr& e) {
+			Perm perm;
+			if (const auto* shape = e.as<::tvm::relax::ShapeExprNode>())
+				for (const auto& v : shape->values)
+					perm.push_back(v.as<::tvm::IntImmNode>()->value);
+			return perm;
+		}
+
+		Expr permExpr(const Perm& perm) {
+			Array<PrimExpr> values;
+			for (int64_t p : perm)
+				values.push_back(::tvm::IntImm(::tvm::DataType::Int(64), p));
+			return ShapeExpr(values);
+		}
+
+		/** @brief permute(xs, perm): entry i is xs[perm[i]] (like relax.permute_dims). */
+		Array<PrimExpr> permuted(const Array<PrimExpr>& xs, const Perm& perm) {
+			if (perm.empty())
+				return xs;
+			Array<PrimExpr> out;
+			for (int64_t p : perm)
+				out.push_back(xs[p]);
+			return out;
+		}
+
+		/** @brief permute(permute(x, inner), outer) = permute(x, compose(outer, inner)). */
+		Perm compose(const Perm& outer, const Perm& inner) {
+			if (outer.empty())
+				return inner;
+			if (inner.empty())
+				return outer;
+			Perm r;
+			for (int64_t p : outer)
+				r.push_back(inner[p]);
+			return r;
+		}
+
+		Perm swapLastTwo(size_t rank) {
+			Perm p(rank);
+			std::iota(p.begin(), p.end(), 0);
+			std::swap(p[rank - 1], p[rank - 2]);
+			return p;
+		}
+
+		bool isIdentity(const Perm& p) {
+			for (size_t i = 0; i < p.size(); ++i)
+				if (p[i] != static_cast<int64_t>(i))
+					return false;
+			return true;
+		}
+
 		/**
-		 * @brief Lowers `alpha * (a @ op(b)) + bias` to mdl_matmul_f32 if the shapes are supported (a `[..., M, K]`
-		 * with 2-D b, or equal-rank batched a and b where b's batch is 1 or equal to a's batch).
+		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, activation,
+		 * addend or PrimValue(0)). The operands are A = permute(a, perm_a) and B = permute(b, perm_b); the result is
+		 * permute(act(alpha * A @ B + bias), perm_out) + addend (the epilogue: e.g. GELU, a residual connection).
 		 */
-		std::optional<Expr> matmulKernel(
-				const BlockBuilder& bb, const Expr& a, const Expr& b, std::optional<Expr> bias, bool transB,
-				double alpha, bool transA
-		) {
-			const auto* ai = tensorInfo(a);
-			const auto* bi = tensorInfo(b);
-			if (!ai || !bi || ai->dtype != bi->dtype || !kernelSuffix(ai->dtype))
-				return std::nullopt;
-			auto as = shapeOf(a), bs = shapeOf(b);
-			const size_t ra = as.size(), rb = bs.size();
-			if (ra < 2 || rb < 2)
-				return std::nullopt;
-			PrimExpr M, K = transA ? as[ra - 2] : as[ra - 1], N = transB ? bs[rb - 2] : bs[rb - 1];
-			PrimExpr batch, batchB;
-			Array<PrimExpr> outShape;
-			if (rb == 2 && transA) {
-				if (ra != 2)
-					return std::nullopt;
-				M = as[1];
-				batch = batchB = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
-				outShape.push_back(M);
-			} else if (rb == 2) {
-				M = product(as, 0, ra - 1); // fold all leading dims of a into M
-				batch = batchB = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
-				for (size_t i = 0; i + 1 < ra; ++i)
-					outShape.push_back(as[i]);
-			} else if (ra == rb) {
-				::tvm::arith::Analyzer analyzer;
-				bool bBroadcast = true, sameBatch = true;
-				for (size_t i = 0; i + 2 < ra; ++i) {
-					bBroadcast &= analyzer.CanProveEqual(bs[i], 1);
-					sameBatch &= analyzer.CanProveEqual(as[i], bs[i]);
-					outShape.push_back(as[i]);
-				}
-				if (!bBroadcast && !sameBatch)
-					return std::nullopt;
-				M = transA ? as[ra - 1] : as[ra - 2];
-				batch = product(as, 0, ra - 2);
-				batchB = bBroadcast ? PrimExpr(::tvm::IntImm(::tvm::DataType::Int(64), 1)) : batch;
-				outShape.push_back(M);
-			} else {
-				return std::nullopt;
-			}
-			outShape.push_back(N);
-
-			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype)};
-			auto pa = ext.input(a, "A");
-			auto pb = ext.input(b, "B");
-			PrimExpr pbias = bias ? ext.input(*bias, "bias") : pa; // ignored if has_bias == 0
-			auto pout = ext.output(outShape, ai->dtype);
-			auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
-			return ext.finish(
-					{pout, pa, pb, pbias, ::tvm::IntImm(::tvm::DataType::Int(32), bias ? 1 : 0), i64(batch),
-					 i64(batchB), i64(M), i64(K), i64(N), ::tvm::IntImm(::tvm::DataType::Int(32), transA ? 1 : 0),
-					 ::tvm::IntImm(::tvm::DataType::Int(32), transB ? 1 : 0),
-					 ::tvm::FloatImm(::tvm::DataType::Float(32), alpha)}
-			);
-		}
-
-		Expr matmulTE(
-				const BlockBuilder& bb, const Expr& a, const Expr& b, std::optional<Expr> bias, bool transB,
-				double alpha, bool transA
-		) {
-			TECall te{bb, "matmul"};
-			auto ta = te.tensor(a, "A");
-			auto tb = te.tensor(b, "B");
-			std::optional<te::Tensor> tbias;
-			if (bias)
-				tbias = te.tensor(*bias, "bias");
-			return te.finish(matmulCompute(ta, tb, tbias, transB, alpha, transA));
-		}
-
-		/** @brief Splits mdl.matmul's arguments: (a, b, bias or PrimValue(0), trans_b, alpha, trans_a). */
 		struct MatmulArgs {
 			Expr a, b;
 			std::optional<Expr> bias;
-			bool transB;
-			double alpha;
-			bool transA;
+			Perm permA, permB, permOut;
+			double alpha = 1.0;
+			int64_t activation = 0; ///< 0: none, 1: GELU (erf)
+			std::optional<Expr> addend;
+
+			MatmulArgs(Expr a, Expr b) : a(std::move(a)), b(std::move(b)) {}
 
 			explicit MatmulArgs(const Call& call)
 					: a(call->args[0]), b(call->args[1]),
 					  bias(tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt),
-					  transB(intValue(call->args[3]) != 0), alpha(floatValue(call->args[4])),
-					  transA(intValue(call->args[5]) != 0) {}
+					  permA(permOf(call->args[3])), permB(permOf(call->args[4])), permOut(permOf(call->args[5])),
+					  alpha(floatValue(call->args[6])), activation(intValue(call->args[7])),
+					  addend(tensorInfo(call->args[8]) ? std::optional<Expr>{call->args[8]} : std::nullopt) {}
+
+			/** @brief The shape of A @ B (before perm_out): the broadcast batch dimensions, then [M, N]. */
+			Array<PrimExpr> productShape() const {
+				auto la = permuted(shapeOf(a), permA), lb = permuted(shapeOf(b), permB);
+				const size_t ra = la.size(), rb = lb.size(), batchRank = std::max(ra, rb) - 2;
+				Array<PrimExpr> out;
+				for (size_t i = 0; i < batchRank; ++i) {
+					const int ia = static_cast<int>(i) - static_cast<int>(batchRank - (ra - 2));
+					const int ib = static_cast<int>(i) - static_cast<int>(batchRank - (rb - 2));
+					PrimExpr da = ia >= 0 ? la[ia] : PrimExpr(1);
+					PrimExpr db = ib >= 0 ? lb[ib] : PrimExpr(1);
+					const auto* imm = da.as<::tvm::IntImmNode>();
+					out.push_back(imm && imm->value == 1 ? db : da);
+				}
+				out.push_back(la[ra - 2]);
+				out.push_back(lb[rb - 1]);
+				return out;
+			}
 		};
+
+		/** @brief Row-major strides of a contiguous tensor of shape @p shape. */
+		Array<PrimExpr> contiguousStrides(const Array<PrimExpr>& shape) {
+			std::vector<PrimExpr> strides(shape.size());
+			PrimExpr s = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+			for (size_t i = shape.size(); i-- > 0;) {
+				strides[i] = s;
+				s = s * ::tvm::cast(::tvm::DataType::Int(64), shape[i]);
+			}
+			return Array<PrimExpr>(strides.begin(), strides.end());
+		}
+
+		/**
+		 * @brief Lowers mdl.matmul to mdl_matmul_<type> on strided views of the operands and the result: the
+		 * permutations become strides, so permuted operands (e.g. the heads of attention) are read and written in
+		 * place. Supports at most two batch dimensions after merging (b's batch dimensions may be broadcast).
+		 */
+		std::optional<Expr> matmulKernel(const BlockBuilder& bb, const MatmulArgs& m) {
+			const auto* ai = tensorInfo(m.a);
+			const auto* bi = tensorInfo(m.b);
+			if (!ai || !bi || ai->dtype != bi->dtype || !kernelSuffix(ai->dtype))
+				return std::nullopt;
+			const auto as = shapeOf(m.a), bs = shapeOf(m.b);
+			const auto la = permuted(as, m.permA), lb = permuted(bs, m.permB);
+			const auto sa = permuted(contiguousStrides(as), m.permA), sb = permuted(contiguousStrides(bs), m.permB);
+			const size_t ra = la.size(), rb = lb.size();
+			if (ra < 2 || rb < 2 || ra < rb || (rb > 2 && ra != rb))
+				return std::nullopt;
+			if (m.addend && (tensorInfo(*m.addend)->dtype != ai->dtype ||
+							 !::tvm::ffi::StructuralEqual()(shapeOf(*m.addend), permuted(m.productShape(), m.permOut))))
+				return std::nullopt;
+			// The result: the product's dimension j is the result's dimension at position p with perm_out[p] == j.
+			const auto lo = m.productShape();
+			const auto resultShape = permuted(lo, m.permOut);
+			const auto rs = contiguousStrides(resultShape);
+			std::vector<PrimExpr> so(lo.size());
+			for (size_t p = 0; p < lo.size(); ++p)
+				so[m.permOut.empty() ? p : static_cast<size_t>(m.permOut[p])] = rs[p];
+
+			const PrimExpr zero = ::tvm::IntImm(::tvm::DataType::Int(64), 0);
+			::tvm::arith::Analyzer analyzer;
+			auto equal = [&](const PrimExpr& x, const PrimExpr& y) { return analyzer.CanProveEqual(x, y); };
+			struct Dim {
+				PrimExpr size, a, b, out; // the size and the strides in A, B, and the result
+			};
+			std::vector<Dim> batch;
+			for (size_t i = 0; i + 2 < ra; ++i) {
+				PrimExpr bStride = zero; // b broadcast over this dimension (2-D b, or size 1)
+				if (rb > 2 && !equal(lb[i], 1))
+					bStride = sb[i];
+				batch.push_back({la[i], sa[i], bStride, so[i]});
+			}
+			PrimExpr M = la[ra - 2], K = la[ra - 1], N = lb[rb - 1];
+			PrimExpr aM = sa[ra - 2], aK = sa[ra - 1], bK = sb[rb - 2], bN = sb[rb - 1];
+			PrimExpr oM = so[lo.size() - 2], oN = so[lo.size() - 1];
+			// Batch dimensions over which b does not vary and that continue M in a and the result belong to M (one
+			// larger GEMM, e.g. a linear layer over [batch, seq]).
+			while (!batch.empty() && equal(batch.back().b, zero) && equal(batch.back().a, aM * M) &&
+				   equal(batch.back().out, oM * M)) {
+				M = M * batch.back().size;
+				batch.pop_back();
+			}
+			// Adjacent batch dimensions that are one dimension in all operands.
+			for (size_t i = batch.size(); i-- > 1;) {
+				const Dim outer = batch[i - 1], inner = batch[i];
+				if (equal(outer.a, inner.a * inner.size) && equal(outer.out, inner.out * inner.size) &&
+					(equal(outer.b, inner.b * inner.size) || (equal(outer.b, zero) && equal(inner.b, zero)))) {
+					batch[i - 1] = {outer.size * inner.size, inner.a, inner.b, inner.out};
+					batch.erase(batch.begin() + static_cast<std::ptrdiff_t>(i));
+				}
+			}
+			if (batch.size() > 2)
+				return std::nullopt;
+			while (batch.size() < 2) { // outer dimensions of size 1 (with the strides of a contiguous outer dimension)
+				const Dim next = batch.empty() ? Dim{M, aM, zero, oM} : batch.front();
+				batch.insert(
+						batch.begin(),
+						Dim{::tvm::IntImm(::tvm::DataType::Int(64), 1), next.a * next.size, next.b * next.size, next.out * next.size}
+				);
+			}
+
+			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype)};
+			auto pa = ext.input(m.a, "A");
+			auto pb = ext.input(m.b, "B");
+			PrimExpr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;		 // ignored if has_bias == 0
+			PrimExpr paddend = m.addend ? ext.input(*m.addend, "addend") : pa; // ignored if has_addend == 0
+			auto pout = ext.output(resultShape, ai->dtype);
+			auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
+			auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::DataType::Int(32), v); };
+			return ext.finish(
+					{pout, pa, pb, pbias, i32(m.bias ? 1 : 0), i64(batch[0].size), i64(batch[1].size), i64(M), i64(K),
+					 i64(N), i64(batch[0].a), i64(batch[1].a), i64(aM), i64(aK), i64(batch[0].b), i64(batch[1].b), i64(bK),
+					 i64(bN), i64(batch[0].out), i64(batch[1].out), i64(oM), i64(oN), paddend, i32(m.addend ? 1 : 0),
+					 i32(m.activation), ::tvm::FloatImm(::tvm::DataType::Float(32), m.alpha)}
+			);
+		}
+
+		Expr matmulTE(const BlockBuilder& bb, const MatmulArgs& m) {
+			TECall te{bb, "matmul"};
+			auto ta = te.tensor(m.a, "A");
+			auto tb = te.tensor(m.b, "B");
+			auto axes = [](const Perm& p) {
+				Array<Integer> result;
+				for (int64_t x : p)
+					result.push_back(Integer(static_cast<int>(x)));
+				return result;
+			};
+			if (!m.permA.empty() && !isIdentity(m.permA))
+				ta = topi::transpose(ta, axes(m.permA));
+			if (!m.permB.empty() && !isIdentity(m.permB))
+				tb = topi::transpose(tb, axes(m.permB));
+			std::optional<te::Tensor> tbias;
+			if (m.bias)
+				tbias = te.tensor(*m.bias, "bias");
+			te::Tensor out = matmulCompute(ta, tb, tbias, false, m.alpha, false);
+			if (m.activation == 1)
+				out = te::compute(
+						out->shape,
+						[&](const Array<tirx::Var>& i) {
+							PrimExpr v = ::tvm::cast(::tvm::DataType::Float(32), out(Array<PrimExpr>{i.begin(), i.end()}));
+							auto c = [](double d) { return ::tvm::tirx::make_const(::tvm::DataType::Float(32), d); };
+							return ::tvm::cast(out->dtype, v * c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2))));
+						},
+						"T_gelu", topi::kElementWise
+				);
+			if (!m.permOut.empty() && !isIdentity(m.permOut))
+				out = topi::transpose(out, axes(m.permOut));
+			if (m.addend)
+				out = topi::add(out, te.tensor(*m.addend, "addend"));
+			return te.finish(out);
+		}
 
 		// ── mdl.matmul operator ───────────────────────────────────────────────────
 
 		::tvm::relax::StructInfo inferMatmul(const Call& call, const BlockBuilder& ctx) {
 			MatmulArgs args{call};
 			const auto* ai = tensorInfo(args.a);
-			auto as = shapeOf(args.a), bs = shapeOf(args.b);
-			Array<PrimExpr> out;
-			for (size_t i = 0; i + 2 < as.size(); ++i)
-				out.push_back(as[i]);
-			out.push_back(args.transA ? as[as.size() - 1] : as[as.size() - 2]);
-			out.push_back(args.transB ? bs[bs.size() - 2] : bs[bs.size() - 1]);
-			return TensorStructInfo(ShapeExpr(out), ai->dtype, ai->vdevice);
+			return TensorStructInfo(ShapeExpr(permuted(args.productShape(), args.permOut)), ai->dtype, ai->vdevice);
 		}
+
+		Expr makeCall(const MatmulArgs& m) {
+			static const auto& op = ::tvm::Op::Get("mdl.matmul");
+			Expr bias = m.bias ? *m.bias : Expr(::tvm::relax::PrimValue::Int64(0));
+			Expr addend = m.addend ? *m.addend : Expr(::tvm::relax::PrimValue::Int64(0));
+			return Call(
+					op, {m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
+						 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), m.alpha)),
+						 ::tvm::relax::PrimValue::Int64(m.activation), addend}
+			);
+		}
+
+		/**
+		 * @brief Folds permutations and epilogues into mdl.matmul (see MatmulArgs): `permute(x) @ y` reads x through
+		 * strides; if the product has no other use, `permute(a @ b)` writes the result in the permuted layout,
+		 * `gelu(a @ b)` and `a @ b + r` are computed by the matrix product's epilogue.
+		 */
+		class FoldPermutes : public ::tvm::relax::ExprMutator {
+		public:
+			explicit FoldPermutes(const ::tvm::relax::Function& f) {
+				struct Counter : ::tvm::relax::ExprVisitor {
+					std::unordered_map<const ::tvm::relax::VarNode*, int>* uses = nullptr;
+					void VisitExpr_(const ::tvm::relax::VarNode* op) final { ++(*uses)[op]; }
+					void VisitExpr_(const ::tvm::relax::DataflowVarNode* op) final { ++(*uses)[op]; }
+				} counter;
+				counter.uses = &uses;
+				counter.VisitExpr(f);
+			}
+
+			using ExprMutator::VisitExpr_;
+
+			Expr VisitExpr_(const ::tvm::relax::CallNode* op) final {
+				static const auto& matmul = ::tvm::Op::Get("mdl.matmul");
+				static const auto& permute = ::tvm::Op::Get("relax.permute_dims");
+				auto call = ::tvm::Downcast<Call>(ExprMutator::VisitExpr_(op));
+				if (call->op.same_as(matmul)) {
+					MatmulArgs m{call};
+					bool changed = false;
+					auto fold = [&](Expr& x, Perm& perm) {
+						const ::tvm::relax::CallNode* p = boundCall(x, permute);
+						if (p == nullptr)
+							return;
+						auto axes = axesOf(p);
+						if (!axes)
+							return;
+						x = p->args[0];
+						perm = compose(perm, *axes);
+						changed = true;
+					};
+					fold(m.a, m.permA);
+					fold(m.b, m.permB);
+					return changed ? makeCall(m) : call;
+				}
+				static const auto& gelu = ::tvm::Op::Get("relax.nn.gelu");
+				static const auto& add = ::tvm::Op::Get("relax.add");
+				// The product's single use: an activation (before a permutation or an addend is applied).
+				if (call->op.same_as(gelu) && singleUse(op->args[0])) {
+					const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[0], matmul);
+					if (matmulOp == nullptr)
+						return call;
+					MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
+					if (m.activation != 0 || m.addend || (!m.permOut.empty() && !isIdentity(m.permOut)))
+						return call;
+					m.activation = 1;
+					return makeCall(m);
+				}
+				// The product's single use: an addition of a tensor of the result's shape (e.g. a residual connection).
+				if (call->op.same_as(add)) {
+					for (size_t i = 0; i < 2; ++i) {
+						if (!singleUse(op->args[i]))
+							continue;
+						const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[i], matmul);
+						const Expr& other = call->args[1 - i];
+						const auto* product = matmulOp ? ::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(call->args[i]) : nullptr;
+						const auto* addend = ::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(other);
+						if (product == nullptr || addend == nullptr || addend->dtype != product->dtype ||
+							!product->shape.defined() || !addend->shape.defined() ||
+							!::tvm::ffi::StructuralEqual()(product->shape, addend->shape))
+							continue;
+						MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
+						if (m.addend)
+							continue;
+						m.addend = other;
+						return makeCall(m);
+					}
+					return call;
+				}
+				const auto* arg = op->args.empty() ? nullptr : op->args[0].as<::tvm::relax::VarNode>();
+				if (call->op.same_as(permute) && arg != nullptr && uses[arg] == 1) {
+					const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[0], matmul);
+					auto axes = axesOf(call.get());
+					if (matmulOp == nullptr || !axes)
+						return call;
+					MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
+					if (m.addend) // (the addend has the unpermuted result's layout)
+						return call;
+					m.permOut = compose(*axes, m.permOut);
+					return makeCall(m);
+				}
+				return call;
+			}
+
+		private:
+			std::unordered_map<const ::tvm::relax::VarNode*, int> uses;
+
+			bool singleUse(const Expr& e) {
+				const auto* var = e.as<::tvm::relax::VarNode>();
+				return var != nullptr && uses[var] == 1;
+			}
+
+			/** @brief The call of @p op bound to the variable @p e (in the rewritten function), if any. */
+			const ::tvm::relax::CallNode* boundCall(const Expr& e, const ::tvm::Op& op) {
+				const auto* var = e.as<::tvm::relax::VarNode>();
+				if (var == nullptr)
+					return nullptr;
+				auto value = builder_->LookupBinding(::tvm::ffi::GetRef<::tvm::relax::Var>(var));
+				const auto* call = value ? value.value().as<::tvm::relax::CallNode>() : nullptr;
+				return call != nullptr && call->op.same_as(op) ? call : nullptr;
+			}
+
+			static std::optional<Perm> axesOf(const ::tvm::relax::CallNode* permute) {
+				const auto* attrs = permute->attrs.as<::tvm::relax::PermuteDimsAttrs>();
+				if (attrs == nullptr || !attrs->axes.defined())
+					return std::nullopt;
+				Perm axes;
+				for (const auto& a : attrs->axes.value())
+					axes.push_back(a->value);
+				return axes;
+			}
+		};
 	} // namespace
 
 	Expr makeMatmul(Expr a, Expr b, std::optional<Expr> bias, bool transB, double alpha, bool transA) {
-		static const auto& op = ::tvm::Op::Get("mdl.matmul");
-		Expr biasArg = bias ? *bias : Expr(::tvm::relax::PrimValue::Int64(0));
-		return Call(
-				op, {a, b, biasArg, ::tvm::relax::PrimValue::Int64(transB ? 1 : 0),
-					 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), alpha)),
-					 ::tvm::relax::PrimValue::Int64(transA ? 1 : 0)}
+		auto rank = [](const Expr& e) { return static_cast<size_t>(::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(e)->ndim); };
+		MatmulArgs m{a, b};
+		m.bias = std::move(bias);
+		if (transA)
+			m.permA = swapLastTwo(rank(a));
+		if (transB)
+			m.permB = swapLastTwo(rank(b));
+		m.alpha = alpha;
+		return makeCall(m);
+	}
+
+	::tvm::transform::Pass foldPermutesIntoMatmul() {
+		return ::tvm::relax::transform::CreateFunctionPass(
+				[](::tvm::relax::Function f, ::tvm::IRModule, ::tvm::transform::PassContext) {
+					return ::tvm::Downcast<::tvm::relax::Function>(FoldPermutes(f).VisitExpr(f));
+				},
+				0, "mdl.FoldPermutesIntoMatmul", {}
 		);
 	}
 
 	TVM_REGISTER_OP("mdl.matmul")
-			.set_num_inputs(6)
-			.add_argument("a", "Tensor", "The left operand [..., M, K].")
-			.add_argument("b", "Tensor", "The right operand [K, N] (or [N, K] if transposed), possibly batched.")
+			.set_num_inputs(9)
+			.add_argument("a", "Tensor", "The left operand A = permute(a, perm_a): [..., M, K].")
+			.add_argument("b", "Tensor", "The right operand B = permute(b, perm_b): [K, N], possibly batched.")
 			.add_argument("bias", "Tensor | PrimValue", "The bias [N] or PrimValue(0) for no bias.")
-			.add_argument("trans_b", "PrimValue", "Whether b is transposed (last two dims).")
+			.add_argument("perm_a", "ShapeExpr", "The permutation of a (empty: none).")
+			.add_argument("perm_b", "ShapeExpr", "The permutation of b (empty: none).")
+			.add_argument("perm_out", "ShapeExpr", "The permutation of the result (empty: none).")
 			.add_argument("alpha", "PrimValue", "Scale applied to the product.")
-			.add_argument("trans_a", "PrimValue", "Whether a is transposed (last two dims).")
+			.add_argument("activation", "PrimValue", "The activation of the epilogue: 0 none, 1 GELU (erf).")
+			.add_argument("addend", "Tensor | PrimValue", "A tensor of the result's shape added last, or PrimValue(0).")
 			.set_attr<::tvm::relax::FInferStructInfo>("FInferStructInfo", inferMatmul)
 			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
 
@@ -577,7 +860,7 @@ namespace mdl::backend::tvm {
 		map.Set("relax.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const Expr &a = call->args[0], &b = call->args[1];
 					if (vendor)
-						if (auto e = matmulKernel(bb, a, b, std::nullopt, false, 1.0, false))
+						if (auto e = matmulKernel(bb, MatmulArgs{a, b}))
 							return *e;
 					if (shapeOf(a).size() < 2 || shapeOf(b).size() < 2) {
 						// Vector operands: unsqueeze to matrices, multiply, squeeze the result.
@@ -596,14 +879,14 @@ namespace mdl::backend::tvm {
 						}
 						return te.finish(topi::reshape(product, outShape));
 					}
-					return matmulTE(bb, a, b, std::nullopt, false, 1.0, false);
+					return matmulTE(bb, MatmulArgs{a, b});
 				}));
 		map.Set("mdl.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					MatmulArgs args{call};
 					if (vendor)
-						if (auto e = matmulKernel(bb, args.a, args.b, args.bias, args.transB, args.alpha, args.transA))
+						if (auto e = matmulKernel(bb, args))
 							return *e;
-					return matmulTE(bb, args.a, args.b, args.bias, args.transB, args.alpha, args.transA);
+					return matmulTE(bb, args);
 				}));
 
 		map.Set("relax.nn.softmax", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {

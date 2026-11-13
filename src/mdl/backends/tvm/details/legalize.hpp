@@ -13,6 +13,7 @@
 
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/function.h>
+#include <tvm/ir/transform.h>
 #include <tvm/relax/expr.h>
 
 #include <optional>
@@ -29,6 +30,12 @@ namespace mdl::backend::tvm {
 			::tvm::relax::Expr a, ::tvm::relax::Expr b, std::optional<::tvm::relax::Expr> bias, bool transB,
 			double alpha, bool transA = false
 	);
+
+	/**
+	 * @brief Folds permutations into mdl.matmul: permuted operands are read through strides, and a permuted product
+	 * (without other uses) is written in the permuted layout (e.g. the heads of attention), instead of transposing.
+	 */
+	::tvm::transform::Pass foldPermutesIntoMatmul();
 
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */
 	::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> legalizeMap(const mdl::CompileOptions& opts);

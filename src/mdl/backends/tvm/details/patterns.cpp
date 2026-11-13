@@ -261,9 +261,23 @@ namespace mdl::backend::tvm {
 			return {"matmul (A^T)", pattern, rewriter};
 		}
 
+		/** The remaining a @ b (any rank ≥ 2, e.g. attention probabilities @ values): permutations fold into it. */
+		PatternEntry makePlainMatmul() {
+			auto a = Wildcard(), b = Wildcard();
+			DFPattern pattern = IsOp("relax.matmul")(a, b);
+			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings&) -> Expr {
+				if (rankOf(m.at(a)) < 2 || rankOf(m.at(b)) < 2)
+					return call;
+				return makeMatmul(m.at(a), m.at(b), std::nullopt, false, 1.0);
+			};
+			return {"matmul", pattern, rewriter};
+		}
+
 		/** (a @ op(B)) / c → mdl.matmul with alpha = 1/c (e.g. the attention scale 1/sqrt(d)). */
 		PatternEntry makeScaledMatmul() {
-			auto product = IsOp("mdl.matmul")(Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard());
+			auto product = IsOp("mdl.matmul")(
+					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard()
+			);
 			auto c = Wildcard();
 			DFPattern pattern = IsOp("relax.divide")(product, c);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
@@ -271,15 +285,13 @@ namespace mdl::backend::tvm {
 				auto divisor = scalarConstant(at(c));
 				auto productCall = at(product);
 				const auto* mm = productCall.as<CallNode>();
-				auto alpha = scalarConstant(mm->args[4]);
+				auto alpha = scalarConstant(mm->args[6]);
 				// Only without bias: (a @ b + bias) / c != alpha * (a @ b) + bias.
 				if (!divisor || *divisor == 0.0 || !alpha || mm->args[2].as<PrimValueNode>() == nullptr)
 					return call;
-				const auto* transB = mm->args[3].as<PrimValueNode>()->value.as<::tvm::IntImmNode>();
-				const auto* transA = mm->args[5].as<PrimValueNode>()->value.as<::tvm::IntImmNode>();
-				return makeMatmul(
-						mm->args[0], mm->args[1], std::nullopt, transB->value != 0, *alpha / *divisor, transA->value != 0
-				);
+				auto args = mm->args;
+				args.Set(6, ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), *alpha / *divisor)));
+				return Call(mm->op, args, mm->attrs, mm->sinfo_args);
 			};
 			return {"matmul scale", pattern, rewriter};
 		}
@@ -294,6 +306,7 @@ namespace mdl::backend::tvm {
 				makeLinear(false),		// a @ W + b
 				makeMatmulTransposed(), // remaining a @ B^T
 				makeMatmulTransposedA(), // A^T @ b
+				makePlainMatmul(),		 // remaining a @ b
 				makeScaledMatmul(),		// (a @ B^T) / c
 		};
 	}

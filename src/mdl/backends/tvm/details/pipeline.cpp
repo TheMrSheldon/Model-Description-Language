@@ -295,6 +295,7 @@ namespace mdl::backend::tvm {
 		mod = runPasses(
 				mod,
 				{
+						foldPermutesIntoMatmul(),
 						RT::Normalize(),
 						RT::DeadCodeElimination({}),
 						inlineScalarConstantsPass(),
