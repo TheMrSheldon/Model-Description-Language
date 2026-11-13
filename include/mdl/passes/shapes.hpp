@@ -2,6 +2,7 @@
 #define MDL_PASSES_SHAPES_HPP
 
 #include "../computegraphv2/datatype.hpp"
+#include "../computegraphv2/builtins.hpp"
 #include "../computegraphv2/node.hpp"
 
 #include <cstdint>
@@ -21,17 +22,25 @@ namespace mdl::shapes {
 	 * @details The symbols are the runtime dimensions of `...` in the signature of the analyzed function (`B` or `B0`,
 	 * `B1`, ...). Products of symbols arise from reshapes that merge dimensions. A dimension that cannot be expressed
 	 * this way is unknown.
+	 *
+	 * The rank-polymorphic types of the computegraph (see resultType) have two more kinds of entries: a group of any
+	 * number of dimensions (`...`, or dimensions of unknown size), and a compile-time dimension that is not a constant
+	 * (yet), e.g. a hyperparameter of a template.
 	 */
 	struct Dim {
 		int64_t factor = 1;
 		std::vector<std::string> symbols; ///< sorted
 		bool known = true;
+		bool group = false;			///< `...`: any number of dimensions
+		const Node* node = nullptr; ///< a compile-time dimension that is not constant (yet)
 
-		static Dim constant(int64_t value) { return Dim{.factor = value, .symbols = {}, .known = true}; }
-		static Dim symbol(std::string name) { return Dim{.factor = 1, .symbols = {std::move(name)}, .known = true}; }
+		static Dim constant(int64_t value) { return Dim{.factor = value}; }
+		static Dim symbol(std::string name) { return Dim{.factor = 1, .symbols = {std::move(name)}}; }
 		static Dim unknown() { return Dim{.factor = 1, .symbols = {}, .known = false}; }
+		static Dim ellipsis() { return Dim{.group = true}; }
+		static Dim of(const Node& node) { return Dim{.node = &node}; }
 
-		bool isConstant() const { return known && symbols.empty(); }
+		bool isConstant() const { return known && !group && node == nullptr && symbols.empty(); }
 		bool operator==(const Dim&) const = default;
 		Dim operator*(const Dim& other) const;
 		/** @brief The quotient if this dimension is divisible by @p other (as monomials), else unknown. */
@@ -88,6 +97,39 @@ namespace mdl::shapes {
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 	};
+
+	/**
+	 * @brief The type of the result of the builtin @p id applied to @p args, by the same rules as infer(), but
+	 * rank-polymorphic: `...` in the argument types stays a group of dimensions (the computegraph's node types).
+	 * @details Where the result cannot be expressed exactly (e.g. the dimensions of a group are reduced, or a size
+	 * depends on a group), its dimensions are `...` (unknown); a result whose shape cannot be inferred at all is
+	 * `float[...]`. The masked flag is not set here (see Computegraph::addInvocationNode).
+	 */
+	DataType resultType(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+
+	/**
+	 * @brief The rank-polymorphic shape of a type (`...` is a group, see Dim), e.g. to compare types; std::nullopt for
+	 * types that are neither tensors nor scalars.
+	 */
+	std::optional<Shape> shapeOfType(const DataType& type);
+
+	/**
+	 * @brief Whether a computed type matches a declared one (e.g. a function's result against its declared return type).
+	 * @details Only definite mismatches count: the shapes are compared from the end up to the first `...` of either,
+	 * and a dimension that is not constant matches any. With @p elements, floating-point and integer/boolean element
+	 * types differ as well.
+	 */
+	bool matches(const DataType& declared, const DataType& computed, bool elements = true);
+
+	/**
+	 * @brief Checks the arguments of the builtin @p id for definite mismatches (e.g. the inner dimensions of a matrix
+	 * product, or shapes that do not broadcast).
+	 * @return a description of the mismatch, or std::nullopt.
+	 */
+	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+
+	/** @brief A type for messages, e.g. `float[..., 768]`. */
+	std::string str(const DataType& type);
 
 	std::expected<Shapes, std::string> infer(
 			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,

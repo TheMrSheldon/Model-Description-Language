@@ -5,6 +5,7 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/object.hpp>
 #include <mdl/namespace.hpp>
+#include <mdl/passes/shapes.hpp>
 #include <mdl/utils/einops.hpp>
 
 #include <mdlBaseVisitor.h>
@@ -838,6 +839,20 @@ namespace mdl {
 						)
 				);
 			}
+			// The results must have the declared types.
+			for (size_t i = 0; i < std::min(decl.returnTypes.size(), decl.outputs.size()); ++i) {
+				const DataType declared = std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i]);
+				if (!shapes::matches(declared, getDataType(decl.outputs[i].get()))) {
+					auto* tok = ctx->IDENT()->getSymbol();
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+							std::format(
+									"{} returns {}, but its declared return type is {}", decl.name,
+									shapes::str(getDataType(decl.outputs[i].get())), shapes::str(declared)
+							)
+					);
+				}
+			}
 			if (specialization)
 				return std::make_pair(ctx->IDENT()->getText(), std::move(decl)); // the caller sets the template
 			decl.templ = std::make_shared<FunctionTemplate>(
@@ -1124,8 +1139,7 @@ namespace mdl {
 							return &graph().addErrorNode();
 						}
 						const auto id = memberName == "mask" ? builtins::FunctionIDs::MASK_OF : builtins::FunctionIDs::UNMASK;
-						TensorType type{memberName == "mask" ? PrimitiveType::floating : tensor->type, tensor->shape};
-						return &graph().addInvocationNode(id, DataType{type}, {std::cref(**nodePtr)});
+						return &graph().addInvocationNode(id, {std::cref(**nodePtr)});
 					}
 					auto member = mdl::getMember(mdl::Object{*nodePtr}, memberName, {mdl::getDataType(**nodePtr)});
 					if (!member.has_value()) {
@@ -1306,6 +1320,20 @@ namespace mdl {
 				return &graph().addErrorNode();
 			}
 			const FunctionDecl& callee = *resolved;
+			// The arguments must have the shapes of the parameters (definite mismatches only, see shapes::matches).
+			for (size_t i = 0; i < std::min(args.size(), callee.parameters.size()); ++i)
+				if (!shapes::matches(callee.parameters[i].second.get().type, argtypes[i], false)) {
+					auto* tok = ctx->args[i]->start;
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+							std::format(
+									"Argument {} of {} is {}, but the parameter {} is {}", i + 1, callee.name,
+									shapes::str(argtypes[i]), callee.parameters[i].first,
+									shapes::str(callee.parameters[i].second.get().type)
+							)
+					);
+					return &graph().addErrorNode();
+				}
 
 			// If the callee is a module instance node, use addModuleInvocationNode so that each instance (weightQuery,
 			// weightKey, ...) gets its own weights (with fully qualified paths, e.g. `weightQuery.W`) instead of sharing
@@ -1396,7 +1424,17 @@ namespace mdl {
 				);
 				return &graph().addErrorNode();
 			}
-			return &graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)}).value().front().get();
+			const Node& result =
+					graph().addInvocationNode(decl.value(), {std::cref(*left), std::cref(*right)}).value().front().get();
+			if (const auto* inv = std::get_if<InvocationNode>(&result))
+				if (auto problem = shapes::check(inv->id, inv->arguments)) {
+					auto* tok = ctx->bop;
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+							std::format("Operator {}: {}", tok->getText(), *problem)
+					);
+				}
+			return &result;
 		}
 
 		virtual std::any visitNegateExpression(mdlParser::NegateExpressionContext* ctx) override {
@@ -1412,7 +1450,7 @@ namespace mdl {
 			}
 			const Node& zero = graph().addConstNode(Atomic{0});
 			return &graph().addInvocationNode(
-					builtins::FunctionIDs::TENSOR_SUB, mdl::getDataType(*operand), {std::cref(zero), std::cref(*operand)}
+					builtins::FunctionIDs::TENSOR_SUB, {std::cref(zero), std::cref(*operand)}
 			);
 		}
 

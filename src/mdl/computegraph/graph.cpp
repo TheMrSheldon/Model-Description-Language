@@ -1,6 +1,7 @@
 #include <mdl/computegraphv2/graph.hpp>
 
 #include <mdl/computegraphv2/function.hpp>
+#include <mdl/passes/shapes.hpp>
 
 #include <cassert>
 #include <format>
@@ -15,241 +16,6 @@
 using namespace mdl;
 using mdl::builtins::FunctionIDs;
 
-/** \todo this must be refactored so that shape inference is supported based on the Function Signatures */
-/**
- * @brief Infers the output DataType of a builtin operation from its actual argument types.
- * @details Used during function inlining so that the cloned InvocationNodes carry the
- * correct, narrowed type instead of the generic float[...] placeholder that the
- * static operator FunctionDecls use.
- */
-static DataType inferOutputType(FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
-	auto getTensor = [](const Node& n) -> const TensorType* { return std::get_if<TensorType>(&getDataType(n)); };
-	auto fallback = []() -> DataType { return TensorType{PrimitiveType::floating, {Elipsis{}}}; };
-
-	switch (id) {
-	// Element-wise binary ops: result has the same shape as the tensor operand.
-	// If lhs is a tensor, return lhs; otherwise return rhs (scalar op tensor broadcast).
-	case FunctionIDs::TENSOR_ADD:
-	case FunctionIDs::TENSOR_SUB:
-	case FunctionIDs::TENSOR_PROD:
-	case FunctionIDs::TENSOR_DIV:
-		if (args.size() >= 1 && getTensor(args[0].get()))
-			return getDataType(args[0].get());
-		if (args.size() >= 2 && getTensor(args[1].get()))
-			return getDataType(args[1].get());
-		// Scalar arithmetic (e.g., on hyperparameters): the result is a scalar, floating if any operand is floating.
-		if (!args.empty()) {
-			for (const auto& arg : args)
-				if (const auto* p = std::get_if<PrimitiveType>(&getDataType(arg.get()));
-					p && *p == PrimitiveType::floating)
-					return PrimitiveType::floating;
-			return getDataType(args[0].get());
-		}
-		return fallback();
-
-	// Matrix multiply with NumPy semantics: A[..., m, k] @ B[..., k, n] -> [..., m, n]; a 1-D operand is a vector
-	// (A[..., m, k] @ v[k] -> [..., m] and v[k] @ B[..., k, n] -> [..., n]).
-	case FunctionIDs::TENSOR_DOT:
-		if (args.size() >= 2) {
-			const auto* lhsT = getTensor(args[0].get());
-			const auto* rhsT = getTensor(args[1].get());
-			if (lhsT && rhsT && !lhsT->shape.empty() && !rhsT->shape.empty()) {
-				if (rhsT->shape.size() == 1) {
-					TensorType::Shape s = lhsT->shape;
-					s.pop_back();
-					return TensorType{lhsT->type, std::move(s)};
-				}
-				if (lhsT->shape.size() == 1) {
-					TensorType::Shape s = rhsT->shape;
-					s.erase(s.end() - 2);
-					return TensorType{rhsT->type, std::move(s)};
-				}
-				TensorType::Shape s = lhsT->shape;
-				s.back() = rhsT->shape.back();
-				return TensorType{lhsT->type, std::move(s)};
-			}
-		}
-		return fallback();
-
-	// max/min/sum keep the reduced (last) axis with size 1, as the backends do (e.g. softmax's x - max(x) broadcasts).
-	// \todo If the last entry is `...`, the reduced dimension is part of it, which the type cannot express; the type
-	// then drops the last entry (as before), so that it differs from the argument's type (the gradient pass decides by
-	// the types whether a gradient must be summed; see mdl::shapes for exact shapes).
-	case FunctionIDs::MAX:
-	case FunctionIDs::MIN:
-	case FunctionIDs::SUM:
-		if (!args.empty()) {
-			if (const auto* t = getTensor(args[0].get()); t != nullptr && !t->shape.empty()) {
-				TensorType::Shape s = t->shape;
-				if (std::holds_alternative<Elipsis>(s.back())) {
-					if (s.size() < 2)
-						return fallback();
-					s.pop_back();
-				} else {
-					s.back() = 1u;
-				}
-				return TensorType{t->type, std::move(s)};
-			}
-		}
-		return fallback();
-
-	// mean removes the last shape dimension. If the shape has only one element (e.g. a bare Elipsis{}), keep it.
-	case FunctionIDs::MEAN:
-		if (!args.empty()) {
-			if (const auto* t = getTensor(args[0].get())) {
-				if (t->shape.size() >= 2) {
-					TensorType::Shape s = t->shape;
-					s.pop_back();
-					return TensorType{t->type, std::move(s)};
-				}
-			}
-		}
-		return fallback();
-
-	// Element-wise unary ops: preserve the tensor shape; scalar in → float scalar out.
-	case FunctionIDs::COS:
-	case FunctionIDs::SIN:
-	case FunctionIDs::TAN:
-	case FunctionIDs::EXP:
-	case FunctionIDs::ERF:
-	case FunctionIDs::SQRT:
-	case FunctionIDs::RSQRT:
-	case FunctionIDs::LOG:
-	case FunctionIDs::TANH:
-		if (!args.empty()) {
-			if (getTensor(args[0].get()))
-				return getDataType(args[0].get());
-			if (std::holds_alternative<PrimitiveType>(getDataType(args[0].get())))
-				return PrimitiveType::floating;
-		}
-		return fallback();
-
-	// The *_LIKE builtins produce a tensor of the shape of their reference argument.
-	case FunctionIDs::COLLAPSE_SUM_LIKE:
-	case FunctionIDs::BROADCAST_LIKE:
-	case FunctionIDs::RESHAPE_LIKE:
-		if (args.size() >= 2)
-			return getDataType(args[1].get());
-		return fallback();
-	case FunctionIDs::SCATTER_ADD_ROWS:
-		if (args.size() >= 3)
-			return getDataType(args[2].get());
-		return fallback();
-
-	// TAKE: the index shape followed by the table's row shape.
-	case FunctionIDs::TAKE:
-		if (args.size() >= 2) {
-			const auto* table = getTensor(args[0].get());
-			const auto* ids = getTensor(args[1].get());
-			if (table != nullptr && ids != nullptr && !table->shape.empty()) {
-				TensorType::Shape s = ids->shape;
-				s.insert(s.end(), table->shape.begin() + 1, table->shape.end());
-				return TensorType{table->type, std::move(s)};
-			}
-		}
-		return fallback();
-
-	// SELECT removes the selected axis (if the type can express it: not when it is part of `...`).
-	case FunctionIDs::SELECT:
-		if (args.size() >= 2)
-			if (const auto* t = getTensor(args[0].get())) {
-				const auto* c = std::get_if<ConstNode>(&args[1].get());
-				const auto* axis = c ? std::get_if<int>(&c->value) : nullptr;
-				TensorType::Shape s = t->shape;
-				if (axis != nullptr) {
-					const int rank = static_cast<int>(s.size());
-					const int a = *axis < 0 ? *axis + rank : *axis;
-					// Only if no `...` lies between the axis and the end it is counted from.
-					bool exact = a >= 0 && a < rank;
-					for (int k = *axis < 0 ? a : 0; exact && k < (*axis < 0 ? rank : a + 1); ++k)
-						exact = !std::holds_alternative<Elipsis>(s[k]);
-					if (exact)
-						s.erase(s.begin() + a);
-				}
-				return TensorType{t->type, std::move(s)};
-			}
-		return fallback();
-	case FunctionIDs::UNSELECT_LIKE:
-		if (args.size() >= 4)
-			return getDataType(args[3].get());
-		return fallback();
-
-	// WHERE: the type of the selected values (the condition only broadcasts).
-	case FunctionIDs::WHERE:
-		if (args.size() >= 3) {
-			if (getTensor(args[1].get()))
-				return getDataType(args[1].get());
-			return getDataType(args[2].get());
-		}
-		return fallback();
-
-	// ONE_HOT_LIKE: the shape of the reference (the labels' shape followed by the number of classes).
-	case FunctionIDs::ONE_HOT_LIKE:
-		if (args.size() >= 2)
-			return getDataType(args[1].get());
-		return fallback();
-
-	case FunctionIDs::STOP_GRADIENT:
-		if (!args.empty())
-			return getDataType(args[0].get());
-		return fallback();
-
-	case FunctionIDs::SUM_ALL:
-	case FunctionIDs::MEAN_ALL:
-		return PrimitiveType::floating;
-
-	case FunctionIDs::MASK_OF:
-		if (const auto* x = args.empty() ? nullptr : getTensor(args[0].get()))
-			return TensorType{PrimitiveType::floating, x->shape};
-		return fallback();
-	case FunctionIDs::UNMASK:
-		if (const auto* x = args.empty() ? nullptr : getTensor(args[0].get()))
-			return TensorType{x->type, x->shape};
-		return fallback();
-
-	// VAR returns a scalar of the same element type.
-	case FunctionIDs::VAR:
-		if (!args.empty()) {
-			if (const auto* t = getTensor(args[0].get()))
-				return TensorType{t->type, {}};
-		}
-		return TensorType{PrimitiveType::floating, {}};
-
-	// PERMUTE: reorder shape dimensions according to the permutation vector.
-	// Supports trailing-only permutations (perm.size() < rank): leading dims are kept.
-	case FunctionIDs::PERMUTE:
-		if (args.size() >= 2) {
-			const auto* t = getTensor(args[0].get());
-			const auto* cn = std::get_if<ConstNode>(&args[1].get());
-			if (t && cn) {
-				const auto* pv = std::get_if<std::vector<int>>(&cn->value);
-				if (pv) {
-					int rank = static_cast<int>(t->shape.size());
-					int offset = rank - static_cast<int>(pv->size());
-					TensorType::Shape s;
-					s.reserve(rank);
-					for (int i = 0; i < offset; ++i)
-						s.push_back(t->shape[i]);
-					for (int idx : *pv) {
-						if (idx < 0)
-							idx += rank;
-						s.push_back(
-								(idx >= 0 && idx < rank) ? t->shape[idx] : TensorType::Shape::value_type{Elipsis{}}
-						);
-					}
-					return TensorType{t->type, std::move(s)};
-				}
-			}
-		}
-		return fallback();
-
-	// RESHAPE / EXPAND: type is set explicitly by the einops layer; fall through to
-	// use the template type (caller keeps invn->type for these).
-	default:
-		return fallback();
-	}
-}
-
 Computegraph::Computegraph() = default;
 Computegraph::Computegraph(Computegraph&&) = default;
 Computegraph& Computegraph::operator=(Computegraph&&) = default;
@@ -260,32 +26,6 @@ namespace {
 	void appendKey(std::string& key, const T& value) {
 		static_assert(std::is_trivially_copyable_v<T>);
 		key.append(reinterpret_cast<const char*>(&value), sizeof(T));
-	}
-
-	/**
-	 * @brief Appends an encoding of @p type; returns false for types that are never interned (aggregates, modules).
-	 */
-	bool appendTypeKey(std::string& key, const DataType& type) {
-		if (const auto* prim = std::get_if<PrimitiveType>(&type)) {
-			appendKey(key, char{'p'});
-			appendKey(key, *prim);
-			return true;
-		}
-		const auto* tensor = std::get_if<TensorType>(&type);
-		if (tensor == nullptr)
-			return false;
-		appendKey(key, char{'t'});
-		appendKey(key, tensor->type);
-		appendKey(key, tensor->masked);
-		appendKey(key, tensor->shape.size());
-		for (const auto& dim : tensor->shape) {
-			appendKey(key, static_cast<char>(dim.index()));
-			if (const auto* u = std::get_if<unsigned>(&dim))
-				appendKey(key, *u);
-			else if (const auto* n = std::get_if<const Node*>(&dim))
-				appendKey(key, *n);
-		}
-		return true;
 	}
 } // namespace
 
@@ -328,7 +68,8 @@ namespace {
 	}
 } // namespace
 
-const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, std::vector<NodeRef>&& args) {
+const Node& Computegraph::addInvocationNode(FunctionIDs func, std::vector<NodeRef>&& args) {
+	DataType dtype = shapes::resultType(func, args);
 	if (auto* tensor = std::get_if<TensorType>(&dtype); tensor != nullptr && propagatesMask(func))
 		for (const auto& arg : args)
 			if (const auto* t = std::get_if<TensorType>(&getDataType(arg.get())); t != nullptr && t->masked)
@@ -338,12 +79,11 @@ const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, st
 	appendKey(key, args.size());
 	for (const auto& arg : args)
 		appendKey(key, &arg.get());
-	const bool internable = appendTypeKey(key, dtype);
-	if (internable)
-		if (auto it = interned.find(key); it != interned.end()) {
-			++numReused;
-			return *it->second;
-		}
+	// (The type follows from the arguments.)
+	if (auto it = interned.find(key); it != interned.end()) {
+		++numReused;
+		return *it->second;
+	}
 
 	bool constevalable = std::all_of(args.begin(), args.end(), isCompiletimeEvalable);
 	const Node& node = nodes.emplace_back(
@@ -354,8 +94,7 @@ const Node& Computegraph::addInvocationNode(FunctionIDs func, DataType dtype, st
 					.arguments = std::move(args),
 			}
 	);
-	if (internable)
-		interned.emplace(std::move(key), &node);
+	interned.emplace(std::move(key), &node);
 	return node;
 }
 
@@ -468,35 +207,9 @@ namespace {
 				changed |= (&newArg != &arg.get());
 				newArgs.push_back(std::cref(newArg));
 			}
-			// RESHAPE and EXPAND carry precise output shapes set by the einops layer. inferOutputType returns a 1-D
-			// fallback for these ops, which would lose the split/merge shape information.
-			// PERMUTE_INVERSE and EQUAL_MASK (created by the gradient pass with explicit types) also keep their type.
-			const bool keepsType = invn.id == FunctionIDs::RESHAPE || invn.id == FunctionIDs::EXPAND ||
-								   invn.id == FunctionIDs::PERMUTE_INVERSE || invn.id == FunctionIDs::EQUAL_MASK;
-			if (keepsType) {
-				DataType outType = cloneType(invn.type);
-				if (!changed && !shapeNodesDiffer(invn.type, outType))
-					return node; // Independent of all substitutions: reuse the template node.
-				return graph.addInvocationNode(invn.id, std::move(outType), std::move(newArgs));
-			}
 			if (!changed)
 				return node; // Independent of all substitutions: reuse the template node.
-			DataType outType = inferOutputType(invn.id, newArgs);
-			return graph.addInvocationNode(invn.id, std::move(outType), std::move(newArgs));
-		}
-
-		static bool shapeNodesDiffer(const DataType& a, const DataType& b) {
-			const auto* ta = std::get_if<TensorType>(&a);
-			const auto* tb = std::get_if<TensorType>(&b);
-			if (ta == nullptr || tb == nullptr || ta->shape.size() != tb->shape.size())
-				return ta != nullptr || tb != nullptr;
-			for (size_t i = 0; i < ta->shape.size(); ++i) {
-				const auto* na = std::get_if<const Node*>(&ta->shape[i]);
-				const auto* nb = std::get_if<const Node*>(&tb->shape[i]);
-				if (na != nullptr && nb != nullptr && *na != *nb)
-					return true;
-			}
-			return false;
+			return graph.addInvocationNode(invn.id, std::move(newArgs));
 		}
 	};
 

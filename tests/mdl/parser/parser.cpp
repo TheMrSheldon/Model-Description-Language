@@ -1,5 +1,6 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parser.hpp>
+#include <mdl/passes/shapes.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -198,13 +199,13 @@ TEST_CASE("repeated calls of the same instance share its weights", "[parser][wei
 
 TEST_CASE("module hyperparameters are substituted in weight types", "[parser][weights]") {
 	auto unit = parseSource(R"(
-		module Lin[n: uint] {
-			W: float[n, n]
-			float[..., n] forward(x: float[..., n]) => x @ W;
+		module Lin[m: uint, n: uint] {
+			W: float[m, n]
+			float[..., n] forward(x: float[..., m]) => x @ W;
 		}
 		module Two[] {
-			small: Lin[2]
-			large: Lin[3]
+			small: Lin[2, 3]
+			large: Lin[3, 3]
 			float[..., 3] forward(x: float[..., 2]) => large(small(x));
 		}
 	)");
@@ -221,7 +222,7 @@ TEST_CASE("module hyperparameters are substituted in weight types", "[parser][we
 			dims[pn->name].push_back(std::get<int>(cn->value));
 		}
 	});
-	CHECK(dims["small.W"] == std::vector<int>{2, 2});
+	CHECK(dims["small.W"] == std::vector<int>{2, 3});
 	CHECK(dims["large.W"] == std::vector<int>{3, 3});
 }
 
@@ -382,4 +383,48 @@ TEST_CASE("syntax errors are reported without translating the broken tree", "[pa
 	std::istringstream stream{"module M[] { (float[4], float[4]) f(x: float[4]) => x, x; }"};
 	auto unit = mdl::parser::parse(stream, "<test>");
 	CHECK_FALSE(unit.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Types (shape rules shared with mdl::shapes)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("node types follow the shape rules: broadcasting and matrix products", "[parser][types]") {
+	auto unit = parseSource(R"(
+		module M[] {
+			b: float[4]
+			W: float[4, 3]
+			float[..., 3] f(x: float[..., 4]) => (b + x) @ W;
+		}
+	)");
+	REQUIRE(unit.has_value());
+	const auto& f = moduleFunction(*unit, "M", "f");
+	const auto& out = std::get<InvocationNode>(f.outputs[0].get());
+	// b + x is [..., 4] (not b's type [4]); the product is [..., 3].
+	CHECK(shapes::str(getDataType(out.arguments[0].get())) == "float[..., 4]");
+	CHECK(shapes::str(getDataType(f.outputs[0].get())) == "float[..., 3]");
+}
+
+TEST_CASE("results must have the declared return types", "[parser][types]") {
+	CHECK(parseSource("module M[] { W: float[4, 3] float[..., 3] f(x: float[..., 4]) => x @ W; }").has_value());
+	CHECK_FALSE(parseSource("module M[] { W: float[4, 3] float[..., 4] f(x: float[..., 4]) => x @ W; }").has_value());
+	CHECK_FALSE(parseSource("module M[] { W: float[4, 3] float[4] f(x: float[4]) => x @ W; }").has_value());
+}
+
+TEST_CASE("arguments must match the parameters, operands the operators", "[parser][types]") {
+	// A layer from 2 to 3 dimensions followed by one that expects 4.
+	CHECK_FALSE(parseSource(R"(
+		module Lin[m: uint, n: uint] {
+			W: float[m, n]
+			float[..., n] forward(x: float[..., m]) => x @ W;
+		}
+		module Net[] {
+			first: Lin[2, 3]
+			second: Lin[4, 4]
+			float[..., 4] forward(x: float[..., 2]) => second(first(x));
+		}
+	)").has_value());
+	// Inner dimensions of a matrix product, and shapes that do not broadcast.
+	CHECK_FALSE(parseSource("module M[] { W: float[3, 3] float[..., 3] f(x: float[..., 4]) => x @ W; }").has_value());
+	CHECK_FALSE(parseSource("module M[] { b: float[3] float[..., 4] f(x: float[..., 4]) => x + b; }").has_value());
 }

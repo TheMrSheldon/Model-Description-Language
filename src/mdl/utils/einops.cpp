@@ -338,40 +338,31 @@ static std::expected<std::pair<const Node*, std::vector<Atom>>, std::string> app
 	const int ellipsisBefore = static_cast<int>(ellipsisAt - lhs.begin());
 	const int ellipsisAfter = ellipsisAt == lhs.end() ? 0 : static_cast<int>(lhs.end() - ellipsisAt - 1);
 
-	TensorType::Shape newShape;
 	for (auto& item : lhs) {
 		for (auto& atom : item.atoms) {
 			if (atom.kind == AtomKind::Ellipsis) {
-				newShape.push_back(Elipsis{});
 				shapeArgs.emplace_back(std::cref(graph.addConstNode(Atomic{std::vector<int>{ellipsisBefore, ellipsisAfter}})));
 			} else if (atom.kind == AtomKind::Named) {
 				auto it = sizes.find(atom.name);
 				if (it == sizes.end()) {
 					// Size not statically known; use -2 sentinel so the backend passes
 					// TVM's infer-dimension marker (-1) to topi::reshape, not passthrough.
-					newShape.push_back(Elipsis{});
 					shapeArgs.emplace_back(constNode(graph, -2));
 				} else if (auto* sz = std::get_if<int64_t>(&it->second)) {
-					newShape.push_back(static_cast<unsigned>(*sz));
 					shapeArgs.emplace_back(constNode(graph, *sz));
 				} else {
 					const Node* n = std::get<const Node*>(it->second);
-					newShape.push_back(n);
 					shapeArgs.emplace_back(std::cref(*n));
 				}
 			} else if (atom.kind == AtomKind::Anon) {
-				newShape.push_back(Elipsis{}); // unknown size passthrough
 				shapeArgs.emplace_back(constNode(graph, -1));
 			} else if (atom.kind == AtomKind::Literal) {
-				newShape.push_back(static_cast<unsigned>(atom.value));
 				shapeArgs.emplace_back(constNode(graph, atom.value));
 			}
 		}
 	}
 
-	const auto& inputType = std::get<TensorType>(getDataType(input));
-	DataType outType = TensorType{.type = inputType.type, .shape = std::move(newShape)};
-	const Node& reshaped = graph.addInvocationNode(FunctionIDs::RESHAPE, outType, std::move(shapeArgs));
+	const Node& reshaped = graph.addInvocationNode(FunctionIDs::RESHAPE, std::move(shapeArgs));
 	return std::make_pair(&reshaped, flatAtoms);
 }
 
@@ -452,22 +443,6 @@ static bool isIdentityPermutation(const std::vector<int>& perm) {
 	return true;
 }
 
-/// Build the TensorType that results from permuting \p inputType by \p perm.
-static TensorType permuteType(const TensorType& inputType, const std::vector<int>& perm) {
-	TensorType::Shape newShape;
-	newShape.reserve(perm.size());
-	int rank = static_cast<int>(inputType.shape.size());
-	for (int idx : perm) {
-		if (idx < 0)
-			idx += rank;
-		if (idx >= 0 && idx < rank)
-			newShape.push_back(inputType.shape[idx]);
-		else
-			newShape.push_back(Elipsis{}); // out-of-range: unknown
-	}
-	return TensorType{.type = inputType.type, .shape = std::move(newShape)};
-}
-
 static std::expected<const Node*, std::string> applyPermute(
 		Computegraph& graph,
 		const Node& input,
@@ -475,16 +450,13 @@ static std::expected<const Node*, std::string> applyPermute(
 	if (isIdentityPermutation(perm))
 		return &input;
 
-	const auto& inputType = std::get<TensorType>(getDataType(input));
-	TensorType outType = permuteType(inputType, perm);
-
 	const Node& permNode = permTensorNode(graph, perm);
 
 	std::vector<std::reference_wrapper<const Node>> args;
 	args.emplace_back(std::cref(input));
 	args.emplace_back(std::cref(permNode));
 
-	const Node& node = graph.addInvocationNode(FunctionIDs::PERMUTE, outType, std::move(args));
+	const Node& node = graph.addInvocationNode(FunctionIDs::PERMUTE, std::move(args));
 	return &node;
 }
 
@@ -553,7 +525,6 @@ static std::expected<const Node*, std::string> applyExpand(
 	if (!needExpand)
 		return &input;
 
-	TensorType outType{.type = inType.type, .shape = expandShape};
 	std::vector<std::reference_wrapper<const Node>> args;
 	args.emplace_back(std::cref(input));
 	for (auto& dim : expandShape) {
@@ -564,7 +535,7 @@ static std::expected<const Node*, std::string> applyExpand(
 		else
 			args.emplace_back(constNode(graph, -1)); // Elipsis -> -1 sentinel
 	}
-	const Node& node = graph.addInvocationNode(FunctionIDs::EXPAND, outType, std::move(args));
+	const Node& node = graph.addInvocationNode(FunctionIDs::EXPAND, std::move(args));
 	return &node;
 }
 
@@ -643,19 +614,16 @@ static std::expected<const Node*, std::string> applyRemerge(
 		}
 	}
 
-	TensorType::Shape newShape;
 	std::vector<std::reference_wrapper<const Node>> shapeArgs;
 	shapeArgs.emplace_back(std::cref(input));
 
 	for (auto& item : rhs) {
 		if (item.is_group) {
 			if (auto prod = groupProduct(item.atoms, sizes)) {
-				newShape.push_back(static_cast<unsigned>(*prod));
 				shapeArgs.emplace_back(constNode(graph, *prod));
 			} else {
 				// Dynamic group product – use -2 sentinel so backend passes TVM's
 				// infer-dimension marker (-1) to topi::reshape, not passthrough.
-				newShape.push_back(Elipsis{});
 				shapeArgs.emplace_back(constNode(graph, -2));
 			}
 		} else {
@@ -666,28 +634,22 @@ static std::expected<const Node*, std::string> applyRemerge(
 				if (it == sizes.end())
 					return std::unexpected(std::format("Unknown dim '{}' in RHS", atom.name));
 				if (auto* sz = std::get_if<int64_t>(&it->second)) {
-					newShape.push_back(static_cast<unsigned>(*sz));
 					shapeArgs.emplace_back(constNode(graph, *sz));
 				} else {
 					const Node* n = std::get<const Node*>(it->second);
-					newShape.push_back(n);
 					shapeArgs.emplace_back(std::cref(*n));
 				}
 			} else if (atom.kind == AtomKind::Literal) {
-				newShape.push_back(static_cast<unsigned>(atom.value));
 				shapeArgs.emplace_back(constNode(graph, atom.value));
 			} else if (atom.kind == AtomKind::Ellipsis) {
-				newShape.push_back(Elipsis{});
 				shapeArgs.emplace_back(std::cref(graph.addConstNode(Atomic{std::vector<int>{ellipsisBefore, ellipsisAfter}})));
 			} else if (atom.kind == AtomKind::Anon) {
-				newShape.push_back(Elipsis{});
 				shapeArgs.emplace_back(constNode(graph, -1));
 			}
 		}
 	}
 
-	DataType outType = TensorType{.type = inType.type, .shape = std::move(newShape)};
-	const Node& node = graph.addInvocationNode(FunctionIDs::RESHAPE, outType, std::move(shapeArgs));
+	const Node& node = graph.addInvocationNode(FunctionIDs::RESHAPE, std::move(shapeArgs));
 	return &node;
 }
 

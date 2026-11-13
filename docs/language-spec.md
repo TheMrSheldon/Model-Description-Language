@@ -75,6 +75,14 @@ E.g., `float[..., 768] forward(x: float[..., 768])` compiled with `--ellipsis-ra
 
 Multiple return values can only be returned from a block body (`return a, b;`), not with the `=>` shorthand.
 
+Types are checked when compiling: the shape of every expression follows from the rules of the builtins (NumPy-style
+broadcasting and matrix products; the same rules the backends implement), and arguments that do not match the declared
+parameter types, results that do not match the declared return types, and operands that do not fit (e.g. the inner
+dimensions of `@`) are errors. Only definite mismatches count: `...` and sizes that are not known yet match anything.
+```
+error: Argument 1 of forward is float[..., 512], but the parameter x is float[..., 768]
+```
+
 Member functions of a submodule instance are called on the instance (`norm.gradient(x, dy)`) and use its weights.
 
 ## Custom gradients

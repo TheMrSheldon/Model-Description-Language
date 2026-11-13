@@ -72,7 +72,7 @@ static std::map<std::string, std::any> initBuiltins() {
 			if (builtin.extraParamsAreArguments)
 				arguments.push_back(std::cref(param));
 		}
-		const auto& output = graph.addInvocationNode(builtin.id, tensor, std::move(arguments));
+		const auto& output = graph.addInvocationNode(builtin.id, std::move(arguments));
 		builtins.emplace(
 				builtin.name, mdl::Object(
 									  mdl::FunctionDecl{

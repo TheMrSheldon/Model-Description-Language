@@ -93,7 +93,7 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		auto makeOp = [&](std::string opName, FunctionIDs id) {
 			const Node& lhs = graph.addInputNode(ttype, "lhs");
 			const Node& rhs = graph.addInputNode(ttype, "rhs");
-			const Node& out = graph.addInvocationNode(id, ttype, {std::cref(lhs), std::cref(rhs)});
+			const Node& out = graph.addInvocationNode(id, {std::cref(lhs), std::cref(rhs)});
 			m.emplace(
 					std::move(opName), FunctionDecl{
 											   .name = opName,
@@ -116,7 +116,7 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		{
 			const Node& self = graph.addInputNode(ttype, "self");
 			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
-			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, ttype, {std::cref(self), std::cref(permNode)});
+			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, {std::cref(self), std::cref(permNode)});
 			m.emplace(
 					"T", FunctionDecl{
 								 .name = "T",

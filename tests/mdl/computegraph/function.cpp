@@ -31,7 +31,7 @@ static FunctionDecl makeDecl(Computegraph& graph) {
 	const Node& paramZ = graph.addInputNode(PrimitiveType::integer);
 	// output: TENSOR_ADD(x, y)  [z is intentionally unused in the output]
 	const Node& output = graph.addInvocationNode(
-			builtins::FunctionIDs::TENSOR_ADD, DataType{PrimitiveType::integer}, {std::cref(paramX), std::cref(paramY)}
+			builtins::FunctionIDs::TENSOR_ADD, {std::cref(paramX), std::cref(paramY)}
 	);
 
 	return FunctionDecl{

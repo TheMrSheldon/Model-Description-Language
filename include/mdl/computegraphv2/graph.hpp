@@ -98,11 +98,12 @@ namespace mdl {
 
 		/**
 		 * @brief Returns the node that applies the builtin @p func to @p arguments, creating it on first use.
-		 * @details Builtins are pure, so invocations are interned (hash-consed): the same builtin applied to the same
-		 * argument nodes with the same result type yields the same node. This is common subexpression elimination by
+		 * @details The node's type follows from the arguments by the shape rules of the builtins (see
+		 * shapes::resultType; masked if an argument is). Builtins are pure, so invocations are interned (hash-consed):
+		 * the same builtin applied to the same argument nodes yields the same node. This is common subexpression elimination by
 		 * construction; e.g. a subexpression that a gradient function recomputes is shared with the forward pass.
 		 */
-		const Node& addInvocationNode(builtins::FunctionIDs func, DataType dtype, std::vector<NodeRef>&& arguments);
+		const Node& addInvocationNode(builtins::FunctionIDs func, std::vector<NodeRef>&& arguments);
 
 		/**
 		 * @brief Rebuilds the subgraph of @p roots with the nodes in @p replacements replaced (e.g. by new inputs).

@@ -31,22 +31,20 @@ namespace mdl::autodiff {
 		public:
 			Builder(Computegraph& graph, shapes::Oracle* shapes) : graph(graph), shapes(shapes) {}
 
-			const Node& op(FIDs id, const DataType& type, std::vector<NodeRef> args) {
-				return graph.addInvocationNode(id, type, std::move(args));
-			}
+			const Node& op(FIDs id, std::vector<NodeRef> args) { return graph.addInvocationNode(id, std::move(args)); }
 			const Node& constant(double value) { return graph.addConstNode(Atomic{value}); }
 
-			const Node& add(const Node& a, const Node& b) { return op(FIDs::TENSOR_ADD, getDataType(a), {a, b}); }
-			const Node& sub(const Node& a, const Node& b) { return op(FIDs::TENSOR_SUB, getDataType(a), {a, b}); }
-			const Node& mul(const Node& a, const Node& b) { return op(FIDs::TENSOR_PROD, typeOfTensor(a, b), {a, b}); }
-			const Node& div(const Node& a, const Node& b) { return op(FIDs::TENSOR_DIV, typeOfTensor(a, b), {a, b}); }
-			const Node& neg(const Node& a) { return op(FIDs::TENSOR_SUB, getDataType(a), {constant(0.0), a}); }
-			const Node& unary(FIDs id, const Node& a) { return op(id, getDataType(a), {a}); }
+			const Node& add(const Node& a, const Node& b) { return op(FIDs::TENSOR_ADD, {a, b}); }
+			const Node& sub(const Node& a, const Node& b) { return op(FIDs::TENSOR_SUB, {a, b}); }
+			const Node& mul(const Node& a, const Node& b) { return op(FIDs::TENSOR_PROD, {a, b}); }
+			const Node& div(const Node& a, const Node& b) { return op(FIDs::TENSOR_DIV, {a, b}); }
+			const Node& neg(const Node& a) { return op(FIDs::TENSOR_SUB, {constant(0.0), a}); }
+			const Node& unary(FIDs id, const Node& a) { return op(id, {a}); }
 			const Node& transposed(const Node& a) {
 				// (a^T)^T = a (e.g. the gradient of `x @ W.T()` with respect to x is `g @ W`)
 				if (const auto* inv = std::get_if<InvocationNode>(&a); inv && inv->id == FIDs::PERMUTE && isSwapLastTwo(*inv))
 					return inv->arguments[0].get();
-				return op(FIDs::PERMUTE, swapLastTwo(getDataType(a)), {a, graph.addConstNode(Atomic{std::vector<int>{-1, -2}})});
+				return op(FIDs::PERMUTE, {a, graph.addConstNode(Atomic{std::vector<int>{-1, -2}})});
 			}
 
 			/** @brief `x[... k -> (...) k]`: merges all dimensions but the last one. */
@@ -54,8 +52,7 @@ namespace mdl::autodiff {
 				// With exact shapes: reshape to [-2 (inferred), k] (the type of x may be imprecise).
 				if (const shapes::Shape* s = shapes ? shapes->shapeOf(x) : nullptr; s && !s->empty() && s->back().isConstant()) {
 					const int k = static_cast<int>(s->back().factor);
-					TensorType type{PrimitiveType::floating, {Elipsis{}, static_cast<unsigned>(k)}};
-					return &op(FIDs::RESHAPE, type, {x, graph.addConstNode(Atomic{-2}), graph.addConstNode(Atomic{k})});
+					return &op(FIDs::RESHAPE, {x, graph.addConstNode(Atomic{-2}), graph.addConstNode(Atomic{k})});
 				}
 				using namespace einops;
 				const Spec lhs{{false, {{AtomKind::Ellipsis, "", 0}}}, {false, {{AtomKind::Named, "k", 0}}}};
@@ -63,27 +60,27 @@ namespace mdl::autodiff {
 				auto result = apply(graph, x, lhs, rhs, {});
 				return result ? &result->get() : nullptr;
 			}
-			const Node& matmul(const Node& a, const Node& b, const DataType& type) {
-				return op(FIDs::TENSOR_DOT, type, {a, b});
+			const Node& matmul(const Node& a, const Node& b) {
+				return op(FIDs::TENSOR_DOT, {a, b});
 			}
 
 			/** @brief Sums @p g to the shape of @p like (undoes broadcasting); identity if the shapes are equal. */
 			const Node& unbroadcast(const Node& g, const Node& like) {
-				// Exact shapes decide if available; the (possibly imprecise) types otherwise.
+				// Exact shapes decide if available; the rank-polymorphic types otherwise.
 				const shapes::Shape* sg = shapes ? shapes->shapeOf(g) : nullptr;
 				const shapes::Shape* sl = shapes ? shapes->shapeOf(like) : nullptr;
 				if (sg != nullptr && sl != nullptr) {
 					if (*sg == *sl)
 						return g;
-					return op(FIDs::COLLAPSE_SUM_LIKE, getDataType(like), {g, like});
+					return op(FIDs::COLLAPSE_SUM_LIKE, {g, like});
 				}
-				if (sameShape(getDataType(g), getDataType(like)))
+				if (auto a = shapes::shapeOfType(getDataType(g)), b = shapes::shapeOfType(getDataType(like)); a && b && *a == *b)
 					return g;
-				return op(FIDs::COLLAPSE_SUM_LIKE, getDataType(like), {g, like});
+				return op(FIDs::COLLAPSE_SUM_LIKE, {g, like});
 			}
 
 			const Node& zerosLike(const Node& like) {
-				return op(FIDs::BROADCAST_LIKE, getDataType(like), {constant(0.0), like});
+				return op(FIDs::BROADCAST_LIKE, {constant(0.0), like});
 			}
 
 			/** @brief The exact shape of @p node, if shapes are available. */
@@ -92,19 +89,6 @@ namespace mdl::autodiff {
 		private:
 			Computegraph& graph;
 			shapes::Oracle* shapes;
-
-			static DataType typeOfTensor(const Node& a, const Node& b) {
-				return std::holds_alternative<TensorType>(getDataType(a)) ? getDataType(a) : getDataType(b);
-			}
-
-			static DataType swapLastTwo(const DataType& type) {
-				auto tensor = std::get_if<TensorType>(&type);
-				if (tensor == nullptr || tensor->shape.size() < 2)
-					return type;
-				TensorType result = *tensor;
-				std::swap(result.shape[result.shape.size() - 1], result.shape[result.shape.size() - 2]);
-				return result;
-			}
 
 		public:
 			static bool isSwapLastTwo(const InvocationNode& permute) {
@@ -115,25 +99,6 @@ namespace mdl::autodiff {
 				return perm != nullptr && *perm == std::vector<int>{-1, -2};
 			}
 
-		private:
-
-			static bool sameShape(const DataType& a, const DataType& b) {
-				const auto* ta = std::get_if<TensorType>(&a);
-				const auto* tb = std::get_if<TensorType>(&b);
-				if (ta == nullptr || tb == nullptr || ta->shape.size() != tb->shape.size())
-					return false;
-				for (size_t i = 0; i < ta->shape.size(); ++i) {
-					const auto &da = ta->shape[i], &db = tb->shape[i];
-					if (std::holds_alternative<Elipsis>(da) && std::holds_alternative<Elipsis>(db))
-						continue; // all `...` of a function denote the same dims
-					if (const auto *ua = std::get_if<unsigned>(&da), *ub = std::get_if<unsigned>(&db); ua && ub && *ua == *ub)
-						continue;
-					if (const auto *na = std::get_if<const Node*>(&da), *nb = std::get_if<const Node*>(&db); na && nb && *na == *nb)
-						continue;
-					return false;
-				}
-				return true;
-			}
 		};
 
 		/** @brief The size of the last dimension of @p type as a node (for the gradient of mean), if known. */
@@ -171,30 +136,21 @@ namespace mdl::autodiff {
 				const auto* tb = std::get_if<TensorType>(&getDataType(*other));
 				if (ta == nullptr || tb == nullptr || ta->shape.size() < 2 || tb->shape.size() < 2)
 					throw NoGradientRule{inv.id}; // \todo matrix-vector products
-				// y = A @ B: dA = g @ B^T, dB = A^T @ g (summed over broadcast batch dims). If only the other operand
-				// has batch dimensions (`...`, e.g. activations times a weight), the product keeps (some of) them: its
-				// type keeps a `...`, so that it is summed to the operand's shape. (The number of dimensions of `...` is
-				// only known when compiling, so the graph types cannot tell whether the product already reduced them.)
-				auto batched = [](const TensorType* t) {
-					return std::any_of(t->shape.begin(), t->shape.end(), [](const auto& d) {
-						return std::holds_alternative<Elipsis>(d);
-					});
-				};
-				auto withBatch = [&](const TensorType* t) -> DataType {
-					TensorType result{t->type, {Elipsis{}}};
-					result.shape.insert(result.shape.end(), t->shape.begin(), t->shape.end());
-					return result;
-				};
-				if (arg == 0) {
-					DataType type = batched(tb) && !batched(ta) ? withBatch(ta) : getDataType(x);
-					return b.unbroadcast(b.matmul(g, b.transposed(*other), type), x);
-				}
+				// y = A @ B: dA = g @ B^T, dB = A^T @ g (summed to the operands' shapes over broadcast batch dimensions).
+				if (arg == 0)
+					return b.unbroadcast(b.matmul(g, b.transposed(*other)), x);
 				// Activations times a matrix (e.g. a weight): dB = A^T @ g as one GEMM over all batch dimensions,
 				// flatten(A)^T @ flatten(g), instead of one product per batch element that is summed afterwards.
-				const shapes::Shape* sa = b.shapeOf(x);
-				const shapes::Shape* sb = b.shapeOf(*other);
-				const bool flatten = sa != nullptr && sb != nullptr ? sa->size() > 2 && sb->size() == 2
-																	: batched(ta) && !batched(tb) && tb->shape.size() == 2;
+				auto shape = [&](const Node& n) -> std::optional<shapes::Shape> {
+					if (const shapes::Shape* s = b.shapeOf(n))
+						return *s;
+					return shapes::shapeOfType(getDataType(n));
+				};
+				auto grouped = [](const shapes::Shape& s) {
+					return std::any_of(s.begin(), s.end(), [](const shapes::Dim& d) { return d.group; });
+				};
+				const auto sa = shape(x), sb = shape(*other);
+				const bool flatten = sa && sb && sb->size() == 2 && !grouped(*sb) && (sa->size() > 2 || grouped(*sa));
 				if (flatten) {
 					const Node* a2 = b.flattenLeading(x);
 					const Node* g2 = b.flattenLeading(g);
@@ -203,35 +159,34 @@ namespace mdl::autodiff {
 						// dW = g^T @ A without a transposed copy.
 						const auto* perm = std::get_if<InvocationNode>(other);
 						if (perm != nullptr && perm->id == FIDs::PERMUTE && Builder::isSwapLastTwo(*perm))
-							return b.transposed(b.matmul(b.transposed(*g2), *a2, getDataType(perm->arguments[0].get())));
-						return b.matmul(b.transposed(*a2), *g2, getDataType(*other));
+							return b.transposed(b.matmul(b.transposed(*g2), *a2));
+						return b.matmul(b.transposed(*a2), *g2);
 					}
 				}
-				DataType type = batched(ta) && !batched(tb) ? withBatch(tb) : getDataType(*other);
-				return b.unbroadcast(b.matmul(b.transposed(x), g, type), *other);
+				return b.unbroadcast(b.matmul(b.transposed(x), g), *other);
 			}
 			case FIDs::MAX:
 			case FIDs::MIN:
 				// Reductions over the last axis that keep it (size 1): the gradient flows to the extremal elements.
-				return b.mul(g, b.op(FIDs::EQUAL_MASK, getDataType(x), {x, node}));
+				return b.mul(g, b.op(FIDs::EQUAL_MASK, {x, node}));
 			case FIDs::SUM:
 			case FIDs::SUM_ALL:
-				return b.op(FIDs::BROADCAST_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::BROADCAST_LIKE, {g, x});
 			case FIDs::MEAN_ALL: {
 				// The number of elements (only known at runtime with `...`): the sum of ones of x's shape.
-				const Node& count = b.op(FIDs::SUM_ALL, PrimitiveType::floating, {b.op(FIDs::BROADCAST_LIKE, getDataType(x), {b.constant(1.0), x})});
-				return b.op(FIDs::BROADCAST_LIKE, getDataType(x), {b.div(g, count), x});
+				const Node& count = b.op(FIDs::SUM_ALL, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})});
+				return b.op(FIDs::BROADCAST_LIKE, {b.div(g, count), x});
 			}
 			case FIDs::MEAN: {
 				// The last axis is removed: restore it (size 1), broadcast, and divide by its size.
 				const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
-				const Node& keep = b.op(FIDs::RESHAPE, getDataType(x), {g, group, graph.addConstNode(Atomic{1})});
-				const Node& spread = b.op(FIDs::BROADCAST_LIKE, getDataType(x), {keep, x});
+				const Node& keep = b.op(FIDs::RESHAPE, {g, group, graph.addConstNode(Atomic{1})});
+				const Node& spread = b.op(FIDs::BROADCAST_LIKE, {keep, x});
 				if (const Node* n = lastDimSize(graph, getDataType(x)))
 					return b.div(spread, *n);
 				// Size not known statically: count the elements of the last axis at runtime.
-				const Node& ones = b.op(FIDs::BROADCAST_LIKE, getDataType(x), {b.constant(1.0), x});
-				return b.div(spread, b.op(FIDs::SUM, getDataType(x), {ones}));
+				const Node& ones = b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x});
+				return b.div(spread, b.op(FIDs::SUM, {ones}));
 			}
 			case FIDs::EXP:
 				return b.mul(g, node);
@@ -252,35 +207,35 @@ namespace mdl::autodiff {
 			case FIDs::TAN:
 				return b.mul(g, b.add(b.constant(1.0), b.mul(node, node)));
 			case FIDs::RESHAPE:
-				return b.op(FIDs::RESHAPE_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::RESHAPE_LIKE, {g, x});
 			case FIDs::PERMUTE:
 				if (Builder::isSwapLastTwo(inv))
 					return b.transposed(g); // its own inverse; cancels a transposed gradient
-				return b.op(FIDs::PERMUTE_INVERSE, getDataType(x), {g, *other});
+				return b.op(FIDs::PERMUTE_INVERSE, {g, *other});
 			case FIDs::EXPAND:
-				return b.op(FIDs::COLLAPSE_SUM_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::COLLAPSE_SUM_LIKE, {g, x});
 			case FIDs::COLLAPSE_SUM_LIKE:
-				return b.op(FIDs::BROADCAST_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::BROADCAST_LIKE, {g, x});
 			case FIDs::BROADCAST_LIKE:
-				return b.op(FIDs::COLLAPSE_SUM_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::COLLAPSE_SUM_LIKE, {g, x});
 			case FIDs::RESHAPE_LIKE:
-				return b.op(FIDs::RESHAPE_LIKE, getDataType(x), {g, x});
+				return b.op(FIDs::RESHAPE_LIKE, {g, x});
 			case FIDs::PERMUTE_INVERSE:
-				return b.op(FIDs::PERMUTE, getDataType(x), {g, *other});
+				return b.op(FIDs::PERMUTE, {g, *other});
 			case FIDs::WHERE: { // the gradient goes to the selected operand
 				const Node& zero = b.constant(0.0);
-				const Node& selected = arg == 1 ? b.op(FIDs::WHERE, getDataType(g), {x, g, zero})
-												: b.op(FIDs::WHERE, getDataType(g), {x, zero, g});
+				const Node& selected = arg == 1 ? b.op(FIDs::WHERE, {x, g, zero})
+												: b.op(FIDs::WHERE, {x, zero, g});
 				return b.unbroadcast(selected, inv.arguments[arg].get());
 			}
 			case FIDs::SELECT: // the gradient goes to the selected position
-				return b.op(FIDs::UNSELECT_LIKE, getDataType(x), {g, inv.arguments[1], inv.arguments[2], x});
+				return b.op(FIDs::UNSELECT_LIKE, {g, inv.arguments[1], inv.arguments[2], x});
 			case FIDs::UNSELECT_LIKE:
-				return b.op(FIDs::SELECT, getDataType(x), {g, inv.arguments[1], inv.arguments[2]});
+				return b.op(FIDs::SELECT, {g, inv.arguments[1], inv.arguments[2]});
 			case FIDs::TAKE: // rows of a table: their gradients are added to the selected rows
-				return b.op(FIDs::SCATTER_ADD_ROWS, getDataType(x), {g, *other, x});
+				return b.op(FIDs::SCATTER_ADD_ROWS, {g, *other, x});
 			case FIDs::SCATTER_ADD_ROWS:
-				return b.op(FIDs::TAKE, getDataType(x), {g, *other});
+				return b.op(FIDs::TAKE, {g, *other});
 			default:
 				throw NoGradientRule{inv.id};
 			}
