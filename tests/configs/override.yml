@@ -1,0 +1,5 @@
+# An invalid build setting: compiling fails unless the command line overrides it (--float f32).
+args:
+  Scale: { n: 4 }
+build:
+  float: f99

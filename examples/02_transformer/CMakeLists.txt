@@ -54,8 +54,7 @@ add_test(NAME example_02_transformer_grad_masked COMMAND 02_transformer_grad_mas
 
 # Sequence classification (BERT + pooler + classifier) on padded sequences against Hugging Face's
 # BertForSequenceClassification.
-mdl_add_model(bert_cls_model SOURCE model.dlm CONFIG model_cls_tiny.yml
-	OPTIONS --ellipsis-rank 2 --ellipsis-rank labels=1 --mask logits)
+mdl_add_model(bert_cls_model SOURCE model.dlm CONFIG model_cls_tiny.yml BUILD inference)
 add_executable(02_transformer_cls cls_check.cpp)
 target_link_libraries(02_transformer_cls PRIVATE bert_cls_model)
 target_compile_definitions(02_transformer_cls PRIVATE
@@ -65,8 +64,7 @@ add_test(NAME example_02_transformer_cls COMMAND 02_transformer_cls)
 # Training the classifier: the objective `loss(ids, types, positions, labels)` as a masked gradient build, with labels
 # [batch] next to the ids [batch, seq]; its value against Hugging Face's loss and its gradients against finite
 # differences.
-mdl_add_model(bert_cls_train_model SOURCE model.dlm CONFIG model_cls_tiny.yml
-	OPTIONS --ellipsis-rank 2 --ellipsis-rank labels=1 --mask logits --mask loss --grad loss)
+mdl_add_model(bert_cls_train_model SOURCE model.dlm CONFIG model_cls_tiny.yml BUILD train)
 add_executable(02_transformer_cls_train cls_check.cpp)
 target_link_libraries(02_transformer_cls_train PRIVATE bert_cls_train_model)
 target_compile_definitions(02_transformer_cls_train PRIVATE MDL_CLS_TRAIN

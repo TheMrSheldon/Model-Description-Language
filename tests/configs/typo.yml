@@ -1,0 +1,4 @@
+args:
+  Scale: { n: 4 }
+build:
+  ellipsis_rank: 2   # a typo of ellipsis-rank: an error

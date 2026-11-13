@@ -9,9 +9,14 @@
 #include <mdl/parser.hpp>
 #include <mdl/utils/utils.hpp>
 
+#include <yaml-cpp/yaml.h>
+
+#include <format>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <optional>
+#include <sstream>
 
 /** @brief A requested binding: `TYPE` or `TYPE=PATH` (see `--binding`). */
 struct BindingRequest {
@@ -34,6 +39,99 @@ namespace CLI::detail {
 	}
 } // namespace CLI::detail
 
+/**
+ * @brief Reads the build settings from the argument-values file (`-a model.yml`): the `build:` section and, with
+ * `--build NAME`, the section `builds: {NAME: ...}`, whose keys take precedence. The keys are the long names of mdlc's
+ * options with the same values (lists for repeatable options), plus `diagnostics: {name: error|warning|ignored}` (the
+ * `-W` options), `bindings` (`--binding`), and `ellipsis-rank: {default: N, NAME: K}`. CLI11 only fills options that
+ * the command line does not set, so the command line takes precedence (also for lists: they are replaced).
+ * @details Unknown keys are errors. The hyperparameters (`args:` or, for compatibility, modules at the top level) are
+ * read separately (mdl::ArgVals).
+ */
+class BuildConfig final : public CLI::Config {
+public:
+	BuildConfig(const CLI::App& app, const CLI::Option& buildOption) : app(app), buildOption(buildOption) {}
+
+	std::string to_config(const CLI::App*, bool, bool, std::string) const override { return {}; }
+
+	std::vector<CLI::ConfigItem> from_config(std::istream& input) const override {
+		std::stringstream text;
+		text << input.rdbuf();
+		const YAML::Node root = YAML::Load(text.str());
+		if (!root.IsMap())
+			return {};
+		// The settings: `build`, overridden key by key by the selected `builds.NAME`.
+		std::map<std::string, YAML::Node> settings;
+		auto collect = [&](const YAML::Node& section, const std::string& where) {
+			if (!section)
+				return;
+			if (!section.IsMap())
+				throw CLI::ConfigError(where + " must be a map of options");
+			for (const auto& entry : section)
+				settings.insert_or_assign(entry.first.as<std::string>(), YAML::Node(entry.second));
+		};
+		collect(root["build"], "build");
+		if (buildOption.count() > 0) {
+			const std::string name = buildOption.results().front();
+			const YAML::Node builds = root["builds"];
+			if (!builds || !builds.IsMap() || !builds[name])
+				throw CLI::ConfigError(std::format("--build {}: the argument values have no section builds.{}", name, name));
+			collect(builds[name], "builds." + name);
+		}
+
+		auto scalars = [](const YAML::Node& node, const std::string& key) {
+			std::vector<std::string> values;
+			if (node.IsScalar())
+				values.push_back(node.as<std::string>());
+			else if (node.IsSequence())
+				for (const auto& v : node)
+					values.push_back(v.as<std::string>());
+			else
+				throw CLI::ConfigError(std::format("build key {}: expected a value or a list", key));
+			return values;
+		};
+		std::vector<CLI::ConfigItem> items;
+		for (const auto& [key, node] : settings) {
+			CLI::ConfigItem item;
+			if (key == "diagnostics") { // -W
+				if (!node.IsMap())
+					throw CLI::ConfigError("build key diagnostics: expected a map {name: error|warning|ignored}");
+				item.name = "W";
+				for (const auto& entry : node) {
+					const auto name = entry.first.as<std::string>(), level = entry.second.as<std::string>();
+					if (level == "error")
+						item.inputs.push_back("error=" + name);
+					else if (level == "warning")
+						item.inputs.push_back(name);
+					else if (level == "ignored")
+						item.inputs.push_back("no-" + name);
+					else
+						throw CLI::ConfigError(std::format(
+								"build key diagnostics.{}: expected error, warning, or ignored (got {})", name, level
+						));
+				}
+			} else if (key == "ellipsis-rank" && node.IsMap()) { // {default: N, NAME: K}
+				item.name = key;
+				for (const auto& entry : node) {
+					const auto name = entry.first.as<std::string>(), rank = entry.second.as<std::string>();
+					item.inputs.push_back(name == "default" ? rank : name + "=" + rank);
+				}
+			} else {
+				item.name = key == "bindings" ? "binding" : key;
+				if (app.get_option_no_throw("--" + item.name) == nullptr)
+					throw CLI::ConfigError(std::format("unknown build key {} (the keys are mdlc's long option names)", key));
+				item.inputs = scalars(node, key);
+			}
+			items.push_back(std::move(item));
+		}
+		return items;
+	}
+
+private:
+	const CLI::App& app;
+	const CLI::Option& buildOption;
+};
+
 struct CompileArgs {
 	std::vector<std::filesystem::path> inputs;
 	std::vector<std::filesystem::path> importdirs;
@@ -51,6 +149,7 @@ struct CompileArgs {
 	std::vector<std::string> checkpoint;
 	mdl::PrimitiveType defaultFloat = mdl::PrimitiveType::float32;
 	std::vector<std::string> warnings;
+	std::optional<std::string> build;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -186,7 +285,19 @@ int main(int argc, char* argv[]) {
 	app.add_option("-o,--out", args.output, "The output path (an object file).");
 	app.add_option("-i,--import-dir", args.importdirs, "Search paths to search through for import statements.")
 			->check(CLI::ExistingDirectory);
-	app.add_option("-a,--arg-vals", args.argvals, "Argument values.")->check(CLI::ExistingFile);
+	// The argument values: hyperparameters and build settings (see BuildConfig).
+	auto* buildOption = app.add_option(
+			"--build", args.build,
+			"Use the build settings builds.NAME of the argument values (in addition to their build section)."
+	);
+	buildOption->configurable(false);
+	app.config_formatter(std::make_shared<BuildConfig>(app, *buildOption));
+	auto* config = app.set_config(
+			"-a,--arg-vals", "",
+			"Argument values (YAML): hyperparameters (`args:`) and build settings (`build:`, `builds:`, see "
+			"docs/build-config.md); the command line takes precedence."
+	);
+	config->check(CLI::ExistingFile);
 	app.add_option(
 			   "--binding", args.bindings,
 			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ header), "
@@ -281,7 +392,11 @@ int main(int argc, char* argv[]) {
 			"Time every kernel call; the times per kernel are printed at program exit (requires mdl_kernels)."
 	);
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
-	app.callback([&args]() { runCompileCommand(args); });
+	app.callback([&args, config]() {
+		if (config->count() > 0)
+			args.argvals = config->as<std::string>();
+		runCompileCommand(args);
+	});
 
 	CLI11_PARSE(app, argc, argv);
 	return 0;

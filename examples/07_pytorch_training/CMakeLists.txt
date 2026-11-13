@@ -2,8 +2,7 @@
 # generated bindings (model_pytorch.py) wrap `logits` + `logits_backward` in a torch.autograd.Function.
 #   python train.py <build dir>/examples/07_pytorch_training
 mdl_add_model(07_pytorch_training SOURCE ../02_transformer/model.dlm CONFIG ../02_transformer/model_cls_tiny.yml
-	SHARED BINDINGS python-torch
-	OPTIONS --ellipsis-rank 2 --ellipsis-rank labels=1 --mask logits --grad logits)
+	BUILD autograd SHARED BINDINGS python-torch)
 
 # The test runs only with a Python that has torch, transformers and tvm_ffi (e.g. -DMDL_PYTHON=<venv>/bin/python).
 find_package(Python3 COMPONENTS Interpreter QUIET)

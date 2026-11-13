@@ -9,7 +9,13 @@ using ErrorCode = mdl::ArgVals::ErrorCode;
 
 ArgVals::ArgVals(YAML::Node&& data) : data(std::move(data)) {}
 
-ArgVals ArgVals::fromYAML(const std::filesystem::path& path) { return ArgVals{YAML::LoadFile(path.string())}; }
+ArgVals ArgVals::fromYAML(const std::filesystem::path& path) {
+	// The hyperparameters are in `args:` (or, in the older layout, at the top level next to the build settings).
+	YAML::Node root = YAML::LoadFile(path.string());
+	if (root.IsMap() && root["args"])
+		return ArgVals{YAML::Node(root["args"])};
+	return ArgVals{std::move(root)};
+}
 
 YAML::Node ArgVals::navigate(std::string_view path) const {
 	if (!data.IsDefined() || path.empty())

@@ -11,6 +11,7 @@ Compile MDL models into object files that can be linked into C++ programs.
     mdl_add_model(<target>
                   SOURCE <model.dlm>
                   [CONFIG <model.yml>]
+                  [BUILD <name>]
                   [SHARED]
                   [KERNELS onednn|tvm]
                   [IMPORT_DIRS <dir>...]
@@ -24,19 +25,20 @@ Compile MDL models into object files that can be linked into C++ programs.
 
     #include "<name>.hpp"
 
-  ``CONFIG``       hyperparameter values (``mdlc --arg-vals``).
+  ``CONFIG``       hyperparameter values and build settings (``mdlc --arg-vals``, see docs/build-config.md).
+  ``BUILD``        use the build settings ``builds.<name>`` of ``CONFIG`` (``mdlc --build``).
   ``SHARED``       build a shared library (e.g., to load it from Python with ``tvm_ffi.load_module``) instead of a
                    static one.
   ``KERNELS``      ``onednn`` (default if ``mdl_kernels`` was built with oneDNN) or ``tvm`` (no vendor kernels).
   ``IMPORT_DIRS``  additional search paths for ``import`` statements.
   ``BINDINGS``     additional binding types to generate next to the object file (e.g. ``python-torch``).
-  ``OPTIONS``      additional options passed to ``mdlc``.
+  ``OPTIONS``      additional options passed to ``mdlc`` (they take precedence over the settings of ``CONFIG``).
 
   Imported files are tracked through a depfile, so the model is recompiled when any of them changes.
 #]=======================================================================]
 
 function(mdl_add_model target)
-	cmake_parse_arguments(PARSE_ARGV 1 ARG "SHARED" "SOURCE;CONFIG;KERNELS" "IMPORT_DIRS;BINDINGS;OPTIONS")
+	cmake_parse_arguments(PARSE_ARGV 1 ARG "SHARED" "SOURCE;CONFIG;KERNELS;BUILD" "IMPORT_DIRS;BINDINGS;OPTIONS")
 	if(NOT ARG_SOURCE)
 		message(FATAL_ERROR "mdl_add_model(${target}): SOURCE is required")
 	endif()
@@ -55,18 +57,24 @@ function(mdl_add_model target)
 		list(APPEND args --arg-vals "${config}")
 		list(APPEND depends "${config}")
 	endif()
-	if(NOT ARG_KERNELS)
-		if(TARGET mdl_kernels)
-			get_target_property(_defs mdl_kernels INTERFACE_COMPILE_DEFINITIONS)
-			if(_defs AND "MDL_KERNELS_ONEDNN" IN_LIST _defs)
-				set(ARG_KERNELS onednn)
-			endif()
-		endif()
-		if(NOT ARG_KERNELS)
-			set(ARG_KERNELS tvm)
+	if(ARG_BUILD)
+		list(APPEND args --build "${ARG_BUILD}")
+	endif()
+	# The kernels: as requested, else oneDNN if mdl_kernels has it (mdlc's default, so that a CONFIG can choose), else
+	# the TVM-generated ones.
+	set(_onednn OFF)
+	if(TARGET mdl_kernels)
+		get_target_property(_defs mdl_kernels INTERFACE_COMPILE_DEFINITIONS)
+		if(_defs AND "MDL_KERNELS_ONEDNN" IN_LIST _defs)
+			set(_onednn ON)
 		endif()
 	endif()
-	list(APPEND args --kernels "${ARG_KERNELS}")
+	if(NOT ARG_KERNELS AND NOT _onednn)
+		set(ARG_KERNELS tvm)
+	endif()
+	if(ARG_KERNELS)
+		list(APPEND args --kernels "${ARG_KERNELS}")
+	endif()
 	foreach(dir IN LISTS ARG_IMPORT_DIRS)
 		get_filename_component(dir "${dir}" ABSOLUTE)
 		list(APPEND args -i "${dir}")
@@ -111,7 +119,7 @@ function(mdl_add_model target)
 	# Runtime dependencies of compiled models: the TVM runtime (thread pool, workspace allocation; it links the TVM FFI
 	# for the calling convention and errors) and the vendor kernels.
 	target_link_libraries(${target} PUBLIC mdl_runtime)
-	if(ARG_KERNELS STREQUAL "onednn")
+	if(_onednn AND NOT ARG_KERNELS STREQUAL "tvm")
 		target_link_libraries(${target} PUBLIC mdl_kernels)
 	endif()
 endfunction()

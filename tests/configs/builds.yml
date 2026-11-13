@@ -1,0 +1,6 @@
+args:
+  Scale: { n: 4 }
+build:
+  ellipsis-rank: 2
+builds:
+  train: { grad: [forward] }
