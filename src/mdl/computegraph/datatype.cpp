@@ -88,7 +88,7 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 	static Computegraph graph;
 	static std::map<std::string, FunctionDecl, std::less<>> ops = []() {
 		std::map<std::string, FunctionDecl, std::less<>> m;
-		DataType ttype = TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}}};
+		DataType ttype = TensorType{.type = PrimitiveType::float32, .shape = {Elipsis{}}};
 
 		auto makeOp = [&](std::string opName, FunctionIDs id) {
 			const Node& lhs = graph.addInputNode(ttype, "lhs");

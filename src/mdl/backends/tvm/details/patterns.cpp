@@ -1,3 +1,4 @@
+#include <cstring>
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
 
@@ -35,8 +36,19 @@ namespace mdl::backend::tvm {
 		std::optional<double> scalarConstant(const Expr& e) {
 			if (const auto* c = e.as<ConstantNode>()) {
 				const auto& data = c->data;
-				if (data.Shape().Product() != 1 || data->dtype.code != kDLFloat)
+				if (data.Shape().Product() != 1 || (data->dtype.code != kDLFloat && data->dtype.code != kDLBfloat))
 					return std::nullopt;
+				if (data->dtype.code == kDLBfloat && data->dtype.bits == 16) {
+					const uint32_t bits = static_cast<uint32_t>(static_cast<const uint16_t*>(data->data)[0]) << 16;
+					float value;
+					std::memcpy(&value, &bits, sizeof(value));
+					return value;
+				}
+				if (data->dtype.bits == 16) {
+					_Float16 half;
+					std::memcpy(&half, data->data, sizeof(half));
+					return static_cast<double>(half);
+				}
 				if (data->dtype.bits == 32)
 					return static_cast<const float*>(data->data)[0];
 				if (data->dtype.bits == 64)
@@ -54,6 +66,15 @@ namespace mdl::backend::tvm {
 
 		bool near(std::optional<double> value, double expected) {
 			return value && std::abs(*value - expected) <= 1e-6 * std::max(1.0, std::abs(expected));
+		}
+
+		/** @brief Whether @p e is a scalar constant equal to @p expected within the precision of its type. */
+		bool near(const Expr& e, double expected) {
+			auto value = scalarConstant(e);
+			const auto* c = e.as<ConstantNode>();
+			const bool half = c != nullptr && c->data->dtype.bits == 16; // float16: 11, bfloat16: 8 significant bits
+			const double tolerance = half ? (c->data->dtype.code == kDLBfloat ? 4e-3 : 5e-4) : 1e-6;
+			return value && std::abs(*value - expected) <= tolerance * std::max(1.0, std::abs(expected));
 		}
 
 		std::optional<Array<PrimExpr>> shapeOf(const Expr& e) {
@@ -152,8 +173,7 @@ namespace mdl::backend::tvm {
 					IsOp("relax.multiply")(IsOp("relax.multiply")(x, half), IsOp("relax.add")(one, erfTerm));
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
-				if (!near(scalarConstant(at(half)), 0.5) || !near(scalarConstant(at(one)), 1.0) ||
-					!near(scalarConstant(at(sqrt2)), std::sqrt(2.0)))
+				if (!near(at(half), 0.5) || !near(at(one), 1.0) || !near(at(sqrt2), std::sqrt(2.0)))
 					return call;
 				static const auto gelu = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.gelu");
 				return gelu(m.at(x)).cast<Expr>();
@@ -183,7 +203,7 @@ namespace mdl::backend::tvm {
 				auto n = scalarConstant(at(n1));
 				auto epsilon = scalarConstant(at(eps));
 				if (!reducesLastAxis(at(sumX), false) || !reducesLastAxis(at(sumSq), false) || !n ||
-					!lastDimEquals(in, *n) || !near(scalarConstant(at(n2)), *n) || !epsilon ||
+					!lastDimEquals(in, *n) || !near(at(n2), *n) || !epsilon ||
 					!isVectorOverLastDim(m.at(gamma), in) || !isVectorOverLastDim(m.at(beta), in))
 					return call;
 				static const auto layerNorm = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.layer_norm");

@@ -19,6 +19,11 @@ namespace mdl::parser {
 		 * loads `<dir>/x.dlm`). If empty, defaultStdlibDirs() is used.
 		 */
 		std::vector<std::filesystem::path> stdlibDirs;
+		/**
+		 * @brief The type that `float` stands for (float32, bfloat16 or float16); the explicit types (e.g. `float32`)
+		 * are not affected.
+		 */
+		PrimitiveType defaultFloat = PrimitiveType::float32;
 	};
 
 	/**

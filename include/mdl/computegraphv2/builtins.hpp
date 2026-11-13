@@ -71,6 +71,8 @@ namespace mdl::builtins {
 		/** Selection along an axis **/
 		SELECT,		   /**< (x, axis, index): x at `index` along `axis` (the axis is removed; negative: from the end) */
 		UNSELECT_LIKE, /**< (g, axis, index, like): zeros like `like`, g at `index` along `axis` (the adjoint) */
+		/** Conversion of the element type **/
+		CAST, /**< (x, type): x converted to the element type `type` (a constant: the value of mdl::PrimitiveType) */
 
 		COUNT
 	};

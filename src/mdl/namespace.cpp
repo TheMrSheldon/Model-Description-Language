@@ -30,7 +30,7 @@ static std::map<std::string, std::any> initBuiltins() {
 		std::optional<DataType> xType = std::nullopt; ///< Type of `x` (default: a float tensor)
 	};
 	/** \todo template the base type? **/
-	const auto tensor = mdl::TensorType{.type = PrimitiveType::floating, .shape = {mdl::Elipsis{}}};
+	const auto tensor = mdl::TensorType{.type = PrimitiveType::float32, .shape = {mdl::Elipsis{}}};
 	const auto intTensor = mdl::TensorType{.type = PrimitiveType::integer, .shape = {mdl::Elipsis{}}};
 	const auto boolTensor = mdl::TensorType{.type = PrimitiveType::boolean, .shape = {mdl::Elipsis{}}};
 	const Builtin table[] = {
@@ -93,5 +93,8 @@ const std::map<std::string, DataType> Namespace::builtinTypes{
 		{"int", PrimitiveType::integer},
 		{"uint", PrimitiveType::uint},
 		{"bool", PrimitiveType::boolean},
-		{"float", PrimitiveType::floating}
+		{"float", PrimitiveType::float32}, // the parser replaces it by the configured default (ParseOptions)
+		{"float32", PrimitiveType::float32},
+		{"float16", PrimitiveType::float16},
+		{"bfloat16", PrimitiveType::bfloat16}
 };

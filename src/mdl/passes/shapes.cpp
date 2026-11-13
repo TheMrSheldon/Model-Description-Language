@@ -2,6 +2,7 @@
 
 #include <mdl/computegraphv2/builtins.hpp>
 #include <mdl/utils/overload.hpp>
+#include <mdl/utils/utils.hpp>
 
 #include <algorithm>
 #include <format>
@@ -208,6 +209,7 @@ namespace mdl::shapes {
 				case FIDs::STOP_GRADIENT:
 				case FIDs::MASK_OF:
 				case FIDs::UNMASK:
+				case FIDs::CAST:
 					return arg(0);
 
 				case FIDs::TENSOR_DOT: return matmul(arg(0), arg(1));
@@ -453,6 +455,28 @@ namespace mdl::shapes {
 			}
 		};
 
+		PrimitiveType defaultFloatType = PrimitiveType::float32;
+
+		/**
+		 * @brief The operands of @p id whose element types must agree (no implicit conversions between float types;
+		 * scalars take the tensors' type).
+		 */
+		std::vector<size_t> combinedOperands(FIDs id) {
+			switch (id) {
+			case FIDs::TENSOR_ADD:
+			case FIDs::TENSOR_SUB:
+			case FIDs::TENSOR_PROD:
+			case FIDs::TENSOR_DIV:
+			case FIDs::TENSOR_DOT:
+			case FIDs::EQUAL_MASK:
+				return {0, 1};
+			case FIDs::WHERE:
+				return {1, 2};
+			default:
+				return {};
+			}
+		}
+
 		/** @brief The element type of the result of @p id (see resultType). */
 		PrimitiveType elementType(FIDs id, const std::vector<NodeRef>& args) {
 			auto of = [&](size_t i) -> std::optional<PrimitiveType> {
@@ -466,35 +490,53 @@ namespace mdl::shapes {
 				return std::nullopt;
 			};
 			auto isTensor = [&](size_t i) { return i < args.size() && std::holds_alternative<TensorType>(getDataType(args[i].get())); };
+			// The float type of argument i (the default float for other types, e.g. the mean of integers).
+			auto floatOf = [&](size_t i) {
+				auto t = of(i);
+				return t && isFloat(*t) ? *t : defaultFloatType;
+			};
+			// The type of operands that combine elementwise: the tensors' (which must agree, see check()), else the
+			// scalars'.
+			auto combined = [&](std::initializer_list<size_t> operands) {
+				for (size_t i : operands)
+					if (isTensor(i))
+						return *of(i);
+				// (Literals have no precision of their own: the default float.)
+				for (size_t i : operands)
+					if (of(i) && isFloat(*of(i)))
+						return defaultFloatType;
+				return of(*operands.begin()).value_or(defaultFloatType);
+			};
 			switch (id) {
+			case FIDs::CAST:
+				if (args.size() >= 2)
+					if (const auto* c = std::get_if<ConstNode>(&args[1].get()))
+						if (const auto* code = std::get_if<int>(&c->value))
+							return static_cast<PrimitiveType>(*code);
+				return PrimitiveType::error;
 			case FIDs::MASK_OF:
 			case FIDs::SUM_ALL:
 			case FIDs::MEAN_ALL:
 			case FIDs::EQUAL_MASK:
+				return floatOf(0);
 			case FIDs::ONE_HOT_LIKE:
-				return PrimitiveType::floating;
+				return floatOf(1);
 			case FIDs::WHERE:
-				return of(1).value_or(PrimitiveType::floating);
+				return combined({1, 2});
 			case FIDs::COLLAPSE_SUM_LIKE:
 			case FIDs::BROADCAST_LIKE:
 			case FIDs::RESHAPE_LIKE:
-				return of(1).value_or(PrimitiveType::floating);
+				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::SCATTER_ADD_ROWS:
-				return of(2).value_or(PrimitiveType::floating);
+				return of(2).value_or(PrimitiveType::float32);
 			case FIDs::UNSELECT_LIKE:
-				return of(3).value_or(PrimitiveType::floating);
+				return of(3).value_or(PrimitiveType::float32);
 			case FIDs::TENSOR_ADD:
 			case FIDs::TENSOR_SUB:
 			case FIDs::TENSOR_PROD:
 			case FIDs::TENSOR_DIV:
-				// The tensor operand's type; scalar arithmetic is floating if an operand is.
-				for (size_t i = 0; i < args.size(); ++i)
-					if (isTensor(i))
-						return *of(i);
-				for (size_t i = 0; i < args.size(); ++i)
-					if (of(i) == PrimitiveType::floating)
-						return PrimitiveType::floating;
-				return of(0).value_or(PrimitiveType::floating);
+			case FIDs::TENSOR_DOT:
+				return combined({0, 1});
 			case FIDs::COS:
 			case FIDs::SIN:
 			case FIDs::TAN:
@@ -504,9 +546,9 @@ namespace mdl::shapes {
 			case FIDs::RSQRT:
 			case FIDs::LOG:
 			case FIDs::TANH:
-				return isTensor(0) ? *of(0) : PrimitiveType::floating;
+				return floatOf(0);
 			default:
-				return of(0).value_or(PrimitiveType::floating);
+				return of(0).value_or(PrimitiveType::float32);
 			}
 		}
 
@@ -559,7 +601,7 @@ namespace mdl::shapes {
 
 	std::string str(const DataType& type) {
 		if (const auto* p = std::get_if<PrimitiveType>(&type))
-			return *p == PrimitiveType::floating ? "float" : *p == PrimitiveType::boolean ? "bool" : "int";
+			return std::to_string(*p);
 		const auto* t = std::get_if<TensorType>(&type);
 		if (t == nullptr)
 			return "?";
@@ -579,7 +621,11 @@ namespace mdl::shapes {
 		const auto de = element(declared), ce = element(computed);
 		if (!de || !ce || *de == PrimitiveType::error || *ce == PrimitiveType::error)
 			return true;
-		if (elements && (*de == PrimitiveType::floating) != (*ce == PrimitiveType::floating))
+		if (elements && isFloat(*de) != isFloat(*ce))
+			return false;
+		// Float tensors of different types (e.g. bfloat16 for float32) need an explicit conversion.
+		if (std::holds_alternative<TensorType>(declared) && std::holds_alternative<TensorType>(computed) &&
+			isFloat(*de) && isFloat(*ce) && *de != *ce)
 			return false;
 		const auto ds = shapeOfType(declared), cs = shapeOfType(computed);
 		if (!ds || !cs || !std::holds_alternative<TensorType>(computed))
@@ -603,7 +649,22 @@ namespace mdl::shapes {
 	}
 
 
+	void setDefaultFloat(PrimitiveType type) { defaultFloatType = type; }
+
 	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
+		// Float tensors of different types do not combine (conversions are explicit).
+		std::optional<PrimitiveType> floatType;
+		for (size_t i : combinedOperands(id)) {
+			const auto* t = i < args.size() ? std::get_if<TensorType>(&getDataType(args[i].get())) : nullptr;
+			if (t == nullptr || !isFloat(t->type))
+				continue;
+			if (floatType && *floatType != t->type)
+				return std::format(
+						"the operands are {} and {} (convert explicitly, e.g. {}(x))", std::to_string(*floatType),
+						std::to_string(t->type), std::to_string(*floatType)
+				);
+			floatType = t->type;
+		}
 		std::vector<Shape> shapes;
 		for (const auto& arg : args) {
 			auto shape = shapeOfType(getDataType(arg.get()));

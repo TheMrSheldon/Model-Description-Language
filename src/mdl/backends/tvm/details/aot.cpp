@@ -13,6 +13,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -374,8 +375,25 @@ namespace mdl::backend::tvm {
 				const int64_t n = data.Shape().Product();
 				const DataType dtype(data->dtype);
 				const bool f32 = dtype == DataType::Float(32), i32 = dtype == DataType::Int(32);
-				if (n > 1024 || !(f32 || i32))
-					unsupported("constant (only float32 and int32 constants with up to 1024 elements are supported)");
+				const bool f16 = dtype == DataType::Float(16), bf16 = dtype == DataType::BFloat(16);
+				if (n > 1024 || !(f32 || i32 || f16 || bf16))
+					unsupported("constant (only float and int32 constants with up to 1024 elements are supported)");
+				auto element = [&](int64_t i) -> PrimExpr {
+					if (i32)
+						return IntImm(dtype, static_cast<const int32_t*>(data->data)[i]);
+					if (f32)
+						return ::tvm::FloatImm(dtype, static_cast<const float*>(data->data)[i]);
+					const uint16_t bits = static_cast<const uint16_t*>(data->data)[i];
+					if (f16) {
+						_Float16 half;
+						std::memcpy(&half, &bits, sizeof(half));
+						return ::tvm::FloatImm(dtype, static_cast<double>(half));
+					}
+					const uint32_t wide = static_cast<uint32_t>(bits) << 16; // bfloat16: the upper half of a float32
+					float value;
+					std::memcpy(&value, &wide, sizeof(value));
+					return ::tvm::FloatImm(dtype, value);
+				};
 				Array<PrimExpr> shape;
 				for (int64_t d : data.Shape())
 					shape.push_back(IntImm(DataType::Int(64), d));
@@ -385,9 +403,7 @@ namespace mdl::backend::tvm {
 				flat.CopyOnWrite()->data = buffer->data;
 				stmts.push_back(tirx::DeclBuffer(flat));
 				for (int64_t i = 0; i < n; ++i) {
-					PrimExpr value = f32 ? PrimExpr(::tvm::FloatImm(dtype, static_cast<const float*>(data->data)[i]))
-										 : PrimExpr(IntImm(dtype, static_cast<const int32_t*>(data->data)[i]));
-					stmts.push_back(tirx::BufferStore(flat, value, {IntImm(DataType::Int(64), i)}));
+					stmts.push_back(tirx::BufferStore(flat, element(i), {IntImm(DataType::Int(64), i)}));
 				}
 				return buffer;
 			}
@@ -456,11 +472,15 @@ namespace mdl::backend::tvm {
 								DataType::Handle(), tirx::builtin::address_of(), {tirx::BufferLoad(v.buffer, origin)}
 						);
 					}
+					// The element type is given by the type of a zero; bfloat16 is marked by a uint16 zero, as TVM's
+					// bfloat16 legalization would change a bfloat16 value (restored by bf16Storage, pipeline.cpp).
+					const PrimExpr dtypeOf = v.buffer->dtype.is_bfloat16() ? PrimExpr(IntImm(DataType::UInt(16), 0))
+																		   : tirx::make_zero(v.buffer->dtype);
 					return tirx::Call(
 							DataType::Handle(), tirx::builtin::tvm_stack_make_array(),
 							{data, shape, IntImm(DataType::Int(32), 0),
-							 IntImm(DataType::Int(32), static_cast<int>(v.buffer->shape.size())),
-							 tirx::make_zero(v.buffer->dtype), IntImm(DataType::Int(64), 0)}
+							 IntImm(DataType::Int(32), static_cast<int>(v.buffer->shape.size())), dtypeOf,
+							 IntImm(DataType::Int(64), 0)}
 					);
 				}
 				default:

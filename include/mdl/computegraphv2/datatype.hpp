@@ -18,11 +18,23 @@ namespace mdl {
 
 	enum class PrimitiveType {
 		error,	  /**< used to mark invalid nodes in the computegraph (e.g., due to semantic errors) **/
-		floating, /**< represents arbitrary floating points. The precise datatype is compile-time configurable. */
+		float32,  /**< IEEE 754 single precision (`float32`; `float` by default, see the option for the default float) */
 		integer,  /**< represents arbitrary signed integers. The precise datatype is compile-time configurable. */
 		uint,	  /**< represents arbitrary unsigned integers. The precise datatype is compile-time configurable. */
-		boolean	  /**< represents booleans. */
+		boolean,  /**< represents booleans. */
+		float16,  /**< IEEE 754 half precision (`float16`) */
+		bfloat16  /**< bfloat16 (`bfloat16`): float32's exponent range with 8 bits of precision */
 	};
+
+	/** @brief Whether @p type is a floating-point type. */
+	constexpr bool isFloat(PrimitiveType type) {
+		return type == PrimitiveType::float32 || type == PrimitiveType::float16 || type == PrimitiveType::bfloat16;
+	}
+
+	/** @brief The size of an element of @p type in bytes (booleans: 1). */
+	constexpr unsigned byteSize(PrimitiveType type) {
+		return type == PrimitiveType::float16 || type == PrimitiveType::bfloat16 ? 2 : type == PrimitiveType::boolean ? 1 : 4;
+	}
 
 	struct TensorType final {
 		using Shape = std::vector<std::variant<unsigned, Elipsis, const Node*>>;

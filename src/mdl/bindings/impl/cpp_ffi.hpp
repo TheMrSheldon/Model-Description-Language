@@ -54,9 +54,13 @@ namespace mdl::bindings::detail {
 		return (!name.empty() && std::isdigit(static_cast<unsigned char>(name[0]))) ? "_" + name : name;
 	}
 
-	/// DLDataType initializer of a primitive type (float32, int32, uint32, bool).
+	/// DLDataType initializer of a primitive type (float32/float16/bfloat16, int32, uint32, bool).
 	inline std::string dlDtype(PrimitiveType p) {
 		switch (p) {
+		case PrimitiveType::float16:
+			return "{kDLFloat, 16, 1}";
+		case PrimitiveType::bfloat16:
+			return "{kDLBfloat, 16, 1}";
 		case PrimitiveType::integer:
 			return "{kDLInt, 32, 1}";
 		case PrimitiveType::uint:

@@ -3,15 +3,17 @@
 
 /**
  * @file
- * @brief Small header-only helpers for programs that call compiled models: owning (CPU, float32/int32) tensors that can
- * be passed as `DLTensor*`, and safetensors support: loading a model's weights directly into its generated `Weights`
+ * @brief Small header-only helpers for programs that call compiled models: owning (CPU; float32, bfloat16, float16,
+ * int32, bool) tensors that can be passed as `DLTensor*`, and safetensors support: loading a model's weights directly into its generated `Weights`
  * (with dtype and shape checks and an optional name mapping), saving them, and reading arbitrary tensors.
  */
 
 #include <dlpack/dlpack.h>
 #include <nlohmann/json.hpp>
 
+#include <bit>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -50,14 +52,82 @@ namespace mdl::runtime {
 		}
 	};
 
+	/** @brief A bfloat16 value (float32's exponent with 8 bits of precision): the upper half of a float32. */
+	struct bfloat16 {
+		uint16_t bits = 0;
+
+		bfloat16() = default;
+		bfloat16(float value) { // rounds to nearest even
+			uint32_t x;
+			std::memcpy(&x, &value, sizeof(x));
+			if ((x & 0x7fffffffu) > 0x7f800000u) // NaN stays NaN
+				bits = static_cast<uint16_t>((x >> 16) | 0x40u);
+			else
+				bits = static_cast<uint16_t>((x + 0x7fffu + ((x >> 16) & 1u)) >> 16);
+		}
+		operator float() const {
+			const uint32_t x = static_cast<uint32_t>(bits) << 16;
+			float value;
+			std::memcpy(&value, &x, sizeof(value));
+			return value;
+		}
+	};
+
+	/** @brief An IEEE 754 half-precision value. */
+	struct float16 {
+		uint16_t bits = 0;
+
+		float16() = default;
+		float16(float value) { // rounds to nearest even
+			uint32_t x;
+			std::memcpy(&x, &value, sizeof(x));
+			const uint32_t sign = (x >> 16) & 0x8000u;
+			const uint32_t absolute = x & 0x7fffffffu;
+			if (absolute >= 0x7f800000u) { // inf or NaN
+				bits = static_cast<uint16_t>(sign | 0x7c00u | (absolute > 0x7f800000u ? 0x200u : 0u));
+			} else if (absolute >= 0x477ff000u) { // overflows to inf
+				bits = static_cast<uint16_t>(sign | 0x7c00u);
+			} else if (absolute < 0x38800000u) { // subnormal (or zero): round the scaled value
+				float scaled;
+				const uint32_t a = absolute;
+				std::memcpy(&scaled, &a, sizeof(scaled));
+				bits = static_cast<uint16_t>(sign | static_cast<uint32_t>(std::nearbyint(scaled * 16777216.0f)));
+			} else {
+				const uint32_t rounded = absolute + 0xfffu + ((absolute >> 13) & 1u);
+				bits = static_cast<uint16_t>(sign | ((rounded - 0x38000000u) >> 13));
+			}
+		}
+		operator float() const {
+			const uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
+			const uint32_t exponent = (bits >> 10) & 0x1fu, mantissa = bits & 0x3ffu;
+			uint32_t x;
+			if (exponent == 0x1f)
+				x = sign | 0x7f800000u | (mantissa << 13);
+			else if (exponent != 0)
+				x = sign | ((exponent + 112) << 23) | (mantissa << 13);
+			else { // subnormal or zero
+				const float value = static_cast<float>(mantissa) / 16777216.0f;
+				std::memcpy(&x, &value, sizeof(x));
+				x |= sign;
+			}
+			float value;
+			std::memcpy(&value, &x, sizeof(value));
+			return value;
+		}
+	};
+
 	/**
-	 * @brief The DLPack data type of the element type @p T: float32, int32, or bool (stored as uint8_t, 0 or 1; e.g.
-	 * masks).
+	 * @brief The DLPack data type of the element type @p T: float32, bfloat16, float16, int32, or bool (stored as
+	 * uint8_t, 0 or 1; e.g. masks).
 	 */
 	template <typename T>
 	constexpr DLDataType dlDataType() {
 		if constexpr (std::is_same_v<T, float>)
 			return {kDLFloat, 32, 1};
+		else if constexpr (std::is_same_v<T, bfloat16>)
+			return {kDLBfloat, 16, 1};
+		else if constexpr (std::is_same_v<T, float16>)
+			return {kDLFloat, 16, 1};
 		else if constexpr (std::is_same_v<T, int32_t>)
 			return {kDLInt, 32, 1};
 		else if constexpr (std::is_same_v<T, uint8_t>)
@@ -135,6 +205,8 @@ namespace mdl::runtime {
 	};
 
 	using Tensor = BasicTensor<float>;
+	using BFloat16Tensor = BasicTensor<bfloat16>;
+	using Float16Tensor = BasicTensor<float16>;
 	using IntTensor = BasicTensor<int32_t>;
 	/** @brief A boolean tensor, e.g. the mask of a masked function (1: valid, 0: masked). */
 	using MaskTensor = BasicTensor<uint8_t>;
@@ -153,6 +225,9 @@ namespace mdl::runtime {
 	/** @brief Maps a tensor name of a file onto a weight path of the model; an empty result skips the tensor. */
 	using NameMap = std::function<std::string(std::string_view)>;
 
+	/** @brief Whether loading may convert float weights to the model's float type (e.g. a float32 file for bfloat16). */
+	enum class FloatConversion { none, allowed };
+
 	namespace detail {
 		/** @brief The safetensors dtype of a DLPack data type (empty if unsupported). */
 		inline std::string safetensorsDtype(DLDataType t) {
@@ -160,6 +235,10 @@ namespace mdl::runtime {
 				return {};
 			if (t.code == kDLFloat && t.bits == 32)
 				return "F32";
+			if (t.code == kDLBfloat && t.bits == 16)
+				return "BF16";
+			if (t.code == kDLFloat && t.bits == 16)
+				return "F16";
 			if (t.code == kDLInt && t.bits == 32)
 				return "I32";
 			if (t.code == kDLUInt && t.bits == 8)
@@ -309,6 +388,8 @@ namespace mdl::runtime {
 
 		/** @brief The memory the slots point to (map nodes do not move, so moving LoadedWeights keeps them valid). */
 		std::map<std::string, BasicTensor<float>> floats;
+		std::map<std::string, BasicTensor<bfloat16>> bfloats;
+		std::map<std::string, BasicTensor<float16>> halves;
 		std::map<std::string, BasicTensor<int32_t>> ints;
 
 		LoadedWeights() = default;
@@ -325,9 +406,13 @@ namespace mdl::runtime {
 	 * the model are listed in LoadedWeights::unused.
 	 * @param map optional mapping of the file's tensor names onto the model's weight paths (e.g. from a Hugging Face
 	 * checkpoint); an empty result skips the tensor.
+	 * @param conversion whether float weights of another float type (F32, BF16, F16) are converted to the model's type
+	 * (e.g. a float32 checkpoint for a model compiled with `--float bf16`); by default the types must agree.
 	 */
 	template <typename Model>
-	LoadedWeights<Model> loadWeights(const std::filesystem::path& path, const NameMap& map = {}) {
+	LoadedWeights<Model> loadWeights(
+			const std::filesystem::path& path, const NameMap& map = {}, FloatConversion conversion = FloatConversion::none
+	) {
 		detail::SafetensorsFile file{path};
 		LoadedWeights<Model> result;
 		std::map<std::string, const SafetensorsEntry*> byPath;
@@ -354,7 +439,9 @@ namespace mdl::runtime {
 			bool shapeOk = static_cast<int32_t>(e.shape.size()) == info.ndim;
 			for (int32_t d = 0; shapeOk && d < info.ndim; ++d)
 				shapeOk = info.shape[d] < 0 || info.shape[d] == e.shape[d];
-			if (e.dtype != dtype || !shapeOk) {
+			auto isFloat = [](const std::string& d) { return d == "F32" || d == "BF16" || d == "F16"; };
+			const bool convert = conversion == FloatConversion::allowed && e.dtype != dtype && isFloat(e.dtype) && isFloat(dtype);
+			if ((e.dtype != dtype && !convert) || !shapeOk) {
 				std::string fileShape, modelShape;
 				for (auto d : e.shape)
 					fileShape += (fileShape.empty() ? "" : ", ") + std::to_string(d);
@@ -365,12 +452,35 @@ namespace mdl::runtime {
 				continue;
 			}
 			auto bind = [&](auto& storage, auto tensor) {
-				file.read(e, tensor.data());
+				if (convert) {
+					// Read in the file's type, convert each element (through float32).
+					std::vector<char> raw(e.end - e.begin);
+					file.read(e, raw.data());
+					auto element = [&](size_t i) -> float {
+						if (e.dtype == "F32") {
+							float v;
+							std::memcpy(&v, raw.data() + 4 * i, 4);
+							return v;
+						}
+						uint16_t bits;
+						std::memcpy(&bits, raw.data() + 2 * i, 2);
+						return e.dtype == "BF16" ? static_cast<float>(std::bit_cast<bfloat16>(bits))
+												 : static_cast<float>(std::bit_cast<float16>(bits));
+					};
+					for (size_t i = 0; i < tensor.size(); ++i)
+						tensor.data()[i] = element(i);
+				} else {
+					file.read(e, tensor.data());
+				}
 				auto& stored = storage.emplace(info.name, std::move(tensor)).first->second;
 				*result.weights.find(info.name) = stored.dl();
 			};
 			if (dtype == "I32")
 				bind(result.ints, BasicTensor<int32_t>{e.shape});
+			else if (dtype == "BF16")
+				bind(result.bfloats, BasicTensor<bfloat16>{e.shape});
+			else if (dtype == "F16")
+				bind(result.halves, BasicTensor<float16>{e.shape});
 			else
 				bind(result.floats, BasicTensor<float>{e.shape});
 		}

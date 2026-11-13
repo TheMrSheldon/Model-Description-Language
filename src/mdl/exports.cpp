@@ -332,9 +332,9 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			}
 			auto floating = [](const DataType& type) { // integer inputs (e.g. token ids) have no gradient
 				if (const auto* p = std::get_if<PrimitiveType>(&type))
-					return *p == PrimitiveType::floating;
+					return isFloat(*p);
 				const auto* t = std::get_if<TensorType>(&type);
-				return t != nullptr && t->type == PrimitiveType::floating;
+				return t != nullptr && isFloat(t->type);
 			};
 			if (gradients.options.inputs)
 				for (const auto& [pname, input] : original.parameters)

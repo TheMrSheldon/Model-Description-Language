@@ -145,9 +145,26 @@ x). A compiled function with masked parameters (or `mdlc --mask f`) takes an add
 - uint
 - int
 - bool
-- float
+- float32, bfloat16, float16
+- float: the default float type, chosen when compiling (`mdlc --float f32|bf16|f16`, default f32)
 
 These datatypes can also be stored as tensors: `<datatype>[<shape>]`, e.g., `float[10, 10, 32]` for a $10\times 10\times 32$ tensor.
+
+## Float types
+Models are usually written with `float`, so that the same model compiles for float32, bfloat16, or float16; the explicit
+types are not affected by `--float` (e.g. float32 weights in a bfloat16 model).
+
+Conversions between float types are never implicit: narrowing loses precision, widening costs memory and time. Operands
+of different float types, an argument of another float type than its parameter, or a result of another type than the
+declared one are errors; a conversion is written with the type's name:
+```dlm
+float32[..., 4] f(x: float32[..., 4], w: bfloat16[4]) => x * float32(w);
+```
+With `--float bf16`, `float` *is* bfloat16, so `bfloat16` and `float` values combine without conversion. Literals have
+no precision of their own: they take the type of the tensor they are combined with.
+
+The 16-bit types are storage types: reductions and the vendor kernels (matrix products, softmax, layer norm) accumulate
+in float32 internally, and float16 computes in float32 on CPUs without float16 arithmetic.
 
 # Expressions
 - Arithmetic: `a + b`, `a - b`, `a * b`, `a / b` (elementwise, broadcasting), `a @ b` (matrix product), `-a`.

@@ -64,7 +64,7 @@ static TensorType tensorType(PrimitiveType elem, std::initializer_list<unsigned>
 TEST_CASE("einops pure permute emits PERMUTE node", "[einops][permute]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {4, 8, 16}));
+			tensorType(PrimitiveType::float32, {4, 8, 16}));
 
 	Spec lhs = {named("a"), named("b"), named("c")};
 	Spec rhs = {named("b"), named("a"), named("c")};
@@ -87,7 +87,7 @@ TEST_CASE("einops pure permute emits PERMUTE node", "[einops][permute]") {
 TEST_CASE("einops identity permute emits no PERMUTE node", "[einops][permute]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {4, 8}));
+			tensorType(PrimitiveType::float32, {4, 8}));
 
 	Spec lhs = {named("a"), named("b")};
 	Spec rhs = {named("a"), named("b")};
@@ -105,7 +105,7 @@ TEST_CASE("einops identity permute emits no PERMUTE node", "[einops][permute]") 
 TEST_CASE("einops merge emits RESHAPE node", "[einops][reshape]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {4, 8}));
+			tensorType(PrimitiveType::float32, {4, 8}));
 
 	Spec lhs = {named("a"), named("b")};
 	Spec rhs = {group({"a", "b"})};
@@ -130,7 +130,7 @@ TEST_CASE("einops merge emits RESHAPE node", "[einops][reshape]") {
 TEST_CASE("einops split emits RESHAPE node", "[einops][reshape]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {32}));
+			tensorType(PrimitiveType::float32, {32}));
 
 	Spec lhs = {group({"a", "b"})};
 	Spec rhs = {named("a"), named("b")};
@@ -155,7 +155,7 @@ TEST_CASE("einops split emits RESHAPE node", "[einops][reshape]") {
 TEST_CASE("einops unsqueeze adds literal dim", "[einops][reshape]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {4, 8}));
+			tensorType(PrimitiveType::float32, {4, 8}));
 
 	Spec lhs = {named("a"), named("b")};
 	Spec rhs = {named("a"), literal(1), named("b")};
@@ -181,7 +181,7 @@ TEST_CASE("einops ellipsis permute emits PERMUTE with negative indices", "[einop
 	// Shape has Elipsis for the batch dims
 	TensorType::Shape shape{Elipsis{}, 4u, 8u};
 	const Node& input = graph.addParameterNode(
-			TensorType{.type = PrimitiveType::floating, .shape = shape});
+			TensorType{.type = PrimitiveType::float32, .shape = shape});
 
 	Spec lhs = {ellipsis(), named("a"), named("b")};
 	Spec rhs = {ellipsis(), named("b"), named("a")};
@@ -200,7 +200,7 @@ TEST_CASE("einops ellipsis permute emits PERMUTE with negative indices", "[einop
 
 TEST_CASE("einops splits after an ellipsis mark the ellipsis group in the reshape", "[einops][ellipsis]") {
 	Computegraph graph;
-	const Node& input = graph.addParameterNode(TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}, 768u}});
+	const Node& input = graph.addParameterNode(TensorType{.type = PrimitiveType::float32, .shape = {Elipsis{}, 768u}});
 	Spec lhs = {ellipsis(), group({"h", "d"})};
 	Spec rhs = {named("h"), ellipsis(), named("d")};
 	const Node& heads = graph.addConstNode(Atomic{12});
@@ -226,7 +226,7 @@ TEST_CASE("einops infers b from merged size and a=2 binding", "[einops][inferenc
 	Computegraph graph;
 	// Input dim 0 = 24, so b = 24 / 2 = 12
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {24}));
+			tensorType(PrimitiveType::float32, {24}));
 
 	Spec lhs = {group({"a", "b"})};
 	Spec rhs = {named("a"), named("b")};
@@ -246,7 +246,7 @@ TEST_CASE("einops infers a from merged size and b=3 binding", "[einops][inferenc
 	Computegraph graph;
 	// Input dim 0 = 12, so a = 12 / 3 = 4
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {12}));
+			tensorType(PrimitiveType::float32, {12}));
 
 	Spec lhs = {group({"a", "b"})};
 	Spec rhs = {named("a"), named("b")};
@@ -266,7 +266,7 @@ TEST_CASE("einops infers b from RHS literal: (a b) -> 2 b", "[einops][inference]
 	Computegraph graph;
 	// Input dim 0 = 16, RHS has literal 2 → a=2, b = 16/2 = 8
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {16}));
+			tensorType(PrimitiveType::float32, {16}));
 
 	// (a b) -> 2 b  means: a is absent from RHS by name, replaced by literal 2
 	SpecItem lit2{.is_group = false, .atoms = {{AtomKind::Literal, {}, 2}}};
@@ -288,7 +288,7 @@ TEST_CASE("einops infers a from RHS literal: (a b) -> a 3", "[einops][inference]
 	Computegraph graph;
 	// Input dim 0 = 12, RHS literal 3 → b=3, a = 12/3 = 4
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {12}));
+			tensorType(PrimitiveType::float32, {12}));
 
 	SpecItem lit3{.is_group = false, .atoms = {{AtomKind::Literal, {}, 3}}};
 	Spec lhs = {group({"a", "b"})};
@@ -324,7 +324,7 @@ TEST_CASE("einops error on non-tensor input", "[einops][error]") {
 TEST_CASE("einops error on LHS rank mismatch", "[einops][error]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {4, 8}));
+			tensorType(PrimitiveType::float32, {4, 8}));
 
 	// LHS has 3 items but tensor has 2 dims
 	Spec lhs = {named("a"), named("b"), named("c")};
@@ -337,7 +337,7 @@ TEST_CASE("einops error on LHS rank mismatch", "[einops][error]") {
 TEST_CASE("einops error when both grouped dim sizes are unknown (ambiguous)", "[einops][error]") {
 	Computegraph graph;
 	const Node& input = graph.addParameterNode(
-			tensorType(PrimitiveType::floating, {32}));
+			tensorType(PrimitiveType::float32, {32}));
 
 	Spec lhs = {group({"a", "b"})};
 	Spec rhs = {named("a"), named("b")};

@@ -41,7 +41,7 @@ namespace mdl::masking {
 			 */
 			void fillInput(const Node& input) {
 				const auto* t = std::get_if<TensorType>(&getDataType(input));
-				if (t == nullptr || t->type != PrimitiveType::floating || shapes.find(input) == nullptr)
+				if (t == nullptr || !isFloat(t->type) || shapes.find(input) == nullptr)
 					return; // (an unused input has no shape)
 				const auto& s = shapeOf(input);
 				auto dims = maskedDims(s);
@@ -206,6 +206,18 @@ namespace mdl::masking {
 				return *m;
 			}
 
+			/** @brief 1 where @p cond holds, else 0, in the float type of @p like (e.g. bfloat16). */
+			const Node& indicator(const Node& cond, const Node& like) {
+				const Node& w = graph.addInvocationNode(
+						FIDs::WHERE, {cond, graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
+				);
+				const auto* target = std::get_if<TensorType>(&getDataType(like));
+				const auto* type = std::get_if<TensorType>(&getDataType(w));
+				if (target == nullptr || type == nullptr || !isFloat(target->type) || target->type == type->type)
+					return w;
+				return graph.addInvocationNode(FIDs::CAST, {w, graph.addConstNode(Atomic{static_cast<int>(target->type)})});
+			}
+
 			/** @brief @p x with @p value at the masked positions of the dimensions @p dims. */
 			const Node& fill(const Node& x, const shapes::Shape& s, const std::vector<size_t>& dims, double value) {
 				const Node& cond = combinedMask(s, dims);
@@ -259,10 +271,7 @@ namespace mdl::masking {
 					if (inv.id != FIDs::MEAN)
 						return reduced;
 					// mean = sum / valid count = mean(filled) / (fraction of valid elements)
-					const Node& indicator = graph.addInvocationNode(
-							FIDs::WHERE,
-							{dimMask(s, last), graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
-					);
+					const Node& indicator = this->indicator(dimMask(s, last), inv.arguments[0].get());
 					const Node& fraction = graph.addInvocationNode(FIDs::MEAN, {indicator});
 					return graph.addInvocationNode(FIDs::TENSOR_DIV, {reduced, fraction});
 				}
@@ -276,10 +285,7 @@ namespace mdl::masking {
 					const Node& sum = graph.addInvocationNode(FIDs::SUM_ALL, {filled});
 					if (inv.id == FIDs::SUM_ALL)
 						return sum;
-					const Node& indicator = graph.addInvocationNode(
-							FIDs::WHERE,
-							{combinedMask(s, dims), graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
-					);
+					const Node& indicator = this->indicator(combinedMask(s, dims), inv.arguments[0].get());
 					const Node& count = graph.addInvocationNode(
 							FIDs::SUM_ALL,
 							{graph.addInvocationNode(FIDs::BROADCAST_LIKE, {indicator, args[0]})}
@@ -336,10 +342,7 @@ namespace mdl::masking {
 					auto dims = maskedDims(s);
 					if (dims.empty())
 						return graph.addConstNode(Atomic{1.0});
-					return graph.addInvocationNode(
-							FIDs::WHERE,
-							{combinedMask(s, dims), graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
-					);
+					return indicator(combinedMask(s, dims), inv.arguments[0].get());
 				}
 				case FIDs::UNMASK: { // x.data: zeros at the masked elements
 					const auto& s = argShape(0);

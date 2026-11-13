@@ -14,8 +14,12 @@ namespace mdl::bindings::detail {
 
 	inline std::string primTypeStr(mdl::PrimitiveType p) {
 		switch (p) {
-		case mdl::PrimitiveType::floating:
-			return "float"; /** \todo load the configured datatype for default float */
+		case mdl::PrimitiveType::float32:
+			return "float32";
+		case mdl::PrimitiveType::float16:
+			return "float16";
+		case mdl::PrimitiveType::bfloat16:
+			return "bfloat16";
 		case mdl::PrimitiveType::integer:
 			return "int"; /** \todo load the configured datatype for default int */
 		case mdl::PrimitiveType::uint:

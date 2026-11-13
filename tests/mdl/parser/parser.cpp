@@ -401,8 +401,8 @@ TEST_CASE("node types follow the shape rules: broadcasting and matrix products",
 	const auto& f = moduleFunction(*unit, "M", "f");
 	const auto& out = std::get<InvocationNode>(f.outputs[0].get());
 	// b + x is [..., 4] (not b's type [4]); the product is [..., 3].
-	CHECK(shapes::str(getDataType(out.arguments[0].get())) == "float[..., 4]");
-	CHECK(shapes::str(getDataType(f.outputs[0].get())) == "float[..., 3]");
+	CHECK(shapes::str(getDataType(out.arguments[0].get())) == "float32[..., 4]");
+	CHECK(shapes::str(getDataType(f.outputs[0].get())) == "float32[..., 3]");
 }
 
 TEST_CASE("results must have the declared return types", "[parser][types]") {
@@ -427,4 +427,31 @@ TEST_CASE("arguments must match the parameters, operands the operators", "[parse
 	// Inner dimensions of a matrix product, and shapes that do not broadcast.
 	CHECK_FALSE(parseSource("module M[] { W: float[3, 3] float[..., 3] f(x: float[..., 4]) => x @ W; }").has_value());
 	CHECK_FALSE(parseSource("module M[] { b: float[3] float[..., 4] f(x: float[..., 4]) => x + b; }").has_value());
+}
+
+TEST_CASE("float types do not mix implicitly; conversions are explicit", "[parser][types]") {
+	// Mixed operands, an argument of another float type, a result of another float type.
+	CHECK_FALSE(parseSource("module M[] { W: bfloat16[4] float32[..., 4] f(x: float32[..., 4]) => x * W; }").has_value());
+	CHECK_FALSE(parseSource(R"(
+		float32[...] g(x: float32[...]) => x;
+		module M[] { bfloat16[..., 4] f(x: bfloat16[..., 4]) => g(x); }
+	)").has_value());
+	CHECK_FALSE(parseSource("module M[] { float32[..., 4] f(x: bfloat16[..., 4]) => x; }").has_value());
+	// Explicit conversions; literals take the tensor's type.
+	auto unit = parseSource(
+			"module M[] { W: bfloat16[4] float32[..., 4] f(x: float32[..., 4]) => x * float32(W) + 0.5; }"
+	);
+	REQUIRE(unit.has_value());
+	CHECK(shapes::str(getDataType(moduleFunction(*unit, "M", "f").outputs[0].get())) == "float32[..., 4]");
+}
+
+TEST_CASE("`float` stands for the configured default float type", "[parser][types]") {
+	std::istringstream stream{"module M[] { W: float[4] float[..., 4] f(x: float[..., 4]) => x * bfloat16(W); }"};
+	auto unit = parser::parse(stream, "<test>", {.defaultFloat = PrimitiveType::bfloat16});
+	REQUIRE(unit.has_value());
+	const auto& f = moduleFunction(*unit, "M", "f");
+	CHECK(shapes::str(getDataType(f.outputs[0].get())) == "bfloat16[..., 4]");
+	// bfloat16(W) of a bfloat16 W is no conversion.
+	CHECK(std::get<InvocationNode>(f.outputs[0].get()).id == builtins::FunctionIDs::TENSOR_PROD);
+	CHECK(std::holds_alternative<ParameterNode>(std::get<InvocationNode>(f.outputs[0].get()).arguments[1].get()));
 }

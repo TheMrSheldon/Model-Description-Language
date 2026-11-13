@@ -49,6 +49,7 @@ struct CompileArgs {
 	std::vector<std::string> maskFunctions;
 	std::vector<std::string> ellipsisRanks;
 	std::vector<std::string> checkpoint;
+	mdl::PrimitiveType defaultFloat = mdl::PrimitiveType::float32;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -87,7 +88,7 @@ static void runCompileCommand(const CompileArgs& args) {
 	if (output.has_parent_path())
 		std::filesystem::create_directories(output.parent_path());
 	/** \todo: handle multiple input files */
-	auto result = mdl::parser::parse(args.inputs[0], {.importDirs = args.importdirs});
+	auto result = mdl::parser::parse(args.inputs[0], {.importDirs = args.importdirs, .defaultFloat = args.defaultFloat});
 	if (!result.has_value())
 		exit(1);
 	auto& program = result.value();
@@ -230,6 +231,18 @@ int main(int argc, char* argv[]) {
 			   "labels [batch] next to token ids [batch, seq]). Repeatable."
 	)
 			->type_name("N|NAME=K");
+	app.add_option(
+			   "--float", args.defaultFloat,
+			   "The type that `float` stands for: f32 (default), bf16, or f16. The explicit types float32, bfloat16 and "
+			   "float16 are not affected; conversions between float types are explicit (e.g. float32(x))."
+	)
+			->transform(CLI::CheckedTransformer(
+					std::map<std::string, mdl::PrimitiveType>{
+							{"f32", mdl::PrimitiveType::float32},
+							{"bf16", mdl::PrimitiveType::bfloat16},
+							{"f16", mdl::PrimitiveType::float16}},
+					CLI::ignore_case
+			));
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,

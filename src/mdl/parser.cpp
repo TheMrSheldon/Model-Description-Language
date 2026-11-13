@@ -626,7 +626,11 @@ namespace mdl {
 		}
 
 		std::any unqualifiedTypeSpec(mdlParser::TypeSpecContext* ctx) {
-			auto dtype = currentNamespace().getType(ctx->typename_->getText());
+			// `float` is the configured default float type (see ParseOptions::defaultFloat).
+			const DataType defaultFloat{options.defaultFloat};
+			auto dtype = ctx->typename_->getText() == "float"
+								 ? std::optional<std::reference_wrapper<const DataType>>{std::cref(defaultFloat)}
+								 : currentNamespace().getType(ctx->typename_->getText());
 			if (!dtype.has_value()) {
 				errorlistener->semanticError(
 						PrettyErrorListener::ErrorLevel::Error, ctx->typename_, ctx->typename_->getLine(),
@@ -1261,7 +1265,59 @@ namespace mdl {
 			return static_cast<const Node*>(&result->get());
 		}
 
+		/** @brief @p type with float32 as its float element type (to check only the shape against a builtin). */
+		static DataType withoutFloatType(DataType type) {
+			if (auto* t = std::get_if<TensorType>(&type); t != nullptr && isFloat(t->type))
+				t->type = PrimitiveType::float32;
+			return type;
+		}
+
+		/** @brief The float type named @p name (`float` is the configured default), if it names one. */
+		std::optional<PrimitiveType> floatTypeNamed(const std::string& name) const {
+			if (name == "float")
+				return options.defaultFloat;
+			if (name == "float32")
+				return PrimitiveType::float32;
+			if (name == "float16")
+				return PrimitiveType::float16;
+			if (name == "bfloat16")
+				return PrimitiveType::bfloat16;
+			return std::nullopt;
+		}
+
+		/**
+		 * @brief An explicit conversion `T(x)` to the float type T (conversions between float types are never implicit:
+		 * narrowing loses precision, widening costs memory and time).
+		 */
+		std::optional<const Node*> conversion(mdlParser::MethodcallExpressionContext* ctx) {
+			auto* name = dynamic_cast<mdlParser::VarAccessExpressionContext*>(ctx->func);
+			if (name == nullptr)
+				return std::nullopt;
+			auto target = floatTypeNamed(name->IDENT()->getText());
+			if (!target)
+				return std::nullopt;
+			if (ctx->args.size() != 1) {
+				auto* tok = ctx->start;
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						std::format("{}(x) converts one value", name->IDENT()->getText())
+				);
+				return &graph().addErrorNode();
+			}
+			const Node* x = asNode(ctx->args[0]->accept(this), ctx->args[0]->start);
+			if (std::holds_alternative<ErrorNode>(*x))
+				return x;
+			const auto* tensor = std::get_if<TensorType>(&getDataType(*x));
+			if (tensor == nullptr || tensor->type == *target)
+				return x; // scalars take the type of the tensors they are combined with
+			return &graph().addInvocationNode(
+					builtins::FunctionIDs::CAST, {std::cref(*x), std::cref(graph().addConstNode(Atomic{static_cast<int>(*target)}))}
+			);
+		}
+
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
+			if (auto converted = conversion(ctx))
+				return *converted;
 			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
 			// `instance(...)`. Without this, the function would reference the module's unqualified weights.
 			const Node* receiver = nullptr;
@@ -1321,8 +1377,10 @@ namespace mdl {
 			}
 			const FunctionDecl& callee = *resolved;
 			// The arguments must have the shapes of the parameters (definite mismatches only, see shapes::matches).
+			// (The builtins are generic in the float type: their parameters' float32 is a placeholder.)
+			const bool builtin = callee.name.starts_with("__builtin_");
 			for (size_t i = 0; i < std::min(args.size(), callee.parameters.size()); ++i)
-				if (!shapes::matches(callee.parameters[i].second.get().type, argtypes[i], false)) {
+				if (!shapes::matches(callee.parameters[i].second.get().type, builtin ? withoutFloatType(argtypes[i]) : argtypes[i], false)) {
 					auto* tok = ctx->args[i]->start;
 					errorlistener->semanticError(
 							PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
@@ -1652,6 +1710,7 @@ namespace {
 
 std::optional<mdl::CompilationUnit>
 mdl::parser::parse(std::istream& stream, std::string_view sourcename, const ParseOptions& options) {
+	shapes::setDefaultFloat(options.defaultFloat);
 	auto state = std::make_shared<FrontendState>();
 	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
 	state->visitor->translate(stream, std::string{sourcename}, std::filesystem::current_path(), /*main=*/true);
@@ -1659,6 +1718,7 @@ mdl::parser::parse(std::istream& stream, std::string_view sourcename, const Pars
 }
 
 std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::path& file, const ParseOptions& options) {
+	shapes::setDefaultFloat(options.defaultFloat);
 	auto state = std::make_shared<FrontendState>();
 	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
 	state->visitor->translateFile(file, /*main=*/true);

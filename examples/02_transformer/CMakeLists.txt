@@ -80,3 +80,17 @@ add_executable(02_transformer_grad_checkpoint grad_check.cpp)
 target_compile_definitions(02_transformer_grad_checkpoint PRIVATE MDL_GRAD_MASKED)
 target_link_libraries(02_transformer_grad_checkpoint PRIVATE transformer_model_grad_checkpoint)
 add_test(NAME example_02_transformer_grad_checkpoint COMMAND 02_transformer_grad_checkpoint)
+
+# `float` as bfloat16 and float16 (`--float bf16|f16`): `Bert` against Hugging Face's float32 BertModel (the float32
+# reference weights are converted when loading), with tolerances for the 16-bit types (relative to the largest output).
+foreach(variant IN ITEMS "bf16;bfloat16;2e-2" "f16;float16;5e-3")
+	list(GET variant 0 flag)
+	list(GET variant 1 type)
+	list(GET variant 2 tolerance)
+	mdl_add_model(bert_model_${flag} SOURCE model.dlm CONFIG model_bert_tiny.yml OPTIONS --ellipsis-rank 2 --float ${flag})
+	add_executable(02_transformer_bert_${flag} bert_check.cpp)
+	target_link_libraries(02_transformer_bert_${flag} PRIVATE bert_model_${flag})
+	target_compile_definitions(02_transformer_bert_${flag} PRIVATE MDL_BERT_FLOAT=${type} MDL_BERT_TOLERANCE=${tolerance}
+		MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny.safetensors")
+	add_test(NAME example_02_transformer_bert_${flag} COMMAND 02_transformer_bert_${flag})
+endforeach()

@@ -23,7 +23,7 @@ namespace mdl {
 		 */
 		const DataType& datatype() const {
 			static DataType inttype = PrimitiveType::integer;
-			static DataType floattype = PrimitiveType::floating;
+			static DataType floattype = PrimitiveType::float32;
 			return std::visit(
 					mdl::overloaded{
 							[&](const int&) -> const DataType& { return inttype; },

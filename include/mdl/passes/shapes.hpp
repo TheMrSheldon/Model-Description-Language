@@ -117,7 +117,7 @@ namespace mdl::shapes {
 	 * @brief Whether a computed type matches a declared one (e.g. a function's result against its declared return type).
 	 * @details Only definite mismatches count: the shapes are compared from the end up to the first `...` of either,
 	 * and a dimension that is not constant matches any. With @p elements, floating-point and integer/boolean element
-	 * types differ as well.
+	 * types differ as well. Float tensors of different float types never match (conversions are explicit).
 	 */
 	bool matches(const DataType& declared, const DataType& computed, bool elements = true);
 
@@ -127,6 +127,12 @@ namespace mdl::shapes {
 	 * @return a description of the mismatch, or std::nullopt.
 	 */
 	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+
+	/**
+	 * @brief The float type of float results of non-float values (e.g. the mean of integers, or `x.mask` of an integer
+	 * tensor): the type that `float` stands for (see parser::ParseOptions::defaultFloat).
+	 */
+	void setDefaultFloat(PrimitiveType type);
 
 	/** @brief A type for messages, e.g. `float[..., 768]`. */
 	std::string str(const DataType& type);

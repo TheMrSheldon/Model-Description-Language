@@ -27,7 +27,7 @@ namespace ph = std::placeholders;
  */
 static FunctionDecl makeDecl(Computegraph& graph) {
 	const Node& paramX = graph.addInputNode(PrimitiveType::integer);
-	const Node& paramY = graph.addInputNode(PrimitiveType::floating);
+	const Node& paramY = graph.addInputNode(PrimitiveType::float32);
 	const Node& paramZ = graph.addInputNode(PrimitiveType::integer);
 	// output: TENSOR_ADD(x, y)  [z is intentionally unused in the output]
 	const Node& output = graph.addInvocationNode(
@@ -149,7 +149,7 @@ TEST_CASE("bind assigns correct DataType to new parameters from placeholder posi
 
 	REQUIRE(result.parameters.size() == 2);
 	// DataType's variant members lack operator==; extract PrimitiveType directly.
-	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) == PrimitiveType::floating); // _1 ← y
+	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) == PrimitiveType::float32); // _1 ← y
 	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) == PrimitiveType::integer);	 // _2 ← z
 }
 
@@ -181,7 +181,7 @@ TEST_CASE("bind with swapped placeholders reorders parameter types", "[bind]") {
 	CHECK(std::get<PrimitiveType>(result.parameters[0].second.get().datatype()) ==
 		  PrimitiveType::integer); // _1 ← z:int
 	CHECK(std::get<PrimitiveType>(result.parameters[1].second.get().datatype()) ==
-		  PrimitiveType::floating); // _2 ← y:float
+		  PrimitiveType::float32); // _2 ← y:float
 }
 
 TEST_CASE("bind with swapped placeholders reorders parameter names", "[bind]") {

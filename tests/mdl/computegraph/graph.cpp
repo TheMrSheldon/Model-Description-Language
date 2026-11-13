@@ -19,7 +19,7 @@ TEST_CASE("constants are interned", "[graph][cse]") {
 
 TEST_CASE("builtin invocations are interned", "[graph][cse]") {
 	Computegraph graph;
-	DataType type = TensorType{PrimitiveType::floating, {4u}};
+	DataType type = TensorType{PrimitiveType::float32, {4u}};
 	const Node& x = graph.addInputNode(type, "x");
 	const Node& y = graph.addInputNode(type, "y");
 	const Node& a = graph.addInvocationNode(FunctionIDs::TENSOR_PROD, {x, y});

@@ -27,7 +27,7 @@
 
 static std::string elemTypeStr(mdl::PrimitiveType pt) {
     switch (pt) {
-    case mdl::PrimitiveType::floating: return "f32";
+    case mdl::PrimitiveType::float32: return "f32";
     case mdl::PrimitiveType::integer:  return "i32";
     case mdl::PrimitiveType::uint:     return "ui32";
     case mdl::PrimitiveType::boolean:  return "i1";
@@ -549,7 +549,7 @@ static std::string translateFuncToMlir(
                     float invN = 1.0f / std::max(lastDimF(*tt), 1.0f);
                     std::string sc = bindOp(std::format(
                         "stablehlo.constant dense<{:.8e}> : tensor<f32>", invN), "invn");
-                    std::string scBc = broadcastTo(sc, mdl::PrimitiveType::floating, sumSSA, sumDT);
+                    std::string scBc = broadcastTo(sc, mdl::PrimitiveType::float32, sumSSA, sumDT);
                     return bindOp(std::format("stablehlo.multiply {}, {} : {}", sumSSA, scBc, sumType));
                 }
 
@@ -567,7 +567,7 @@ static std::string translateFuncToMlir(
                     // sum(x), E[x]
                     std::string sx  = emitReduce(arg(0), inType, sumType, et,
                         "0.0", "stablehlo.add", axis);
-                    std::string scBc = broadcastTo(sc, mdl::PrimitiveType::floating, sx, sumDT);
+                    std::string scBc = broadcastTo(sc, mdl::PrimitiveType::float32, sx, sumDT);
                     std::string ex  = bindOp(std::format("stablehlo.multiply {}, {} : {}",
                         sx, scBc, sumType), "ex");
                     // sum(x²), E[x²]

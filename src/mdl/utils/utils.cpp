@@ -33,10 +33,12 @@ namespace std {
 std::string std::to_string(const PrimitiveType& prim) {
 	static std::string_view names[]{
 			[std::to_underlying(PrimitiveType::error)] = "<error>",
-			[std::to_underlying(PrimitiveType::floating)] = "float",
+			[std::to_underlying(PrimitiveType::float32)] = "float32",
 			[std::to_underlying(PrimitiveType::integer)] = "int",
 			[std::to_underlying(PrimitiveType::uint)] = "uint",
-			[std::to_underlying(PrimitiveType::boolean)] = "bool"
+			[std::to_underlying(PrimitiveType::boolean)] = "bool",
+			[std::to_underlying(PrimitiveType::float16)] = "float16",
+			[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16"
 	};
 	return std::string{names[std::to_underlying(prim)]};
 }

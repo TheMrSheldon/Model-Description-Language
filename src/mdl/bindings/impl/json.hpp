@@ -53,8 +53,12 @@ namespace mdl::bindings::detail {
 
 	inline std::string jsonDtype(PrimitiveType p) {
 		switch (p) {
-		case PrimitiveType::floating:
+		case PrimitiveType::float32:
 			return "\"float32\"";
+		case PrimitiveType::float16:
+			return "\"float16\"";
+		case PrimitiveType::bfloat16:
+			return "\"bfloat16\"";
 		case PrimitiveType::integer:
 			return "\"int32\"";
 		case PrimitiveType::uint:

@@ -46,8 +46,12 @@ static ::tvm::runtime::DataType toTVMType(mdl::PrimitiveType p) {
 	switch (p) {
 	case mdl::PrimitiveType::boolean:
 		return ::tvm::runtime::DataType::Bool();
-	case mdl::PrimitiveType::floating:
+	case mdl::PrimitiveType::float32:
 		return ::tvm::runtime::DataType::Float(32);
+	case mdl::PrimitiveType::float16:
+		return ::tvm::runtime::DataType::Float(16);
+	case mdl::PrimitiveType::bfloat16:
+		return ::tvm::runtime::DataType::BFloat(16);
 	case mdl::PrimitiveType::uint:
 		return ::tvm::runtime::DataType::UInt(32);
 	case mdl::PrimitiveType::integer:
@@ -329,8 +333,8 @@ static std::optional<double> evalScalar(const mdl::Node& node, const mdl::ArgVal
 	);
 }
 
-// Promote a PrimValue(int) to a float32 0-D Constant for use in arithmetic ops.
-static ::tvm::relax::Expr promoteToFloatTensor(const ::tvm::relax::Expr& e) {
+// Promote a PrimValue(int) to a 0-D float Constant (of @p dtype) for use in arithmetic ops.
+static ::tvm::relax::Expr promoteToFloatTensor(const ::tvm::relax::Expr& e, ::tvm::DataType dtype) {
 	const auto* pv = e.as<::tvm::relax::PrimValueNode>();
 	if (!pv)
 		return e;
@@ -339,10 +343,7 @@ static ::tvm::relax::Expr promoteToFloatTensor(const ::tvm::relax::Expr& e) {
 		fval = static_cast<float>(imm->value);
 	else if (const auto* fimm = pv->value.as<::tvm::FloatImmNode>())
 		fval = static_cast<float>(fimm->value);
-	DLDevice dev = {kDLCPU, 0};
-	auto data = ::tvm::runtime::Tensor::Empty(::tvm::ffi::Shape{}, ::tvm::DataType::Float(32), dev);
-	data.CopyFromBytes(&fval, sizeof(float));
-	return ::tvm::relax::Constant(data);
+	return mdl::backend::tvm::makeFloatConst(fval, dtype);
 }
 
 static ::tvm::relax::Expr translateRelax(
@@ -356,17 +357,32 @@ static ::tvm::relax::Expr translateRelax(
 	using FIDs = mdl::builtins::FunctionIDs;
 	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND ||
 					  node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE); // integer arguments stay integers
+	// The element type of the result: float constants are created in it (the operands have it already: conversions
+	// between float types are explicit CASTs).
+	const auto* tensorType = std::get_if<mdl::TensorType>(&node.type);
+	const auto* primType = std::get_if<mdl::PrimitiveType>(&node.type);
+	const mdl::PrimitiveType element = tensorType ? tensorType->type : primType ? *primType : mdl::PrimitiveType::error;
+	const auto floatType = mdl::isFloat(element) ? toTVMType(element) : ::tvm::DataType::Float(32);
+	auto isFloatTensor = [](const ::tvm::relax::Expr& e) {
+		const auto* sinfo = e->struct_info_.as<::tvm::relax::TensorStructInfoNode>();
+		return sinfo != nullptr && !sinfo->IsUnknownDtype() && sinfo->dtype.is_float() || sinfo != nullptr && sinfo->dtype.is_bfloat16();
+	};
 	std::vector<::tvm::relax::Expr> translatedArgs;
 	translatedArgs.reserve(node.arguments.size());
-	for (const auto& argRef : node.arguments) {
-		if (!isShapeOp) {
+	for (size_t i = 0; i < node.arguments.size(); ++i) {
+		const auto& argRef = node.arguments[i];
+		if (!isShapeOp && node.id != FIDs::CAST) {
 			if (auto value = evalScalar(argRef.get(), argVals)) {
-				translatedArgs.push_back(mdl::backend::tvm::makeFloatConst(static_cast<float>(*value)));
+				translatedArgs.push_back(mdl::backend::tvm::makeFloatConst(static_cast<float>(*value), floatType));
 				continue;
 			}
 		}
 		auto arg = translateRelax(bb, cache, params, argRef.get(), argVals);
-		translatedArgs.push_back(isShapeOp ? arg : promoteToFloatTensor(arg));
+		if (!isShapeOp)
+			arg = promoteToFloatTensor(arg, floatType);
+		if (node.id == FIDs::CAST && i == 0) // the explicit conversion
+			arg = bb->Emit(mdl::backend::tvm::callRelaxOp("relax.op.astype", arg, floatType), "cast");
+		translatedArgs.push_back(arg);
 	}
 
 	auto& fn = mdl::backend::tvm::relaxFunctions[std::to_underlying(node.id)];
@@ -375,9 +391,12 @@ static ::tvm::relax::Expr translateRelax(
 
 	// Emit non-leaf expressions into the dataflow block
 	if (!result.as<::tvm::relax::VarNode>() && !result.as<::tvm::relax::PrimValueNode>() &&
-		!result.as<::tvm::relax::ShapeExprNode>() && !result.as<::tvm::relax::ConstantNode>()) {
-		return bb->Emit(result, "v");
-	}
+		!result.as<::tvm::relax::ShapeExprNode>() && !result.as<::tvm::relax::ConstantNode>())
+		result = bb->Emit(result, "v");
+	// Results that a translation computes in float32 (e.g. comparisons, one-hot vectors, kernels that accumulate in
+	// float32) are converted back to the node's type.
+	if (mdl::isFloat(element) && isFloatTensor(result) && mdl::backend::tvm::dtypeOf(result) != floatType)
+		result = bb->Emit(mdl::backend::tvm::callRelaxOp("relax.op.astype", result, floatType), "v");
 	return result;
 }
 

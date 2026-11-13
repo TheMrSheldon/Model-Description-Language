@@ -51,6 +51,10 @@ namespace mdl::bindings {
 				return "torch.int32";
 			case PrimitiveType::boolean:
 				return "torch.bool";
+			case PrimitiveType::float16:
+				return "torch.float16";
+			case PrimitiveType::bfloat16:
+				return "torch.bfloat16";
 			default:
 				return "torch.float32";
 			}
@@ -151,11 +155,12 @@ namespace mdl::bindings {
 				<< ".forward_weights], *outputs, buffer)\n"
 				<< "        ctx.owner, ctx.buffer, ctx.dims = owner, buffer, dims\n"
 				<< "        ctx.output_shapes = [o.shape for o in outputs]\n"
+				<< "        ctx.output_dtypes = [o.dtype for o in outputs]\n"
 				<< "        return outputs[0] if len(outputs) == 1 else tuple(outputs)\n\n"
 				<< "    @staticmethod\n"
 				<< "    def backward(ctx, *grads):\n"
 				<< "        owner = ctx.owner\n"
-				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s) for g, s in zip(grads, ctx.output_shapes)]\n"
+				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s, dtype=d) for g, s, d in zip(grads, ctx.output_shapes, ctx.output_dtypes)]\n"
 				<< "        # The compiled backward pass adds the gradients to its output buffers: start from zero.\n"
 				<< "        gradients = {p: torch.zeros_like(owner.weights[p]) for p in " << className(fw) << ".trainable}\n";
 			// The outputs of the backward pass, in order: gradients of weights (by path) and of inputs (by name).
@@ -165,7 +170,7 @@ namespace mdl::bindings {
 					continue;
 				const bool isInput = std::find(inputNames.begin(), inputNames.end(), o.gradientOf) != inputNames.end();
 				if (isInput)
-					out << "torch.zeros(" << shapeExpr(o) << ", dtype=torch.float32), ";
+					out << "torch.zeros(" << shapeExpr(o) << ", dtype=" << torchDtype(o.dtype) << "), ";
 				else
 					out << "gradients[\"" << o.gradientOf << "\"], ";
 			}

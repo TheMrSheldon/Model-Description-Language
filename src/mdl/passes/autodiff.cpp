@@ -79,6 +79,22 @@ namespace mdl::autodiff {
 				return op(FIDs::COLLAPSE_SUM_LIKE, {g, like});
 			}
 
+			/** @brief @p g in the (float) element type of @p like (no conversion if it has it already). */
+			const Node& castLike(const Node& g, const Node& like) {
+				auto element = [](const Node& n) -> std::optional<PrimitiveType> {
+					const DataType& t = getDataType(n);
+					if (const auto* p = std::get_if<PrimitiveType>(&t))
+						return *p;
+					if (const auto* tensor = std::get_if<TensorType>(&t))
+						return tensor->type;
+					return std::nullopt;
+				};
+				const auto from = element(g), to = element(like);
+				if (!from || !to || *from == *to || !isFloat(*from) || !isFloat(*to))
+					return g;
+				return op(FIDs::CAST, {g, graph.addConstNode(Atomic{static_cast<int>(*to)})});
+			}
+
 			const Node& zerosLike(const Node& like) {
 				return op(FIDs::BROADCAST_LIKE, {constant(0.0), like});
 			}
@@ -236,6 +252,8 @@ namespace mdl::autodiff {
 				return b.op(FIDs::SCATTER_ADD_ROWS, {g, *other, x});
 			case FIDs::SCATTER_ADD_ROWS:
 				return b.op(FIDs::TAKE, {g, *other});
+			case FIDs::CAST: // the gradient in the argument's type
+				return b.castLike(g, x);
 			default:
 				throw NoGradientRule{inv.id};
 			}
@@ -264,7 +282,8 @@ namespace mdl::autodiff {
 				return arg != 0; // not the condition
 			case FIDs::SELECT:
 			case FIDs::UNSELECT_LIKE:
-				return arg == 0; // not the axis, index, or reference
+			case FIDs::CAST:
+				return arg == 0; // not the axis, index, reference, or type
 			default:
 				return true;
 			}
@@ -379,9 +398,9 @@ namespace mdl::autodiff {
 		}
 		bool isFloating(const DataType& type) {
 			if (const auto* p = std::get_if<PrimitiveType>(&type))
-				return *p == PrimitiveType::floating;
+				return isFloat(*p);
 			const auto* t = std::get_if<TensorType>(&type);
-			return t != nullptr && t->type == PrimitiveType::floating;
+			return t != nullptr && isFloat(t->type);
 		}
 
 		bool isScalar(const DataType& type) {

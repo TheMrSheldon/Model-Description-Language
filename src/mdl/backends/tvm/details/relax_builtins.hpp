@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -71,22 +72,37 @@ static inline ::tvm::relax::Expr reduceLastAxis(
     return callRelaxOp(opName, x, axis, keepdims);
 }
 
-/** Create a 0-D float32 Constant from a PrimExpr (must be IntImm or FloatImm). */
-static inline ::tvm::relax::Expr makeFloatConst(float val) {
+/** The element type of a tensor expression (float32 if unknown). */
+static inline ::tvm::DataType dtypeOf(const ::tvm::relax::Expr& e) {
+    const auto* sinfo = e->struct_info_.as<::tvm::relax::TensorStructInfoNode>();
+    return sinfo != nullptr && !sinfo->IsUnknownDtype() ? sinfo->dtype : ::tvm::DataType::Float(32);
+}
+
+/** Create a 0-D float Constant of @p dtype (float32, float16, or bfloat16). */
+static inline ::tvm::relax::Expr makeFloatConst(float val, ::tvm::DataType dtype = ::tvm::DataType::Float(32)) {
     DLDevice dev{kDLCPU, 0};
-    auto data = ::tvm::runtime::Tensor::Empty(
-        ::tvm::ffi::Shape{}, ::tvm::DataType::Float(32), dev);
-    data.CopyFromBytes(&val, sizeof(float));
+    auto data = ::tvm::runtime::Tensor::Empty(::tvm::ffi::Shape{}, dtype, dev);
+    if (dtype == ::tvm::DataType::Float(16)) {
+        const _Float16 half = static_cast<_Float16>(val);
+        data.CopyFromBytes(&half, sizeof(half));
+    } else if (dtype == ::tvm::DataType::BFloat(16)) {
+        uint32_t bits;
+        std::memcpy(&bits, &val, sizeof(bits));
+        const uint16_t bf16 = static_cast<uint16_t>((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16); // round to nearest even
+        data.CopyFromBytes(&bf16, sizeof(bf16));
+    } else {
+        data.CopyFromBytes(&val, sizeof(float));
+    }
     return ::tvm::relax::Constant(data);
 }
 
-/** The size of the last dimension as a float divisor (a constant if static, else the symbolic size). */
+/** The size of the last dimension as a float divisor (a constant if static, else the symbolic size), in x's type. */
 static inline ::tvm::relax::Expr lastDimDivisor(const ::tvm::relax::Expr& x) {
     auto shape = tensorShape(x);
     assert(!shape.empty() && "reduction over a tensor without dimensions");
     if (const auto* imm = shape.back().template as<::tvm::IntImmNode>())
-        return makeFloatConst(static_cast<float>(imm->value));
-    return ::tvm::relax::PrimValue(::tvm::cast(::tvm::DataType::Float(32), shape.back()));
+        return makeFloatConst(static_cast<float>(imm->value), dtypeOf(x));
+    return ::tvm::relax::PrimValue(::tvm::cast(dtypeOf(x), shape.back()));
 }
 
 static inline ::tvm::PrimExpr shapeProduct(const std::vector<::tvm::PrimExpr>& shape, size_t from = 0) {
@@ -114,7 +130,9 @@ static inline ::tvm::relax::Expr scatterAddRows(
     auto flat = [&](const ::tvm::relax::Expr& x, ::tvm::ffi::Array<::tvm::PrimExpr> shape, const char* hint) {
         return bb->Emit(callRelaxOp("relax.op.reshape", x, ::tvm::relax::ShapeExpr(shape)), hint);
     };
-    auto g2 = flat(g, {N, R}, "g_rows");
+    // The kernel adds in float32 (also for 16-bit gradients; the translation converts the result).
+    auto g32 = dtypeOf(g) == ::tvm::DataType::Float(32) ? g : bb->Emit(callRelaxOp("relax.op.astype", g, ::tvm::DataType::Float(32)), "g32");
+    auto g2 = flat(g32, {N, R}, "g_rows");
     auto ids1 = flat(ids, {N}, "ids_flat");
     const auto idsType = ids->struct_info_.as<::tvm::relax::TensorStructInfoNode>()->dtype;
 
@@ -171,7 +189,9 @@ static inline ::tvm::relax::Expr unselectLike(
     const ::tvm::PrimExpr P = shapeProduct(std::vector<::tvm::PrimExpr>(likeShape.begin(), likeShape.begin() + a));
     const ::tvm::PrimExpr A = likeShape.at(a);
     const ::tvm::PrimExpr Q = shapeProduct(likeShape, a + 1);
-    auto g2 = bb->Emit(callRelaxOp("relax.op.reshape", g, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>{P, Q})), "g_flat");
+    // A float32 kernel (the translation converts the result to the gradient's type).
+    auto g32 = dtypeOf(g) == ::tvm::DataType::Float(32) ? g : bb->Emit(callRelaxOp("relax.op.astype", g, ::tvm::DataType::Float(32)), "g32");
+    auto g2 = bb->Emit(callRelaxOp("relax.op.reshape", g32, ::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>{P, Q})), "g_flat");
 
     tirx::Var p("p", i64), q("q", i64), n("n", i64);
     auto G = tirx::decl_buffer({p, q}, ::tvm::DataType::Float(32), "g");
@@ -468,11 +488,11 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         for (const auto& d : tensorShape(ts[0]))
             count = count * ::tvm::cast(::tvm::DataType::Int(64), d);
         if (const auto* imm = ::tvm::arith::Analyzer().Simplify(count).template as<::tvm::IntImmNode>())
-            return callRelaxOp("relax.op.divide", s, makeFloatConst(static_cast<float>(imm->value)));
+            return callRelaxOp("relax.op.divide", s, makeFloatConst(static_cast<float>(imm->value), dtypeOf(ts[0])));
         // Symbolic number of elements: counted as a tensor (a PrimValue divisor would leave the dimension variables
         // unbound in the kernel).
         ::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[0]));
-        auto ones = emitAs(bb, callRelaxOp("relax.op.broadcast_to", makeFloatConst(1.0f), ::tvm::relax::ShapeExpr(shape)), "ones");
+        auto ones = emitAs(bb, callRelaxOp("relax.op.broadcast_to", makeFloatConst(1.0f, dtypeOf(ts[0])), ::tvm::relax::ShapeExpr(shape)), "ones");
         auto n = emitAs(bb, callRelaxOp("relax.op.sum", ones, all, false), "count");
         return callRelaxOp("relax.op.divide", s, n);
     },
@@ -519,6 +539,8 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
         const int64_t index = extractPrim(ts[2]).template as<::tvm::IntImmNode>()->value;
         return unselectLike(bb, ts[0], axis, index, ts[3]);
     },
+    /** CAST — converted to the node's element type by the translation (see translateRelax) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
 });
 
 // Every builtin needs a translation (the table is positional).

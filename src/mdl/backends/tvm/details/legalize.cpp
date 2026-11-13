@@ -369,6 +369,17 @@ namespace mdl::backend::tvm {
 
 		// ── vendor kernels (mdl_kernels) ───────────────────────────────────────────
 
+		/** @brief The suffix of the vendor kernels for the element type @p dtype (`mdl_matmul_bf16`), if any. */
+		std::optional<std::string> kernelSuffix(::tvm::DataType dtype) {
+			if (dtype == ::tvm::DataType::Float(32))
+				return "f32";
+			if (dtype == ::tvm::DataType::BFloat(16))
+				return "bf16";
+			if (dtype == ::tvm::DataType::Float(16))
+				return "f16";
+			return std::nullopt;
+		}
+
 		/**
 		 * @brief Lowers `alpha * (a @ op(b)) + bias` to mdl_matmul_f32 if the shapes are supported (a `[..., M, K]`
 		 * with 2-D b, or equal-rank batched a and b where b's batch is 1 or equal to a's batch).
@@ -379,7 +390,7 @@ namespace mdl::backend::tvm {
 		) {
 			const auto* ai = tensorInfo(a);
 			const auto* bi = tensorInfo(b);
-			if (!ai || !bi || ai->dtype != ::tvm::DataType::Float(32) || bi->dtype != ::tvm::DataType::Float(32))
+			if (!ai || !bi || ai->dtype != bi->dtype || !kernelSuffix(ai->dtype))
 				return std::nullopt;
 			auto as = shapeOf(a), bs = shapeOf(b);
 			const size_t ra = as.size(), rb = bs.size();
@@ -418,11 +429,11 @@ namespace mdl::backend::tvm {
 			}
 			outShape.push_back(N);
 
-			ExternCall ext{bb, "mdl_matmul_f32"};
+			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype)};
 			auto pa = ext.input(a, "A");
 			auto pb = ext.input(b, "B");
 			PrimExpr pbias = bias ? ext.input(*bias, "bias") : pa; // ignored if has_bias == 0
-			auto pout = ext.output(outShape, ::tvm::DataType::Float(32));
+			auto pout = ext.output(outShape, ai->dtype);
 			auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
 			return ext.finish(
 					{pout, pa, pb, pbias, ::tvm::IntImm(::tvm::DataType::Int(32), bias ? 1 : 0), i64(batch),
@@ -599,11 +610,11 @@ namespace mdl::backend::tvm {
 					const auto* attrs = call->attrs.as<::tvm::relax::SoftmaxAttrs>();
 					const auto& x = call->args[0];
 					auto shape = shapeOf(x);
-					if (vendor && isLastAxis(attrs->axis, shape.size()) &&
-						tensorInfo(x)->dtype == ::tvm::DataType::Float(32)) {
-						ExternCall ext{bb, "mdl_softmax_f32"};
+					const auto dtype = tensorInfo(x)->dtype;
+					if (vendor && isLastAxis(attrs->axis, shape.size()) && kernelSuffix(dtype)) {
+						ExternCall ext{bb, "mdl_softmax_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
-						auto pout = ext.output(shape, ::tvm::DataType::Float(32));
+						auto pout = ext.output(shape, dtype);
 						return ext.finish({pout, px, product(shape, 0, shape.size() - 1), product(shape, shape.size() - 1, shape.size())});
 					}
 					TECall te{bb, "softmax"};
@@ -612,10 +623,11 @@ namespace mdl::backend::tvm {
 		map.Set("relax.nn.gelu", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto& x = call->args[0];
 					auto shape = shapeOf(x);
-					if (vendor && tensorInfo(x)->dtype == ::tvm::DataType::Float(32)) {
-						ExternCall ext{bb, "mdl_gelu_f32"};
+					const auto dtype = tensorInfo(x)->dtype;
+					if (vendor && kernelSuffix(dtype)) {
+						ExternCall ext{bb, "mdl_gelu_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
-						auto pout = ext.output(shape, ::tvm::DataType::Float(32));
+						auto pout = ext.output(shape, dtype);
 						return ext.finish({pout, px, product(shape, 0, shape.size())});
 					}
 					TECall te{bb, "gelu"};
@@ -662,13 +674,14 @@ namespace mdl::backend::tvm {
 					const auto &x = call->args[0], &gamma = call->args[1], &beta = call->args[2];
 					auto shape = shapeOf(x);
 					const bool lastAxis = attrs->axes.size() == 1 && isLastAxis(attrs->axes[0]->value, shape.size());
-					if (vendor && lastAxis && attrs->center && attrs->scale &&
-						tensorInfo(x)->dtype == ::tvm::DataType::Float(32)) {
-						ExternCall ext{bb, "mdl_layer_norm_f32"};
+					const auto dtype = tensorInfo(x)->dtype;
+					if (vendor && lastAxis && attrs->center && attrs->scale && kernelSuffix(dtype) &&
+						tensorInfo(gamma)->dtype == dtype && tensorInfo(beta)->dtype == dtype) {
+						ExternCall ext{bb, "mdl_layer_norm_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
 						auto pg = ext.input(gamma, "gamma");
 						auto pb = ext.input(beta, "beta");
-						auto pout = ext.output(shape, ::tvm::DataType::Float(32));
+						auto pout = ext.output(shape, dtype);
 						return ext.finish(
 								{pout, px, pg, pb, product(shape, 0, shape.size() - 1),
 								 product(shape, shape.size() - 1, shape.size()),
