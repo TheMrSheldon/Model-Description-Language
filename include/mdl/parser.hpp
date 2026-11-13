@@ -9,6 +9,13 @@
 #include <vector>
 
 namespace mdl::parser {
+	/** @brief How a diagnostic is reported (like g++'s -Werror=x, -Wx, -Wno-x). */
+	enum class Diagnostic {
+		error,	 ///< an error (the default for implicit float conversions)
+		warning, ///< a warning; the compiler does what the diagnostic is about (e.g. inserts the conversion)
+		ignored, ///< silently done
+	};
+
 	struct ParseOptions {
 		/**
 		 * @brief Directories that are searched for imported files (after the directory of the importing file).
@@ -24,6 +31,16 @@ namespace mdl::parser {
 		 * are not affected.
 		 */
 		PrimitiveType defaultFloat = PrimitiveType::float32;
+		/**
+		 * @brief Implicit conversions between float types (`-W[no-|error=]float-widening`, `float-narrowing`):
+		 * widening converts bfloat16/float16 to float32 (costs memory and time), narrowing converts float32 to a 16-bit
+		 * type or between bfloat16 and float16 (loses precision). They apply to operands of different float types (both
+		 * are converted to the wider type, float32 for bfloat16 with float16), to arguments (to the parameter's type),
+		 * and to results (to the declared type). By default both are errors: conversions are written explicitly
+		 * (`float32(x)`).
+		 */
+		Diagnostic floatWidening = Diagnostic::error;
+		Diagnostic floatNarrowing = Diagnostic::error;
 	};
 
 	/**

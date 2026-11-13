@@ -160,6 +160,14 @@ declared one are errors; a conversion is written with the type's name:
 ```dlm
 float32[..., 4] f(x: float32[..., 4], w: bfloat16[4]) => x * float32(w);
 ```
+Implicit conversions can be enabled like g++ diagnostics, separately for widening (bfloat16/float16 to float32) and
+narrowing (float32 to 16 bits, or between bfloat16 and float16, which is lossy in both directions): `-Werror=<name>`
+(the default) reports an error, `-W<name>` a warning and inserts the conversion, `-Wno-<name>` inserts it silently, with
+the names `float-widening` and `float-narrowing`. Operands of different types are then both converted to the wider type
+(float32 for bfloat16 with float16), arguments to their parameter's type, and results to the declared type.
+```
+warning: Operator *: implicit widening from bfloat16 to float32 [-Wfloat-widening]
+```
 With `--float bf16`, `float` *is* bfloat16, so `bfloat16` and `float` values combine without conversion. Literals have
 no precision of their own: they take the type of the tensor they are combined with.
 

@@ -50,6 +50,7 @@ struct CompileArgs {
 	std::vector<std::string> ellipsisRanks;
 	std::vector<std::string> checkpoint;
 	mdl::PrimitiveType defaultFloat = mdl::PrimitiveType::float32;
+	std::vector<std::string> warnings;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
 	mdl::CompileOptions compileOpts;
@@ -88,7 +89,26 @@ static void runCompileCommand(const CompileArgs& args) {
 	if (output.has_parent_path())
 		std::filesystem::create_directories(output.parent_path());
 	/** \todo: handle multiple input files */
-	auto result = mdl::parser::parse(args.inputs[0], {.importDirs = args.importdirs, .defaultFloat = args.defaultFloat});
+	mdl::parser::ParseOptions parseOptions{.importDirs = args.importdirs, .defaultFloat = args.defaultFloat};
+	// -W<name>: warning, -Wno-<name>: ignored, -Werror=<name>: error.
+	for (const auto& w : args.warnings) {
+		auto level = mdl::parser::Diagnostic::warning;
+		std::string name = w;
+		if (name.starts_with("no-")) {
+			level = mdl::parser::Diagnostic::ignored;
+			name = name.substr(3);
+		} else if (name.starts_with("error=")) {
+			level = mdl::parser::Diagnostic::error;
+			name = name.substr(6);
+		}
+		if (name == "float-widening")
+			parseOptions.floatWidening = level;
+		else if (name == "float-narrowing")
+			parseOptions.floatNarrowing = level;
+		else
+			throw std::runtime_error("unknown diagnostic -W" + w + " (known: float-widening, float-narrowing)");
+	}
+	auto result = mdl::parser::parse(args.inputs[0], parseOptions);
 	if (!result.has_value())
 		exit(1);
 	auto& program = result.value();
@@ -243,6 +263,13 @@ int main(int argc, char* argv[]) {
 							{"f16", mdl::PrimitiveType::float16}},
 					CLI::ignore_case
 			));
+	app.add_option(
+			   "-W", args.warnings,
+			   "Diagnostics like g++: -W<name> warns, -Wno-<name> ignores, -Werror=<name> makes it an error. "
+			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or between "
+			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. Repeatable."
+	)
+			->type_name("[no-|error=]NAME");
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,

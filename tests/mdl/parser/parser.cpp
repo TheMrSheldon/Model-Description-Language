@@ -455,3 +455,29 @@ TEST_CASE("`float` stands for the configured default float type", "[parser][type
 	CHECK(std::get<InvocationNode>(f.outputs[0].get()).id == builtins::FunctionIDs::TENSOR_PROD);
 	CHECK(std::holds_alternative<ParameterNode>(std::get<InvocationNode>(f.outputs[0].get()).arguments[1].get()));
 }
+
+TEST_CASE("implicit float conversions can be warnings or allowed (-Wfloat-widening, -Wfloat-narrowing)", "[parser][types]") {
+	const std::string source = R"(
+		module M[] {
+			W: bfloat16[4]
+			float32[..., 4] widen(x: float32[..., 4]) => x * W;
+			bfloat16[..., 4] narrow(x: float32[..., 4]) => x;
+		}
+	)";
+	auto parseWith = [&](parser::Diagnostic widening, parser::Diagnostic narrowing) {
+		std::istringstream stream{source};
+		return parser::parse(stream, "<test>", {.floatWidening = widening, .floatNarrowing = narrowing});
+	};
+	using D = parser::Diagnostic;
+	CHECK_FALSE(parseWith(D::error, D::error).has_value());
+	CHECK_FALSE(parseWith(D::warning, D::error).has_value()); // narrowing is still an error
+	CHECK_FALSE(parseWith(D::error, D::ignored).has_value()); // widening is still an error
+	auto unit = parseWith(D::warning, D::ignored);
+	REQUIRE(unit.has_value());
+	// The conversions are inserted: W is widened for the product, the result narrowed to the declared type.
+	const auto& widen = std::get<InvocationNode>(moduleFunction(*unit, "M", "widen").outputs[0].get());
+	CHECK(std::get<InvocationNode>(widen.arguments[1].get()).id == builtins::FunctionIDs::CAST);
+	const auto& narrow = moduleFunction(*unit, "M", "narrow").outputs[0].get();
+	CHECK(std::get<InvocationNode>(narrow).id == builtins::FunctionIDs::CAST);
+	CHECK(shapes::str(getDataType(narrow)) == "bfloat16[..., 4]");
+}

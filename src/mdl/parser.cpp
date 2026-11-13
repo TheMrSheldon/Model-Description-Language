@@ -6,6 +6,7 @@
 #include <mdl/computegraphv2/object.hpp>
 #include <mdl/namespace.hpp>
 #include <mdl/passes/shapes.hpp>
+#include <mdl/utils/utils.hpp>
 #include <mdl/utils/einops.hpp>
 
 #include <mdlBaseVisitor.h>
@@ -843,9 +844,18 @@ namespace mdl {
 						)
 				);
 			}
-			// The results must have the declared types.
+			// The results must have the declared types (results of another float type are converted, if allowed).
 			for (size_t i = 0; i < std::min(decl.returnTypes.size(), decl.outputs.size()); ++i) {
 				const DataType declared = std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i]);
+				if (const auto* t = std::get_if<TensorType>(&declared); t != nullptr && isFloat(t->type)) {
+					const Node* converted = implicitConversion(
+							decl.outputs[i].get(), t->type, ctx->IDENT()->getSymbol(),
+							std::format("Result {} of {}", i + 1, decl.name)
+					);
+					if (converted == nullptr)
+						continue; // reported
+					decl.outputs[i] = std::cref(*converted);
+				}
 				if (!shapes::matches(declared, getDataType(decl.outputs[i].get()))) {
 					auto* tok = ctx->IDENT()->getSymbol();
 					errorlistener->semanticError(
@@ -1265,6 +1275,44 @@ namespace mdl {
 			return static_cast<const Node*>(&result->get());
 		}
 
+		/** @brief The float element type of a tensor node, if it has one. */
+		static std::optional<PrimitiveType> floatTensorType(const Node& node) {
+			const auto* t = std::get_if<TensorType>(&getDataType(node));
+			return t != nullptr && isFloat(t->type) ? std::optional{t->type} : std::nullopt;
+		}
+
+		/**
+		 * @brief Converts @p x to the float type @p target where the language allows an implicit conversion (see
+		 * ParseOptions::floatWidening and floatNarrowing); reports it at @p tok as configured.
+		 * @return the (converted) value, or nullptr if the conversion is an error (reported).
+		 */
+		const Node* implicitConversion(const Node& x, PrimitiveType target, antlr4::Token* tok, const std::string& what) {
+			const auto from = floatTensorType(x);
+			if (!from || *from == target)
+				return &x;
+			const bool widening = target == PrimitiveType::float32;
+			const auto level = widening ? options.floatWidening : options.floatNarrowing;
+			const std::string flag = widening ? "float-widening" : "float-narrowing";
+			if (level != parser::Diagnostic::ignored) {
+				const bool error = level == parser::Diagnostic::error;
+				errorlistener->semanticError(
+						error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning, tok,
+						tok->getLine(), tok->getCharPositionInLine(),
+						std::format(
+								"{}: implicit {} from {} to {}{} [-W{}{}]", what, widening ? "widening" : "narrowing",
+								std::to_string(*from), std::to_string(target),
+								error ? std::format(" (convert explicitly, e.g. {}(x))", std::to_string(target)) : "",
+								error ? "error=" : "", flag
+						)
+				);
+				if (error)
+					return nullptr;
+			}
+			return &graph().addInvocationNode(
+					builtins::FunctionIDs::CAST, {std::cref(x), std::cref(graph().addConstNode(Atomic{static_cast<int>(target)}))}
+			);
+		}
+
 		/** @brief @p type with float32 as its float element type (to check only the shape against a builtin). */
 		static DataType withoutFloatType(DataType type) {
 			if (auto* t = std::get_if<TensorType>(&type); t != nullptr && isFloat(t->type))
@@ -1379,6 +1427,21 @@ namespace mdl {
 			// The arguments must have the shapes of the parameters (definite mismatches only, see shapes::matches).
 			// (The builtins are generic in the float type: their parameters' float32 is a placeholder.)
 			const bool builtin = callee.name.starts_with("__builtin_");
+			// Arguments of another float type than their parameter: converted, if allowed.
+			for (size_t i = 0; !builtin && i < std::min(args.size(), callee.parameters.size()); ++i) {
+				const auto* param = std::get_if<TensorType>(&callee.parameters[i].second.get().type);
+				if (param == nullptr || !isFloat(param->type) || !floatTensorType(args[i].get()) ||
+					*floatTensorType(args[i].get()) == param->type)
+					continue;
+				const Node* converted = implicitConversion(
+						args[i].get(), param->type, ctx->args[i]->start,
+						std::format("Argument {} of {}", i + 1, callee.name)
+				);
+				if (converted == nullptr)
+					return &graph().addErrorNode();
+				args[i] = std::cref(*converted);
+				argtypes[i] = getDataType(*converted);
+			}
 			for (size_t i = 0; i < std::min(args.size(), callee.parameters.size()); ++i)
 				if (!shapes::matches(callee.parameters[i].second.get().type, builtin ? withoutFloatType(argtypes[i]) : argtypes[i], false)) {
 					auto* tok = ctx->args[i]->start;
@@ -1423,6 +1486,16 @@ namespace mdl {
 				for (const auto& arg : args)
 					inputs.push_back(&arg.get());
 				auto outputs = graph().addInvocationNode(callee, std::move(args));
+				// A builtin applied to operands that do not fit (e.g. float tensors of different types).
+				if (builtin && outputs && outputs->size() == 1)
+					if (const auto* inv = std::get_if<InvocationNode>(&outputs->front().get()))
+						if (auto problem = shapes::check(inv->id, inv->arguments)) {
+							auto* tok = ctx->func->start;
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
+									tok->getCharPositionInLine(), std::format("{}: {}", callee.name, *problem)
+							);
+						}
 				if (outputs) {
 					auto gradient = currentNamespace().get<Object>(callee.name + "_gradient");
 					if (const auto* decl = gradient ? std::get_if<FunctionDecl>(&gradient->get()) : nullptr) {
@@ -1463,6 +1536,14 @@ namespace mdl {
 				/** \todo in the future, we could try to infer despite the error nodes to recover from errors for the
 				 *  analysis and give further insightful hints. */
 				return &graph().addErrorNode();
+			}
+			// Operands of different float types: both to the wider type (float32 for bfloat16 with float16), if allowed.
+			if (auto l = floatTensorType(*left), r = floatTensorType(*right); l && r && *l != *r) {
+				const std::string what = std::format("Operator {}", ctx->bop->getText());
+				left = implicitConversion(*left, PrimitiveType::float32, ctx->bop, what);
+				right = implicitConversion(*right, PrimitiveType::float32, ctx->bop, what);
+				if (left == nullptr || right == nullptr)
+					return &graph().addErrorNode();
 			}
 			auto decl = getMember(
 					mdl::getDataType(*left), std::format("operator{}", ctx->bop->getText()), {mdl::getDataType(*right)}
