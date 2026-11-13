@@ -23,7 +23,8 @@ namespace mdl::masking {
 	 * @details Semantics like torch.masked: the values are dense, the mask says which ones are valid. Every dimension
 	 * whose size is the last dimension of `...` (shape inference identifies them, see mdl::shapes) is masked with the
 	 * mask's row of the batch dimension(s), e.g. both sequence dimensions of attention scores [heads, batch, seq, seq].
-	 * The pass inserts masking where masked elements would mix with valid ones:
+	 * The pass zeroes the masked positions of the floating-point inputs (so that all values at masked positions are
+	 * finite, whatever the caller passed there) and inserts masking where masked elements would mix with valid ones:
 	 *  - reductions over a masked dimension: `max`/`min` ignore masked elements, `sum` adds zeros, `mean` divides by the
 	 *    number of valid elements (likewise for `sum_all`/`mean_all`);
 	 *  - contractions (`@`) over a masked dimension: masked elements are zero;
@@ -31,19 +32,20 @@ namespace mdl::masking {
 	 * Elementwise operations need nothing: their masked elements stay masked. A function that does not use the mask has
 	 * no masking (no cost).
 	 *
+	 * Only values of masked type are masked: values computed from `x.data` and `x.mask` alone are plain (e.g.
+	 * `x.data + (x.mask - 1) * 3.4e38` before a softmax, see the std softmax of masked tensors), so their masked elements
+	 * are what the code made them.
+	 *
 	 * Apply it before differentiation: the gradient of the masked function is then the gradient of the masked
-	 * computation. Applying it again to the gradient function (sanitize) additionally zeroes masked positions in the
-	 * reductions of the backward pass (where the gradient is zero anyway), so that non-finite values at masked positions
-	 * cannot reach the weight gradients.
+	 * computation. Its backward pass needs no masking: the cotangents are zero at masked positions (the outputs are
+	 * zeroed there) and the values there are finite, so masked positions contribute exact zeros to the gradients.
 	 *
 	 * @param shapes the inferred shapes of @p func (see mdl::shapes::infer).
-	 * @param mask the mask input to use (e.g. of the function that was differentiated); nullptr to add a new input
-	 * `mask` (the last parameter of the result).
-	 * @return the masked function (same name) and its mask input, or an error (e.g. if a masked dimension cannot be
-	 * aligned with the mask).
+	 * @return the masked function (same name; the mask is its last parameter `mask`) and its mask input, or an error
+	 * (e.g. if a masked dimension cannot be aligned with the mask).
 	 */
 	std::expected<Masked, std::string> apply(
-			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes, const Node* mask = nullptr
+			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes
 	);
 
 } // namespace mdl::masking

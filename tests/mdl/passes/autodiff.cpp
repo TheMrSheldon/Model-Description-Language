@@ -298,3 +298,45 @@ TEST_CASE("with exact shapes, weight gradients have the weights' shapes for a mu
 	CHECK(shapes::str(*shapes->find(grad->outputs[1].get())) == "[3, 4]");
 	CHECK(shapes::str(*shapes->find(grad->outputs[2].get())) == "[3]");
 }
+
+TEST_CASE("a free function `f` with a function `f_gradient` uses it as its gradient", "[autodiff][custom]") {
+	// act_gradient is deliberately not the derivative of act (it uses cos), so its use is observable.
+	auto unit = parseOrFail(R"(
+		float[...] act(x: float[...]) => __builtin_exp(x);
+		float[...] act_gradient(x: float[...], dy: float[...]) => dy * __builtin_cos(x);
+		module M[] {
+			s: float[4]
+			float[..., 4] forward(x: float[..., 4]) => act(x * s);
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	auto grad = autodiff::vjp(unit.graph(), m.functions.at("forward"), weightPaths(m));
+	REQUIRE(grad.has_value());
+	CHECK(countReachable(*grad, builtins::FunctionIDs::COS) == 1);
+}
+
+TEST_CASE("the forward pass saves the input of an elementwise computation, not its intermediates", "[autodiff][split]") {
+	// GELU-like: the backward pass needs erf(h) and h; h (a matrix product) is saved, erf(h) is recomputed.
+	auto unit = parseOrFail(R"(
+		module M[] {
+			W: float[4, 4]
+			float[..., 4] forward(x: float[..., 4]) {
+				auto h = x @ W.T();
+				return h * 0.5 * (1 + __builtin_erf(h));
+			}
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	const auto& forward = m.functions.at("forward");
+	auto grad = autodiff::vjp(unit.graph(), forward, weightPaths(m));
+	REQUIRE(grad.has_value());
+	auto parts = autodiff::split(unit.graph(), *grad, forward.outputs.size());
+	REQUIRE(parts.has_value());
+	// Saved: x (for d_W) and h.
+	REQUIRE(parts->numResiduals == 2);
+	for (size_t i = 1; i <= parts->numResiduals; ++i) {
+		const Node& residual = parts->train.outputs[i].get();
+		const auto* inv = std::get_if<InvocationNode>(&residual);
+		CHECK((std::holds_alternative<InputNode>(residual) || (inv && inv->id == builtins::FunctionIDs::TENSOR_DOT)));
+	}
+}

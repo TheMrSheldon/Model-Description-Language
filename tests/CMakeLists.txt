@@ -15,6 +15,7 @@ add_executable(tests
     mdl/utils/pathpattern.cpp
     mdl/passes/autodiff.cpp
     mdl/passes/shapes.cpp
+    mdl/passes/masking.cpp
     mdl/runtime/safetensors.cpp
 )
 

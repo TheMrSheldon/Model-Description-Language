@@ -33,6 +33,13 @@ float[...] softmax_gradient(x: float[...], dy: float[...]) {
 }
 
 /**
+ * @brief Softmax of a masked tensor: the masked elements get the probability 0 (they do not take part).
+ * @details Adds a large negative bias at the masked elements (like an additive attention mask), so that this is an
+ * ordinary softmax: backends can use their fused softmax, and the gradient pass uses softmax_gradient.
+ */
+float[...] softmax(x: masked float[...]) => softmax(x.data + (x.mask - 1) * 3.4028234e38);
+
+/**
  * @brief Gaussian Error Linear Unit (exact, erf-based).
  * @details \f[\text{GELU}(x) := \frac x2\left(1 + \text{erf}\left(\frac x{\sqrt 2}\right)\right)\f]
  */

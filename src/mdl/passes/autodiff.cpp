@@ -788,6 +788,7 @@ namespace mdl::autodiff {
 			case FIDs::COS:
 			case FIDs::TAN:
 			case FIDs::EQUAL_MASK:
+			case FIDs::WHERE:
 				return true;
 			default:
 				return cheap(node);
@@ -810,7 +811,14 @@ namespace mdl::autodiff {
 					stored.insert(&arg.get());
 		// The nearest value through which the residual depends on all computed values that it depends on, if the
 		// residual is computed from it by elementwise operations (and weights and constants).
+		// Boolean values (masks, e.g. the fills of a masked function) are small and do not count: they are saved as well.
+		auto isBoolean = [](const Node& n) {
+			const auto* t = std::get_if<TensorType>(&getDataType(n));
+			return t != nullptr && t->type == PrimitiveType::boolean;
+		};
+		std::vector<const Node*> masks;
 		auto singleSource = [&](const Node* residual) -> const Node* {
+			std::vector<const Node*> booleans;
 			if (boundary.contains(residual) || stored.contains(residual) || !elementwise(*residual))
 				return nullptr;
 			auto interior = [&](const Node* n) {
@@ -827,6 +835,10 @@ namespace mdl::autodiff {
 				stack.pop_back();
 				if (!seen.insert(n).second || !dependencies(*n).second)
 					continue; // weights and constants are not saved
+				if (isBoolean(*n)) {
+					booleans.push_back(n);
+					continue;
+				}
 				if (interior(n)) {
 					nodes.push_back(n);
 					for (const auto& arg : std::get<InvocationNode>(*n).arguments)
@@ -839,6 +851,7 @@ namespace mdl::autodiff {
 			}
 			if (source == nullptr)
 				return nullptr;
+			masks.insert(masks.end(), booleans.begin(), booleans.end());
 			// Whether the source is reachable from the residual without passing through `avoid`.
 			auto reaches = [&](const Node* avoid) {
 				std::unordered_set<const Node*> visited;
@@ -891,6 +904,9 @@ namespace mdl::autodiff {
 				if (unique.insert(source != nullptr ? source : r).second)
 					moved.push_back(source != nullptr ? source : r);
 			}
+			for (const Node* m : masks)
+				if (unique.insert(m).second)
+					moved.push_back(m);
 			residuals = std::move(moved);
 		}
 

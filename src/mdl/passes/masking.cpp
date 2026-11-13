@@ -23,8 +23,8 @@ namespace mdl::masking {
 
 		class Masker {
 		public:
-			Masker(Computegraph& graph, const shapes::Shapes& shapes, const Node& mask, bool sanitize)
-					: graph(graph), shapes(shapes), mask(mask), sanitize(sanitize) {
+			Masker(Computegraph& graph, const shapes::Shapes& shapes, const Node& mask)
+					: graph(graph), shapes(shapes), mask(mask) {
 				if (shapes.ellipsis.empty())
 					throw MaskError{"the function has no `...` dimensions to mask"};
 				maskSymbol = shapes.ellipsis.back();
@@ -32,6 +32,23 @@ namespace mdl::masking {
 				merged = shapes::Dim::constant(1);
 				for (const auto& s : shapes.ellipsis)
 					merged = merged * shapes::Dim::symbol(s);
+			}
+
+			/**
+			 * @brief Zeroes the masked positions of a floating-point input: then all values at masked positions are
+			 * finite (whatever the caller passed there, e.g. NaN), so that they cannot reach the valid results or the
+			 * gradients (where they are multiplied by zero cotangents).
+			 */
+			void fillInput(const Node& input) {
+				const auto* t = std::get_if<TensorType>(&getDataType(input));
+				if (t == nullptr || t->type != PrimitiveType::floating || shapes.find(input) == nullptr)
+					return; // (an unused input has no shape)
+				const auto& s = shapeOf(input);
+				auto dims = maskedDims(s);
+				if (dims.empty())
+					return;
+				memo.emplace(&input, &fill(input, s, dims, 0.0));
+				inserted = false;
 			}
 
 			const Node& rebuild(const Node& node) {
@@ -99,7 +116,6 @@ namespace mdl::masking {
 			Computegraph& graph;
 			const shapes::Shapes& shapes;
 			const Node& mask;
-			const bool sanitize;
 			std::string maskSymbol;
 			std::vector<std::string> batchSymbols;
 			shapes::Dim merged; ///< all dimensions of `...` flattened into one
@@ -215,6 +231,13 @@ namespace mdl::masking {
 					args.push_back(std::cref(r));
 				}
 				auto argShape = [&](size_t i) -> const shapes::Shape& { return shapeOf(inv.arguments[i].get()); };
+				// Only values of masked type have masked elements to take care of: values computed from `x.data` and
+				// `x.mask` only are plain, their masked elements are what the code made them (e.g. a large negative bias
+				// before a softmax).
+				auto plain = [&](size_t i) {
+					const auto* t = std::get_if<TensorType>(&getDataType(inv.arguments[i].get()));
+					return t != nullptr && !t->masked;
+				};
 				auto make = [&]() -> const Node& {
 					if (!changed)
 						return node;
@@ -228,16 +251,14 @@ namespace mdl::masking {
 				case FIDs::MEAN: {
 					const auto& s = argShape(0);
 					const size_t last = s.size() - 1;
-					if (s.empty() || !isMasked(s[last]))
+					if (s.empty() || !isMasked(s[last]) || plain(0))
 						return make();
 					const double value = inv.id == FIDs::MAX ? std::numeric_limits<float>::lowest()
 									   : inv.id == FIDs::MIN ? std::numeric_limits<float>::max()
 															 : 0.0;
-					if (sanitize && (inv.id == FIDs::MAX || inv.id == FIDs::MIN))
-						return make(); // the backward pass creates no extrema; the forward ones are masked already
 					args[0] = std::cref(fill(args[0].get(), s, {last}, value));
 					const Node& reduced = graph.addInvocationNode(inv.id, inv.type, std::vector<NodeRef>(args));
-					if (inv.id != FIDs::MEAN || sanitize)
+					if (inv.id != FIDs::MEAN)
 						return reduced;
 					// mean = sum / valid count = mean(filled) / (fraction of valid elements)
 					const Node& indicator = graph.addInvocationNode(
@@ -251,13 +272,12 @@ namespace mdl::masking {
 				case FIDs::MEAN_ALL: {
 					const auto& s = argShape(0);
 					auto dims = maskedDims(s);
-					if (dims.empty())
+					if (dims.empty() || plain(0))
 						return make();
 					const Node& filled = fill(args[0].get(), s, dims, 0.0);
 					const Node& sum = graph.addInvocationNode(FIDs::SUM_ALL, inv.type, {filled});
-					if (inv.id == FIDs::SUM_ALL || sanitize)
-						return inv.id == FIDs::SUM_ALL ? sum
-													   : graph.addInvocationNode(FIDs::MEAN_ALL, inv.type, {filled});
+					if (inv.id == FIDs::SUM_ALL)
+						return sum;
 					const Node& indicator = graph.addInvocationNode(
 							FIDs::WHERE, floatType(),
 							{combinedMask(s, dims), graph.addConstNode(Atomic{1.0}), graph.addConstNode(Atomic{0.0})}
@@ -274,11 +294,11 @@ namespace mdl::masking {
 					const auto& sb = argShape(1);
 					const size_t ka = sa.size() - 1, kb = sb.size() >= 2 ? sb.size() - 2 : 0;
 					bool filled = false;
-					if (!sa.empty() && isMasked(sa[ka])) {
+					if (!sa.empty() && isMasked(sa[ka]) && !plain(0)) {
 						args[0] = std::cref(fill(args[0].get(), sa, {ka}, 0.0));
 						filled = true;
 					}
-					if (!sb.empty() && isMasked(sb[kb])) {
+					if (!sb.empty() && isMasked(sb[kb]) && !plain(1)) {
 						args[1] = std::cref(fill(args[1].get(), sb, {kb}, 0.0));
 						filled = true;
 					}
@@ -336,16 +356,35 @@ namespace mdl::masking {
 	} // namespace
 
 	std::expected<Masked, std::string> apply(
-			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes, const Node* mask
+			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes
 	) {
-		const bool sanitize = mask != nullptr;
 		FunctionDecl result = func;
-		if (mask == nullptr) {
-			mask = &graph.addInputNode(TensorType{PrimitiveType::boolean, {Elipsis{}}}, "mask");
-			result.parameters.emplace_back("mask", std::cref(std::get<InputNode>(*mask)));
-		}
+		const Node* mask = &graph.addInputNode(TensorType{PrimitiveType::boolean, {Elipsis{}}}, "mask");
+		result.parameters.emplace_back("mask", std::cref(std::get<InputNode>(*mask)));
 		try {
-			Masker masker{graph, shapes, *mask, sanitize};
+			Masker masker{graph, shapes, *mask};
+			{
+				// The graph nodes of the inputs (the parameters refer to the InputNode alternative of the node).
+				std::unordered_set<const Node*> seen;
+				std::vector<const Node*> stack;
+				for (const auto& output : func.outputs)
+					stack.push_back(&output.get());
+				while (!stack.empty()) {
+					const Node* n = stack.back();
+					stack.pop_back();
+					if (!seen.insert(n).second)
+						continue;
+					if (const auto* in = std::get_if<InputNode>(n)) {
+						if (std::any_of(func.parameters.begin(), func.parameters.end(), [&](const auto& p) {
+								return &p.second.get() == in;
+							}))
+							masker.fillInput(*n);
+					} else if (const auto* inv = std::get_if<InvocationNode>(n)) {
+						for (const auto& a : inv->arguments)
+							stack.push_back(&a.get());
+					}
+				}
+			}
 			result.outputs.clear();
 			for (const auto& output : func.outputs)
 				result.outputs.push_back(std::cref(masker.maskOutput(output.get(), masker.rebuild(output.get()))));

@@ -248,7 +248,6 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 
 		// Masked functions replace the originals (also as the functions that are differentiated).
 		std::map<std::string, const FunctionDecl*> decls;
-		std::map<std::string, const Node*> masks;
 		auto hasEllipsis = [](const DataType& type) {
 			const auto* t = std::get_if<TensorType>(&type);
 			return t != nullptr && std::any_of(t->shape.begin(), t->shape.end(), [](const auto& d) {
@@ -283,7 +282,6 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			if (!result)
 				throw std::runtime_error(moduleName + "." + result.error());
 			it->second = &unit.keep(std::move(result->function));
-			masks.emplace(name, result->mask);
 		}
 
 		for (const auto& [funcName, decl] : decls)
@@ -308,16 +306,6 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			auto grad = autodiff::vjp(unit.graph(), original, order, options);
 			if (!grad)
 				throw std::runtime_error(moduleName + "." + grad.error());
-			if (auto mask = masks.find(name); mask != masks.end()) {
-				// Zero the masked positions in the reductions of the backward pass as well (see masking::apply).
-				auto shapes = shapes::infer(*grad, ellipsisRank, evaluate, knownInputs(*grad));
-				if (!shapes)
-					throw std::runtime_error(moduleName + "." + shapes.error());
-				auto sanitized = masking::apply(unit.graph(), *grad, *shapes, mask->second);
-				if (!sanitized)
-					throw std::runtime_error(moduleName + "." + sanitized.error());
-				grad = std::move(sanitized->function);
-			}
 			const FunctionDecl& vjp = unit.keep(std::move(*grad));
 
 			// What the gradient outputs are gradients of (as selected by autodiff::vjp).

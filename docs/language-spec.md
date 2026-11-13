@@ -102,7 +102,8 @@ shared with the forward pass (the computegraph interns nodes), so this costs not
 (frozen weights, inputs without gradient) are dropped. `std.autodiff` provides `sum_like`, `broadcast_like` and
 `nograd` (stops gradients).
 
-A free function `f` gets a custom gradient by a free function `f_gradient` with the same convention (no weights):
+A free function `f` gets a custom gradient by a free function `f_gradient` with the same convention (no weights). Like
+every name, `f_gradient` must be declared before it is used: it applies to the calls of `f` that follow it.
 ```dlm
 float[...] softmax_gradient(x: float[...], dy: float[...]) {
     auto y = softmax(x);  // the forward pass's node
