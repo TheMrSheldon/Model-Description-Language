@@ -39,14 +39,15 @@ module LayerNorm[dim: uint] {
 
 /**
  * @brief Applies a learnable linear transformation with optional bias.
- * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
- * \todo honor `bias` once switch expressions are implemented (the bias is currently always added).
+ * @details Given a vector \f(x\f) computes \f(xW^\top + b\f), or \f(xW^\top\f) without bias (`.bias=false`; then
+ * the instance has no weight `b`).
  */
-module Linear[indim: uint, outdim: uint, bias: bool] {
+module Linear[indim: uint, outdim: uint, bias: bool = true] {
     W: float[outdim, indim]
+    @conditional(bias)
     b: float[outdim]
 
-    float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
+    float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
 }
 
 /**

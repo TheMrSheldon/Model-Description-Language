@@ -1,0 +1,5 @@
+# `normalize` is left out: its default (false) applies.
+MLP:
+  conf:
+    sizes: [8, 16, 16, 4]
+    biases: [true, true, false]

@@ -41,8 +41,58 @@ exported; every file is translated once, even if it is imported several times.
   Every instance has its own weights, identified by their path (e.g. `linear.W`, or `layers.3.attn.W` for nested
   modules); calling the same instance twice uses the same weights.
 
-Planned: default values and named arguments (`Linear[indim, outdim, .bias=true]`), and switch expressions on
-hyperparameters.
+### Hyperparameters
+Hyperparameters may have default values (which may use the earlier hyperparameters). Values can be given by name
+(designated-initializer style) after the positional ones; positional values fill the hyperparameters without default
+in declaration order, and those with a default are only set by name (so that adding or reordering them never changes
+the meaning of existing instantiations):
+```dlm
+module Linear[indim: uint, outdim: uint, bias: bool = true] { ... }
+
+module Head[dim: uint] {
+    proj: Linear[dim, dim]                  // bias = true (the default)
+    out: Linear[dim, 3, .bias=false]
+}
+```
+Missing values without default, unknown names, values given twice, and positional values for hyperparameters with a
+default are errors:
+```
+error: bias of Linear has a default value and is only set by name
+ 3 |     l: Linear[4, 3, false]
+   |                     ^^^^^
+hint: write `.bias=false`
+``` In the argument values (YAML) of a
+compiled module, left-out hyperparameters take their defaults.
+
+Besides numbers and structs, a hyperparameter can be a compile-time array `array[T; n]` (not a tensor), e.g. the layer
+sizes of a network, given as a list in YAML (`sizes: [8, 16, 16, 4]`) or as a literal (`[8, 16, 16, 4]`), and indexed
+with compile-time indices:
+```dlm
+struct MlpConf { sizes: array[uint; 4]  biases: array[bool; 3] }
+module MLP[conf: MlpConf] {
+    layers: [Linear[conf.sizes[i], conf.sizes[i + 1], .bias=conf.biases[i]] for i in 0..3]
+    ...
+}
+```
+The number of values must match the declared size. The generated C++ header mirrors arrays as `std::array`.
+
+### Compile-time conditionals and annotations
+`cond ? a : b` chooses at compile time: `cond` must be a compile-time value (e.g. a hyperparameter), and only the chosen
+branch is elaborated, so it may use members that only exist in that case.
+
+Annotations (`@name` or `@name(args)`) attach information to a member. `@conditional(c)` makes a member exist only if the
+compile-time condition `c` holds; otherwise the instance has no such member (no weight in the ABI), and using it is an
+error:
+```dlm
+module Linear[indim: uint, outdim: uint, bias: bool = true] {
+    W: float[outdim, indim]
+    @conditional(bias)
+    b: float[outdim]
+    float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
+}
+```
+Unknown annotations are a warning (`-Wunknown-annotation`); `-Werror=unknown-annotation` makes them errors and
+`-Wno-unknown-annotation` ignores them.
 
 ## Functions
 ```dlm

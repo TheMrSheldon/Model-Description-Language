@@ -40,7 +40,7 @@ TEST_CASE("the standard library can be imported", "[parser][imports]") {
 	std::istringstream source{R"(
 		import std;
 		module Block[dim: uint] {
-			lin: Linear[dim, dim, true]
+			lin: Linear[dim, dim]
 			norm: LayerNorm[dim]
 			float[..., dim] forward(x: float[..., dim]) => norm(gelu(lin(x)) + softmax(x));
 		}

@@ -6,8 +6,8 @@ import std;
  */
 module Classifier[vocab: uint, dim: uint, classes: uint, seq: uint] {
     embed: Embedding[vocab, dim]
-    hidden: Linear[dim, dim, true]
-    out: Linear[dim, classes, true]
+    hidden: Linear[dim, dim]
+    out: Linear[dim, classes]
 
     float[..., classes] forward(ids: int[..., seq]) {
         auto tokens = embed(ids);                        // [..., seq, dim]

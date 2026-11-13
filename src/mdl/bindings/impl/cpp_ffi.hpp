@@ -123,11 +123,41 @@ namespace mdl::bindings::detail {
 		}
 	};
 
+	/** @brief Whether the children of @p node are the elements of an array (named 0, 1, ...). */
+	inline bool isArray(const HyperparameterTree& node) {
+		if (node.children.empty())
+			return false;
+		for (size_t i = 0; i < node.children.size(); ++i)
+			if (node.children[i].first != std::to_string(i))
+				return false;
+		return true;
+	}
+
+	/** @brief The C++ type of a leaf (`int64_t` or `double`). */
+	inline std::string leafType(const HyperparameterTree& node) {
+		return std::holds_alternative<int64_t>(node.value) ? "int64_t" : "double";
+	}
+
 	inline void emitHyperparameterFields(std::ostream& out, const HyperparameterTree& tree, const std::string& indent) {
 		for (const auto& [name, node] : tree.children) {
 			if (node.children.empty()) {
-				out << indent << (std::holds_alternative<int64_t>(node.value) ? "int64_t " : "double ") << cppIdent(name)
-					<< ";\n";
+				out << indent << leafType(node) << " " << cppIdent(name) << ";\n";
+			} else if (isArray(node)) {
+				// Arrays (`array[T; n]`): std::array of the elements' type (a named struct for structs).
+				const auto& first = node.children.front().second;
+				std::string element;
+				if (first.children.empty()) {
+					element = "int64_t";
+					for (const auto& [_, e] : node.children)
+						if (!std::holds_alternative<int64_t>(e.value))
+							element = "double";
+				} else {
+					element = cppIdent(name) + "_element";
+					out << indent << "struct " << element << " {\n";
+					emitHyperparameterFields(out, first, indent + "    ");
+					out << indent << "};\n";
+				}
+				out << indent << "std::array<" << element << ", " << node.children.size() << "> " << cppIdent(name) << ";\n";
 			} else {
 				out << indent << "struct {\n"; // anonymous struct type (initialized by designated initializers)
 				emitHyperparameterFields(out, node, indent + "    ");
@@ -138,13 +168,24 @@ namespace mdl::bindings::detail {
 
 	/** @brief Designated initializer of the hyperparameter values, e.g. `.conf = {.dims = {.model = 768}}`. */
 	inline std::string hyperparameterInit(const HyperparameterTree& tree) {
+		auto value = [](const HyperparameterTree& node) {
+			return std::visit([](auto v) { return std::format("{}", v); }, node.value);
+		};
 		std::string init;
 		for (const auto& [name, node] : tree.children) {
 			init += (init.empty() ? "" : ", ") + ("." + cppIdent(name) + " = ");
-			if (node.children.empty())
-				init += std::visit([](auto v) { return std::format("{}", v); }, node.value);
-			else
+			if (node.children.empty()) {
+				init += value(node);
+			} else if (isArray(node)) {
+				init += "{{";
+				for (size_t i = 0; i < node.children.size(); ++i) {
+					const auto& element = node.children[i].second;
+					init += (i > 0 ? ", " : "") + (element.children.empty() ? value(element) : "{" + hyperparameterInit(element) + "}");
+				}
+				init += "}}";
+			} else {
 				init += "{" + hyperparameterInit(node) + "}";
+			}
 		}
 		return init;
 	}

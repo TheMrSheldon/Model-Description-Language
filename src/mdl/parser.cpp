@@ -277,14 +277,12 @@ namespace mdl {
 			const auto* mod = type ? std::get_if<ModuleType>(&type.value().get()) : nullptr;
 			if (mod == nullptr || mod->templ == nullptr)
 				return std::unexpected(std::format("{} is not a module", name));
-			std::vector<Object> ordered;
-			for (const auto& [pname, _] : mod->typeargs) {
-				auto it = values.find(pname);
-				if (it == values.end())
-					return std::unexpected(std::format("no value for hyperparameter {}.{}", name, pname));
-				ordered.push_back(it->second);
-			}
-			return instantiate(*mod, ordered);
+			// Given values by name; the others take their defaults.
+			std::vector<std::pair<std::string, Object>> named(values.begin(), values.end());
+			auto ordered = completeHyperparameters(*mod, {}, std::move(named));
+			if (!ordered)
+				return std::unexpected(ordered.error().message);
+			return instantiate(*mod, *ordered);
 		}
 
 		/**
@@ -361,10 +359,26 @@ namespace mdl {
 			return {};
 		}
 
+		/** @brief Reports the annotations of a declaration where they do not apply (e.g. members of structs). */
+		void rejectAnnotations(antlr4::mdlParser::VardeclContext* var, const std::string& where) {
+			for (auto* a : var->annotation()) {
+				if (!memberAnnotations().contains(a->name->getText())) {
+					reportUnknownAnnotation(a);
+					continue;
+				}
+				auto* tok = a->name;
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						std::format("@{} applies to members of modules, not to {}", a->name->getText(), where)
+				);
+			}
+		}
+
 		void updateTypeWithVarDecl(
 				AggregateType& type, const std::string& tname, std::vector<antlr4::mdlParser::VardeclContext*> vars
 		) {
 			for (auto& var : vars) {
+				rejectAnnotations(var, "members of structs");
 				auto [name, dtype] = std::any_cast<VarDecl>(var->accept(this));
 				auto [_, inserted] = type.members.insert_or_assign(name, dtype);
 				if (!inserted) {
@@ -492,10 +506,172 @@ namespace mdl {
 									key += valueKey(member) + ",";
 								return key + "}";
 							},
+							[](const ArrayInstance& array) -> std::string {
+								std::string key = "[";
+								for (const auto& element : array.elements)
+									key += valueKey(element) + ",";
+								return key + "]";
+							},
 							[](const auto&) -> std::string { return "?"; },
 					},
 					value
 			);
+		}
+
+		/** @brief Flattens a (concrete) hyperparameter value into (path, number) pairs (see ModuleType). */
+		static void flattenHyperparameter(
+				const std::string& path, const Object& value,
+				std::vector<std::pair<std::string, std::variant<int64_t, double>>>& out
+		) {
+			if (const auto* node = std::get_if<const Node*>(&value)) {
+				if (auto v = foldConstant(**node)) {
+					if (const auto* i = std::get_if<int>(&*v))
+						out.emplace_back(path, int64_t{*i});
+					else if (const auto* d = std::get_if<double>(&*v))
+						out.emplace_back(path, *d);
+				}
+			} else if (const auto* agg = std::get_if<AggregateInstance>(&value)) {
+				size_t i = 0;
+				for (const auto& [name, _] : agg->getType().members)
+					flattenHyperparameter(path + "." + name, agg->getMembers()[i++], out);
+			} else if (const auto* array = std::get_if<ArrayInstance>(&value)) {
+				for (size_t i = 0; i < array->elements.size(); ++i)
+					flattenHyperparameter(path + "." + std::to_string(i), array->elements[i], out);
+			}
+		}
+
+		/** @brief The compile-time value of a hyperparameter expression (numbers are folded to constants). */
+		std::optional<Object> hyperparameterValue(mdlParser::ExprContext* expr) {
+			Object value = asObject(expr->accept(this), expr->start);
+			std::function<bool(Object&)> fold = [&](Object& v) -> bool {
+				if (const auto* node = std::get_if<const Node*>(&v)) {
+					if (std::holds_alternative<ErrorNode>(**node))
+						return false;
+					auto folded = foldConstant(**node);
+					if (!folded) {
+						errorlistener->semanticError(
+								PrettyErrorListener::ErrorLevel::Error, expr->start, expr->start->getLine(),
+								expr->start->getCharPositionInLine(), "Module hyperparameters must be compile-time constants"
+						);
+						return false;
+					}
+					v = Object{&graph().addConstNode(Atomic{*folded})};
+				} else if (auto* array = std::get_if<ArrayInstance>(&v)) {
+					for (auto& element : array->elements)
+						if (!fold(element))
+							return false;
+				}
+				return true;
+			};
+			if (!fold(value))
+				return std::nullopt;
+			return value;
+		}
+
+		/**
+		 * @brief The values of all hyperparameters of @p def (in declaration order): the positional ones, then the
+		 * named ones (`.name=value`), then the defaults of the others (evaluated with the earlier hyperparameters in
+		 * scope). Checks the arrays' sizes. Errors in default expressions are reported at them; the others are
+		 * returned.
+		 */
+		/** @brief Why hyperparameters are invalid (see completeHyperparameters). */
+		struct HyperparameterError {
+			std::string message;
+			std::string hint = {};
+			std::optional<size_t> positional = std::nullopt; ///< the positional value at fault, if any
+		};
+
+		/** @brief A positional hyperparameter value and its source text (for hints). */
+		struct PositionalValue {
+			Object value;
+			std::string text;
+		};
+
+		std::expected<std::vector<Object>, HyperparameterError> completeHyperparameters(
+				const ModuleType& def, std::vector<PositionalValue> positional,
+				std::vector<std::pair<std::string, Object>> named
+		) {
+			const auto& params = def.typeargs;
+			const std::string module = def.templ ? def.templ->name : "module";
+			auto error = [](std::string message, std::string hint = {}, std::optional<size_t> at = std::nullopt) {
+				return std::unexpected(HyperparameterError{std::move(message), std::move(hint), at});
+			};
+			// Positional values fill the required hyperparameters (in declaration order); the ones with a default value
+			// are only set by name (so that adding or reordering them does not change the meaning of instantiations).
+			auto* ctx = def.templ ? def.templ->ctx : nullptr;
+			auto hasDefault = [&](size_t i) {
+				return ctx != nullptr && i < ctx->param().size() && ctx->param()[i]->default_ != nullptr;
+			};
+			std::vector<std::optional<Object>> values(params.size());
+			size_t next = 0;
+			for (size_t k = 0; k < positional.size(); ++k) {
+				while (next < params.size() && hasDefault(next))
+					++next;
+				if (next == params.size()) {
+					// The first optional hyperparameter that the value would have meant (in declaration order).
+					for (size_t i = 0; i < params.size(); ++i)
+						if (hasDefault(i) && !values[i]) {
+							const bool named_ = std::any_of(named.begin(), named.end(), [&](const auto& n) {
+								return n.first == params[i].first;
+							});
+							if (named_)
+								continue;
+							return error(
+									std::format("{} of {} has a default value and is only set by name", params[i].first, module),
+									std::format("write `.{}={}`", params[i].first, positional[k].text), k
+							);
+						}
+					return error(
+							std::format("{} has {} required hyperparameter(s) but got {} positional value(s)", module,
+										std::count_if(params.begin(), params.end(), [&](const auto& p) {
+											return !hasDefault(static_cast<size_t>(&p - params.data()));
+										}),
+										positional.size()),
+							"", k
+					);
+				}
+				values[next++] = std::move(positional[k].value);
+			}
+			for (auto& [name, value] : named) {
+				auto it = std::find_if(params.begin(), params.end(), [&](const auto& p) { return p.first == name; });
+				if (it == params.end())
+					return error(std::format("{} has no hyperparameter {}", module, name));
+				auto& slot = values[static_cast<size_t>(it - params.begin())];
+				if (slot)
+					return error(std::format("The hyperparameter {} of {} is given twice", name, module));
+				slot = std::move(value);
+			}
+			// Defaults: evaluated in the module's defining scope with the earlier hyperparameters bound.
+			std::vector<Object> result;
+			for (size_t i = 0; i < params.size(); ++i) {
+				if (!values[i]) {
+					auto* param = ctx != nullptr && i < ctx->param().size() ? ctx->param()[i] : nullptr;
+					if (param == nullptr || param->default_ == nullptr)
+						return error(std::format("No value for the hyperparameter {} of {}", params[i].first, module));
+					auto* outerErrors = std::exchange(errorlistener, def.templ->errors);
+					nsstack.push(def.templ->scope->createSubnamespace());
+					for (size_t k = 0; k < i; ++k)
+						currentNamespace().put(params[k].first, Object{result[k]});
+					values[i] = hyperparameterValue(param->default_);
+					nsstack.pop();
+					errorlistener = outerErrors;
+					if (!values[i])
+						return error(std::format("The default of the hyperparameter {} of {} is invalid", params[i].first, module));
+				}
+				// Arrays: the declared size.
+				const DataType& type = params[i].second.get().type;
+				if (const auto* arrayType = std::get_if<ArrayType>(&type)) {
+					const auto* array = std::get_if<ArrayInstance>(&*values[i]);
+					if (array == nullptr || array->elements.size() != arrayType->size)
+						return error(std::format(
+								"The hyperparameter {} of {} is an array of {} values (array[...; {}]){}", params[i].first,
+								module, arrayType->size, arrayType->size,
+								array ? std::format(", but {} are given", array->elements.size()) : ""
+						));
+				}
+				result.push_back(std::move(*values[i]));
+			}
+			return result;
 		}
 
 		/**
@@ -518,6 +694,8 @@ namespace mdl {
 			m.typeargs = def.typeargs;
 			m.templ = def.templ;
 			m.instantiated = true;
+			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i)
+				flattenHyperparameter(def.typeargs[i].first, values[i], m.hyperparameterValues);
 
 			const size_t errorsBefore = t.errors->getNumErrors();
 			const std::string outerScope = std::exchange(scope, key);
@@ -557,9 +735,89 @@ namespace mdl {
 			return std::cref(instances.emplace(std::pair{&t, key}, std::move(m)).first->second);
 		}
 
+		/** @brief A member that an annotation left out of an instance (e.g. `@conditional(bias)` with bias false). */
+		struct OmittedMember {
+			std::string reason; ///< e.g. "@conditional(bias) is false"
+		};
+
+		/**
+		 * @brief The handler of a member annotation `@name(args...)`: whether the member exists (false: left out, with
+		 * the reason). Handlers report their own errors (e.g. wrong arguments). Further annotations are registered in
+		 * memberAnnotations().
+		 */
+		using MemberAnnotation = std::function<std::optional<std::string>(TranslatingVisitor&, mdlParser::AnnotationContext*)>;
+
+		static const std::map<std::string, MemberAnnotation>& memberAnnotations() {
+			static const std::map<std::string, MemberAnnotation> handlers{
+					// @conditional(c): the member exists only if the compile-time condition c holds.
+					{"conditional",
+					 [](TranslatingVisitor& v, mdlParser::AnnotationContext* a) -> std::optional<std::string> {
+						 auto* tok = a->name;
+						 if (a->args.size() != 1) {
+							 v.errorlistener->semanticError(
+									 PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+									 "@conditional takes one argument: the condition (e.g. `@conditional(bias)`)"
+							 );
+							 return std::nullopt;
+						 }
+						 const Node* cond = v.asNode(a->args[0]->accept(&v), a->args[0]->start);
+						 auto value = foldConstant(*cond);
+						 const auto* i = value ? std::get_if<int>(&*value) : nullptr;
+						 if (i == nullptr) {
+							 if (!std::holds_alternative<ErrorNode>(*cond))
+								 v.errorlistener->semanticError(
+										 PrettyErrorListener::ErrorLevel::Error, a->args[0]->start, a->args[0]->start->getLine(),
+										 a->args[0]->start->getCharPositionInLine(),
+										 "The condition of @conditional must be a compile-time value (e.g. a hyperparameter)"
+								 );
+							 return std::nullopt;
+						 }
+						 if (*i != 0)
+							 return std::nullopt;
+						 return std::format("@conditional({}) is false", a->args[0]->getText());
+					 }},
+			};
+			return handlers;
+		}
+
+		/**
+		 * @brief Applies the annotations of a member; std::nullopt if the member exists, else the reason why it is left
+		 * out. Unknown annotations are reported as configured (ParseOptions::unknownAnnotation).
+		 */
+		std::optional<std::string> applyAnnotations(mdlParser::VardeclContext* var) {
+			std::optional<std::string> omitted;
+			for (auto* a : var->annotation()) {
+				const std::string name = a->name->getText();
+				auto it = memberAnnotations().find(name);
+				if (it == memberAnnotations().end()) {
+					reportUnknownAnnotation(a);
+					continue;
+				}
+				if (auto reason = it->second(*this, a); reason && !omitted)
+					omitted = reason;
+			}
+			return omitted;
+		}
+
+		void reportUnknownAnnotation(mdlParser::AnnotationContext* a) {
+			if (options.unknownAnnotation == parser::Diagnostic::ignored)
+				return;
+			const bool error = options.unknownAnnotation == parser::Diagnostic::error;
+			auto* tok = a->name;
+			errorlistener->semanticError(
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning, tok,
+					tok->getLine(), tok->getCharPositionInLine(),
+					std::format("Unknown annotation @{} [-W{}unknown-annotation]", a->name->getText(), error ? "error=" : "")
+			);
+		}
+
 		/** @brief Declares a member variable (weight, submodule, or array of them) of a module being expanded. */
 		void declareMember(ModuleType& m, mdlParser::VardeclContext* var) {
 			const auto vname = var->IDENT()->getText();
+			if (auto reason = applyAnnotations(var)) {
+				currentNamespace().put(vname, OmittedMember{*reason});
+				return;
+			}
 			auto addVariable = [&](const std::string& path, const DataType& dtype) -> const Node& {
 				// Weights are registered in the instance's scope so that all functions of the module share them.
 				const Node& node = graph().getOrAddParameterNode(scope, path, dtype);
@@ -595,19 +853,7 @@ namespace mdl {
 		}
 
 		virtual std::any visitParam(mdlParser::ParamContext* ctx) override {
-			if (ctx->default_ != nullptr) {
-				auto firsttok = ctx->default_->start;
-				auto lasttok = ctx->default_->stop;
-				errorlistener->semanticError(
-						PrettyErrorListener::ErrorLevel::Error,
-						{{.linenr = firsttok->getLine(),
-						  .line = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-						  .beginMark = firsttok->getCharPositionInLine(),
-						  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
-						firsttok->getLine(), firsttok->getCharPositionInLine(),
-						"Default values have not yet been implemented"
-				);
-			}
+			// (Default values are evaluated when a module is instantiated, see completeHyperparameters.)
 			return std::make_pair(ctx->IDENT()->getText(), std::any_cast<mdl::DataType>(ctx->type()->accept(this)));
 		}
 
@@ -641,19 +887,11 @@ namespace mdl {
 				return mdl::DataType{mdl::PrimitiveType::error};
 			} else {
 				if (const auto* mod = std::get_if<ModuleType>(&dtype.value().get()); mod && mod->templ) {
-					// Module instantiation: the arguments must be compile-time values.
+					// Module instantiation: the arguments must be compile-time values (positional, then named).
 					auto* tok = ctx->typename_;
-					if (ctx->type_arg().size() != mod->typeargs.size()) {
-						errorlistener->semanticError(
-								PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
-								std::format(
-										"{} expects {} hyperparameter(s) but got {}", tok->getText(), mod->typeargs.size(),
-										ctx->type_arg().size()
-								)
-						);
-						return DataType{PrimitiveType::error};
-					}
-					std::vector<Object> values;
+					std::vector<PositionalValue> positional;
+					std::vector<mdlParser::Type_argContext*> positionalArgs;
+					std::vector<std::pair<std::string, Object>> named;
 					for (auto* arg : ctx->type_arg()) {
 						if (arg->expr() == nullptr) {
 							errorlistener->semanticError(
@@ -662,23 +900,45 @@ namespace mdl {
 							);
 							return DataType{PrimitiveType::error};
 						}
-						Object value = asObject(arg->expr()->accept(this), arg->expr()->start);
-						if (const auto* node = std::get_if<const Node*>(&value)) {
-							auto folded = foldConstant(**node);
-							if (!folded) {
-								if (!std::holds_alternative<ErrorNode>(**node))
-									errorlistener->semanticError(
-											PrettyErrorListener::ErrorLevel::Error, arg->start, arg->start->getLine(),
-											arg->start->getCharPositionInLine(),
-											"Module hyperparameters must be compile-time constants"
-									);
-								return DataType{PrimitiveType::error};
-							}
-							value = Object{&graph().addConstNode(Atomic{*folded})};
+						auto value = hyperparameterValue(arg->expr());
+						if (!value)
+							return DataType{PrimitiveType::error};
+						if (arg->name != nullptr) {
+							named.emplace_back(arg->name->getText(), std::move(*value));
+						} else if (!named.empty()) {
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error, arg->start, arg->start->getLine(),
+									arg->start->getCharPositionInLine(),
+									"Positional hyperparameters must come before named ones (`.name=value`)"
+							);
+							return DataType{PrimitiveType::error};
+						} else {
+							positional.push_back({std::move(*value), arg->expr()->getText()});
+							positionalArgs.push_back(arg);
 						}
-						values.push_back(std::move(value));
 					}
-					auto instance = instantiate(*mod, values);
+					auto values = completeHyperparameters(*mod, std::move(positional), std::move(named));
+					if (!values) {
+						const auto& e = values.error();
+						if (e.positional) { // marks the value at fault
+							auto* arg = positionalArgs[*e.positional];
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error,
+									{{.linenr = arg->start->getLine(),
+									  .line = errorlistener->getline(*arg->start->getInputStream(), 0, arg->start->getStartIndex()),
+									  .beginMark = arg->start->getCharPositionInLine(),
+									  .markWidth = arg->stop->getStopIndex() - arg->start->getStartIndex() + 1}},
+									arg->start->getLine(), arg->start->getCharPositionInLine(), e.message, e.hint
+							);
+						} else {
+							errorlistener->semanticError(
+									PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+									e.message, e.hint
+							);
+						}
+						return DataType{PrimitiveType::error};
+					}
+					auto instance = instantiate(*mod, *values);
 					if (!instance)
 						return DataType{PrimitiveType::error};
 					return DataType{BoundModuleType{.definition = instance.value().get(), .hyperparamValues = {}}};
@@ -766,6 +1026,7 @@ namespace mdl {
 			pushNamespace();
 			if (ctx->templatespec() != nullptr) {
 				for (auto decl : ctx->templatespec()->vardecl()) {
+					rejectAnnotations(decl, "template parameters");
 					auto [name, dtype] = std::any_cast<VarDecl>(decl->accept(this));
 					if (auto value = boundTemplate.find(name); value != boundTemplate.end()) {
 						// Specialized for a call: the template parameter is a constant in the body.
@@ -777,6 +1038,12 @@ namespace mdl {
 				}
 			}
 			for (size_t i = 0; i < ctx->param().size(); ++i) {
+				if (auto* d = ctx->param()[i]->default_) {
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, d->start, d->start->getLine(), d->start->getCharPositionInLine(),
+							"Default values are only supported for module hyperparameters"
+					);
+				}
 				auto [name, dtype] = std::any_cast<VarDecl>(ctx->param()[i]->accept(this));
 				if (auto* tensor = std::get_if<TensorType>(&dtype); tensor && specialization && i < specialization->size())
 					tensor->masked |= (*specialization)[i];
@@ -1078,6 +1345,14 @@ namespace mdl {
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
 			if (const auto* tensor = currentNamespace().find<SlottedTensor>(ctx->IDENT()->getText()))
 				return stacked(*tensor, ctx->IDENT()->getText(), ctx->IDENT()->getSymbol());
+			if (const auto* omitted = currentNamespace().find<OmittedMember>(ctx->IDENT()->getText())) {
+				auto* sym = ctx->IDENT()->getSymbol();
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, sym, sym->getLine(), sym->getCharPositionInLine(),
+						std::format("{} does not exist in this instance ({})", ctx->IDENT()->getText(), omitted->reason)
+				);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			}
 			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
 			if (!value.has_value()) {
 				auto* sym = ctx->IDENT()->getSymbol();
@@ -1451,6 +1726,12 @@ namespace mdl {
 
 			// Resolve operator() on the callee object.
 			auto decl = getMember(calleeObj, "operator()", argtypes);
+			// (A member whose type is erroneous, e.g. an invalid module instantiation, was reported already.)
+			if (const auto* callee = std::get_if<const Node*>(&calleeObj); !decl.has_value() && callee) {
+				const auto* p = std::get_if<PrimitiveType>(&mdl::getDataType(**callee));
+				if (p != nullptr && *p == PrimitiveType::error)
+					return &graph().addErrorNode();
+			}
 			if (!decl.has_value()) {
 				auto* tok = ctx->func->start;
 				errorlistener->semanticError(
@@ -1642,23 +1923,47 @@ namespace mdl {
 			);
 		}
 
-		virtual std::any visitSwitchExpression(mdlParser::SwitchExpressionContext* ctx) override {
-			auto firsttok = ctx->start;
-			auto lasttok = ctx->stop;
-			std::vector<PrettyErrorListener::ContextLine> context;
-			for (size_t i = firsttok->getLine(); i <= lasttok->getLine(); ++i) {
-				context.push_back(
-						{.linenr = i,
-						 .line = errorlistener->getline(
-								 *firsttok->getInputStream(), i - firsttok->getLine(), firsttok->getStartIndex()
-						 )}
+		virtual std::any visitConditionalExpression(mdlParser::ConditionalExpressionContext* ctx) override {
+			// A compile-time choice: only the chosen branch is elaborated (it may use members that only exist then).
+			const Node* cond = asNode(ctx->cond->accept(this), ctx->cond->start);
+			if (std::holds_alternative<ErrorNode>(*cond))
+				return static_cast<const Node*>(cond);
+			auto value = foldConstant(*cond);
+			const auto* i = value ? std::get_if<int>(&*value) : nullptr;
+			const auto* d = value ? std::get_if<double>(&*value) : nullptr;
+			if (i == nullptr && d == nullptr) {
+				auto* tok = ctx->cond->start;
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						"The condition of `?:` must be a compile-time value (e.g. a hyperparameter)"
+				);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			}
+			const bool chosen = i != nullptr ? *i != 0 : *d != 0.0;
+			return (chosen ? ctx->then : ctx->otherwise)->accept(this);
+		}
+
+		virtual std::any visitArrayLiteralExpression(mdlParser::ArrayLiteralExpressionContext* ctx) override {
+			ArrayInstance array;
+			for (auto* element : ctx->elements)
+				array.elements.push_back(asObject(element->accept(this), element->start));
+			return Object{std::move(array)};
+		}
+
+		virtual std::any visitArrayType(mdlParser::ArrayTypeContext* ctx) override {
+			auto element = std::any_cast<DataType>(ctx->element->accept(this));
+			auto size = constantInt(ctx->size);
+			if (size && *size < 0) {
+				auto* tok = ctx->size->start;
+				errorlistener->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+						"The size of an array must not be negative"
 				);
 			}
-			errorlistener->semanticError(
-					PrettyErrorListener::ErrorLevel::Error, context, firsttok->getLine(),
-					firsttok->getCharPositionInLine(), "Switch expressions are not yet implemented"
-			);
-			return &graph().addErrorNode();
+			return DataType{ArrayType{
+					.element = std::make_shared<const DataType>(std::move(element)),
+					.size = static_cast<unsigned>(std::max(size.value_or(0), 0))
+			}};
 		}
 
 		virtual std::any visitExpressionStatement(mdlParser::ExpressionStatementContext* ctx) override {

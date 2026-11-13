@@ -6,12 +6,12 @@ import std;
  * layer norm (mean, rsqrt), and GELU (erf).
  */
 module Block[dim: uint, hidden: uint, heads: uint] {
-    q: Linear[dim, dim, true]
-    k: Linear[dim, dim, true]
-    v: Linear[dim, dim, true]
+    q: Linear[dim, dim]
+    k: Linear[dim, dim]
+    v: Linear[dim, dim]
     norm: LayerNorm[dim]
-    up: Linear[dim, hidden, true]
-    down: Linear[hidden, dim, true]
+    up: Linear[dim, hidden]
+    down: Linear[hidden, dim]
 
     float[..., dim] forward(x: float[..., dim]) {
         auto qh = q(x)[... (h d) -> h ... d | h=heads];

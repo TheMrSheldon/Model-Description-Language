@@ -2,6 +2,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <charconv>
+
 using mdl::ArgVals;
 using ErrorCode = mdl::ArgVals::ErrorCode;
 
@@ -9,23 +11,58 @@ ArgVals::ArgVals(YAML::Node&& data) : data(std::move(data)) {}
 
 ArgVals ArgVals::fromYAML(const std::filesystem::path& path) { return ArgVals{YAML::LoadFile(path.string())}; }
 
-std::expected<ArgVals::Scalar, ErrorCode> ArgVals::lookupScalar(std::string_view path) const {
-	if (auto i = lookup(path))
-		return Scalar{*i};
-	else if (i.error() == ErrorCode::NotFound)
-		return std::unexpected{ErrorCode::NotFound};
-	// Not an integer: navigate again and try floating-point and boolean values.
+YAML::Node ArgVals::navigate(std::string_view path) const {
+	if (!data.IsDefined() || path.empty())
+		return YAML::Node{YAML::NodeType::Undefined};
 	YAML::Node node = data;
 	while (!path.empty()) {
 		auto dot = path.find('.');
-		YAML::Node child = std::as_const(node)[std::string{path.substr(0, dot)}];
+		const std::string_view key = path.substr(0, dot);
+		// (yaml-cpp: operator= assigns through the reference, reset() rebinds but throws for invalid nodes, and a
+		// missing key yields an invalid node, which copying and operator! handle.)
+		size_t index = 0;
+		bool isIndex = false;
+		if (node.IsSequence()) {
+			auto [end, ec] = std::from_chars(key.data(), key.data() + key.size(), index);
+			isIndex = ec == std::errc{} && end == key.data() + key.size() && index < node.size();
+			if (!isIndex)
+				return YAML::Node{YAML::NodeType::Undefined};
+		} else if (!node.IsMap()) {
+			return YAML::Node{YAML::NodeType::Undefined};
+		}
+		const YAML::Node child = isIndex ? std::as_const(node)[index] : std::as_const(node)[std::string{key}];
+		if (!child)
+			return YAML::Node{YAML::NodeType::Undefined};
+		// Use reset() to navigate without mutating the underlying tree (operator= would corrupt the shared tree).
 		node.reset(child);
 		if (dot == std::string_view::npos)
 			break;
 		path = path.substr(dot + 1);
 	}
+	return node;
+}
+
+bool ArgVals::contains(std::string_view path) const { return navigate(path).IsDefined(); }
+
+std::expected<size_t, ErrorCode> ArgVals::listSize(std::string_view path) const {
+	YAML::Node node = navigate(path);
+	if (!node.IsDefined())
+		return std::unexpected{ErrorCode::NotFound};
+	if (!node.IsSequence())
+		return std::unexpected{ErrorCode::InvalidDataType};
+	return node.size();
+}
+
+std::expected<ArgVals::Scalar, ErrorCode> ArgVals::lookupScalar(std::string_view path) const {
+	YAML::Node node = navigate(path);
+	if (!node.IsDefined())
+		return std::unexpected{ErrorCode::NotFound};
 	if (!node.IsScalar())
 		return std::unexpected{ErrorCode::InvalidDataType};
+	try {
+		return Scalar{node.as<int64_t>()};
+	} catch (const YAML::Exception&) {
+	}
 	try {
 		return Scalar{node.as<double>()};
 	} catch (const YAML::Exception&) {
@@ -38,22 +75,9 @@ std::expected<ArgVals::Scalar, ErrorCode> ArgVals::lookupScalar(std::string_view
 }
 
 std::expected<int64_t, ErrorCode> ArgVals::lookup(std::string_view path) const {
-	if (!data.IsDefined() || path.empty())
+	YAML::Node node = navigate(path);
+	if (!node.IsDefined())
 		return std::unexpected{ErrorCode::NotFound};
-	YAML::Node node = data;
-	while (!path.empty()) {
-		auto dot = path.find('.');
-		std::string key{path.substr(0, dot)};
-		YAML::Node child = std::as_const(node)[key];
-		if (!node.IsMap() || !child)
-			return std::unexpected{ErrorCode::NotFound};
-		// Use reset() to navigate without mutating the underlying tree.
-		// operator= calls AssignNode which calls set_ref, corrupting the shared YAML tree.
-		node.reset(child);
-		if (dot == std::string_view::npos)
-			break;
-		path = path.substr(dot + 1);
-	}
 	if (!node.IsScalar())
 		return std::unexpected{ErrorCode::InvalidDataType};
 	try {

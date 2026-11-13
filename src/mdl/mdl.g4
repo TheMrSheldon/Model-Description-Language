@@ -27,10 +27,14 @@ type
       | 'struct' '{' vardecl* '}'                               # AnonType
       // Array of `element` for var = lo, ..., hi-1 (e.g. a stack of modules)
       | '[' element=type 'for' var=IDENT 'in' lo=expr '..' hi=expr ']' # ComprehensionType
+      // A compile-time array of `size` values (e.g. a hyperparameter `ch: array[uint; 5]`); not a tensor
+      | 'array' '[' element=type ';' size=expr ']'          # ArrayType
       ;
 
 type_arg
       : elipsis='...'
+      // A named hyperparameter (designated-initializer style): `Linear[768, 3, .bias=false]`
+      | '.' name=IDENT '=' value=expr
       | expr
       ;
 
@@ -41,7 +45,12 @@ constant
       ;
 
 vardecl
-      : IDENT ':' type
+      : annotation* IDENT ':' type
+      ;
+
+// `@name` or `@name(args...)`, e.g. `@conditional(bias)` before a member
+annotation
+      : '@' name=IDENT ('(' (args+=expr (',' args+=expr)*)? ')')?
       ;
 
 funcdef
@@ -93,6 +102,8 @@ expr
       : IDENT                                              # VarAccessExpression
       | constant                                           # ConstantExpression
       | '(' expr ')'                                       # ParenExpression
+      // A compile-time array (e.g. a hyperparameter value `[64, 128, 256]`)
+      | '[' (elements+=expr (',' elements+=expr)*)? ']'    # ArrayLiteralExpression
       // Postfix Expressions
       | expr '.' IDENT                                     # AccessExpression
       | expr '[' einops ']'                                # EinopsExpression
@@ -103,8 +114,8 @@ expr
       // Arithmetic Expressions
       | left=expr bop=('*' | '/' | '@') right=expr         # ArithmeticExpression
       | left=expr bop=('+' | '-') right=expr               # ArithmeticExpression
-      // Switch Expression
-      | expr '?' (expr '=>' expr)*                         # SwitchExpression
+      // Compile-time conditional: only the chosen branch is elaborated
+      | <assoc=right> cond=expr '?' then=expr ':' otherwise=expr # ConditionalExpression
       ;
 
 statement

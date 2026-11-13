@@ -95,7 +95,8 @@ static TensorSignature makeSignature(
 
 /**
  * @brief The value of a hyperparameter of type @p type from the argument values at @p path (e.g. `Module.conf`):
- * a ConstNode for scalars and an AggregateInstance for structs; std::nullopt if a value is missing.
+ * a ConstNode for scalars, an AggregateInstance for structs, and an ArrayInstance for arrays (YAML lists); std::nullopt
+ * if a value is missing.
  */
 static std::optional<Object>
 hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std::string& path, const ArgVals& argvals) {
@@ -124,26 +125,22 @@ hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std
 		auto instance = AggregateInstance::create(*agg, std::move(members));
 		return instance ? std::optional<Object>{Object{std::move(*instance)}} : std::nullopt;
 	}
-	return std::nullopt;
-}
-
-/** @brief Flattens a (concrete) hyperparameter value into (path, value) pairs. */
-static void flattenHyperparameter(
-		const std::string& path, const Object& value,
-		std::vector<std::pair<std::string, std::variant<int64_t, double>>>& out
-) {
-	if (const auto* node = std::get_if<const Node*>(&value)) {
-		if (const auto* cn = std::get_if<ConstNode>(*node)) {
-			if (const auto* i = std::get_if<int>(&cn->value))
-				out.emplace_back(path, int64_t{*i});
-			else if (const auto* d = std::get_if<double>(&cn->value))
-				out.emplace_back(path, *d);
+	if (const auto* array = std::get_if<ArrayType>(&type)) {
+		auto size = argvals.listSize(path);
+		if (!size)
+			return std::nullopt;
+		if (*size != array->size)
+			throw std::runtime_error(std::format("{} is an array of {} values, but {} are given", path, array->size, *size));
+		ArrayInstance instance;
+		for (size_t i = 0; i < *size; ++i) {
+			auto element = hyperparameterValue(unit, *array->element, path + "." + std::to_string(i), argvals);
+			if (!element)
+				return std::nullopt;
+			instance.elements.push_back(std::move(*element));
 		}
-	} else if (const auto* agg = std::get_if<AggregateInstance>(&value)) {
-		size_t i = 0;
-		for (const auto& [name, _] : agg->getType().members)
-			flattenHyperparameter(path + "." + name, agg->getMembers()[i++], out);
+		return Object{std::move(instance)};
 	}
+	return std::nullopt;
 }
 
 std::vector<ExportedFunction> mdl::exportedFunctions(
@@ -156,28 +153,27 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		const auto* definition = std::get_if<ModuleType>(&member);
 		if (definition == nullptr)
 			continue;
-		// Modules with hyperparameters are instantiated with the values given in the argument values; modules whose
-		// hyperparameters are not (all) given are not compiled.
+		// Modules with hyperparameters are compiled if the argument values have an entry for them: with the given
+		// values, and the defaults for the others.
 		const ModuleType* module = definition;
 		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameters;
 		if (!definition->instantiated) {
+			if (!argvals.contains(moduleName))
+				continue;
 			std::map<std::string, Object> values;
-			bool complete = true;
 			for (const auto& [pname, hn] : definition->typeargs) {
+				if (!argvals.contains(moduleName + "." + pname))
+					continue; // the default
 				auto value = hyperparameterValue(unit, hn.get().type, moduleName + "." + pname, argvals);
-				if (!value) {
-					complete = false;
-					break;
-				}
-				flattenHyperparameter(pname, *value, hyperparameters);
+				if (!value)
+					throw std::runtime_error(std::format("{}.{}: the value does not match the type", moduleName, pname));
 				values.emplace(pname, std::move(*value));
 			}
-			if (!complete)
-				continue;
 			auto result = unit.instantiate(moduleName, values);
 			if (!result)
-				throw std::runtime_error(result.error());
+				throw std::runtime_error(moduleName + ": " + result.error());
 			module = &result->get();
+			hyperparameters = module->hyperparameterValues; // (including defaults)
 		}
 		const auto order = weightPaths(*module);
 

@@ -529,3 +529,131 @@ TEST_CASE("slots must be assigned before use, within bounds, and with the slot t
 	CHECK(fails("float[..., 4] hs; return x;"));									// no compile-time slot count
 	CHECK_FALSE(fails("float[2, ..., 4] hs; hs[0] = x; hs[-1] = x * 2; return hs;")); // negative: from the end
 }
+
+// ---------------------------------------------------------------------------
+// Hyperparameters: defaults, named arguments, conditionals, conditional members, arrays
+// ---------------------------------------------------------------------------
+
+namespace {
+	/** The weight paths of the instance `M` in module `Net`'s function `f` (via the reachable parameter nodes). */
+	std::set<std::string> weightNamesOf(const FunctionDecl& f) {
+		std::set<std::string> names;
+		forEachNode(f, [&](const Node& node) {
+			if (const auto* p = std::get_if<ParameterNode>(&node))
+				names.insert(p->name);
+		});
+		return names;
+	}
+
+	const char* linear = R"(
+		module Lin[indim: uint, outdim: uint, bias: bool = true] {
+			W: float[outdim, indim]
+			@conditional(bias)
+			b: float[outdim]
+			float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
+		}
+	)";
+} // namespace
+
+TEST_CASE("defaults, named hyperparameters, and conditional members", "[parser][hyperparameters]") {
+	auto unit = parseSource(std::string(linear) + R"(
+		module Net[] {
+			with: Lin[4, 3]
+			without: Lin[4, 3, .bias=false]
+			named: Lin[.outdim=3, .indim=4]
+			float[..., 3] f(x: float[..., 4]) => with(x) + without(x) + named(x);
+		}
+	)");
+	REQUIRE(unit.has_value());
+	CHECK(weightNamesOf(moduleFunction(*unit, "Net", "f")) ==
+		  std::set<std::string>{"with.W", "with.b", "without.W", "named.W", "named.b"});
+}
+
+TEST_CASE("wrong hyperparameters are reported", "[parser][hyperparameters]") {
+	auto fails = [](const std::string& member) {
+		return !parseSource(std::string(linear) + "module Net[] { l: " + member + " float[..., 3] f(x: float[..., 4]) => l(x); }")
+						.has_value();
+	};
+	CHECK_FALSE(fails("Lin[4, 3, .bias=false]"));
+	CHECK(fails("Lin[4]"));					 // outdim has no default
+	CHECK(fails("Lin[4, 3, .size=2]"));		 // no such hyperparameter
+	CHECK(fails("Lin[4, 3, .indim=4]"));	 // given twice
+	CHECK(fails("Lin[.indim=4, 3]"));		 // positional after named
+	CHECK(fails("Lin[4, 3, false]"));		 // a hyperparameter with a default value is only set by name
+	CHECK(fails("Lin[4, 3, .bias=false, 1]")); // too many
+}
+
+TEST_CASE("positional values fill the required hyperparameters, also after optional ones", "[parser][hyperparameters]") {
+	auto unit = parseSource(R"(
+		module Lin[indim: uint, bias: bool = true, outdim: uint] {
+			W: float[outdim, indim]
+			@conditional(bias)
+			b: float[outdim]
+			float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
+		}
+		module Net[] {
+			l: Lin[4, 3]			 // indim = 4, outdim = 3
+			m: Lin[4, 3, .bias=false]
+			float[..., 3] f(x: float[..., 4]) => l(x) + m(x);
+		}
+	)");
+	REQUIRE(unit.has_value());
+	CHECK(weightNamesOf(moduleFunction(*unit, "Net", "f")) == std::set<std::string>{"l.W", "l.b", "m.W"});
+}
+
+TEST_CASE("defaults may use the earlier hyperparameters", "[parser][hyperparameters]") {
+	auto unit = parseSource(R"(
+		module Sq[n: uint, m: uint = n] {
+			W: float[m, n]
+			float[..., m] forward(x: float[..., n]) => x @ W.T();
+		}
+		module Net[] {
+			s: Sq[4]
+			float[..., 4] f(x: float[..., 4]) => s(x);
+		}
+	)");
+	REQUIRE(unit.has_value());
+}
+
+TEST_CASE("a member left out by @conditional cannot be used; ?: needs a compile-time condition", "[parser][hyperparameters]") {
+	CHECK_FALSE(parseSource(R"(
+		module L[bias: bool] {
+			@conditional(bias)
+			b: float[3]
+			float[..., 3] forward(x: float[..., 3]) => x + b;
+		}
+		module Net[] { l: L[false] float[..., 3] f(x: float[..., 3]) => l(x); }
+	)").has_value());
+	CHECK_FALSE(parseSource("module M[] { float[..., 3] f(x: float[..., 3]) => x ? x : x; }").has_value());
+}
+
+TEST_CASE("unknown annotations are warnings by default (or errors, or ignored)", "[parser][annotations]") {
+	const std::string source = "module M[] { @frozen W: float[3] float[..., 3] f(x: float[..., 3]) => x * W; }";
+	auto parseWith = [&](parser::Diagnostic level) {
+		std::istringstream stream{source};
+		return parser::parse(stream, "<test>", {.unknownAnnotation = level});
+	};
+	CHECK(parseWith(parser::Diagnostic::warning).has_value());
+	CHECK(parseWith(parser::Diagnostic::ignored).has_value());
+	CHECK_FALSE(parseWith(parser::Diagnostic::error).has_value());
+	// Known annotations where they do not apply, defaults of function parameters.
+	CHECK_FALSE(parseSource("struct S { @conditional(1) a: uint } module M[] { float[..., 3] f(x: float[..., 3]) => x; }")
+						.has_value());
+	CHECK_FALSE(parseSource("module M[] { float[..., 3] f(x: float[..., 3] = 1) => x; }").has_value());
+}
+
+TEST_CASE("array hyperparameters: literals, indexing, and the declared size", "[parser][arrays]") {
+	const std::string mlp = std::string(linear) + R"(
+		module MLP[sizes: array[uint; 3], biases: array[bool; 2]] {
+			layers: [Lin[sizes[i], sizes[i + 1], .bias=biases[i]] for i in 0..2]
+			float[..., sizes[2]] forward(x: float[..., sizes[0]]) => layers[1](layers[0](x));
+		}
+	)";
+	auto unit = parseSource(mlp + "module Net[] { m: MLP[[4, 8, 2], [true, false]] float[..., 2] f(x: float[..., 4]) => m(x); }");
+	REQUIRE(unit.has_value());
+	CHECK(weightNamesOf(moduleFunction(*unit, "Net", "f")) ==
+		  std::set<std::string>{"m.layers.0.W", "m.layers.0.b", "m.layers.1.W"});
+	// The size of an array hyperparameter is checked.
+	CHECK_FALSE(parseSource(mlp + "module Net[] { m: MLP[[4, 8], [true, false]] float[..., 2] f(x: float[..., 4]) => m(x); }")
+						.has_value());
+}

@@ -8,6 +8,7 @@
 #include <mdl/utils/overload.hpp>
 
 #include <algorithm>
+#include <format>
 #include <string>
 
 namespace mdl::bindings::detail {
@@ -53,7 +54,10 @@ namespace mdl::bindings::detail {
 						},
 						[](const mdl::AggregateType&) -> std::string { return std::string{"struct"}; },
 						[](const mdl::ModuleType&) -> std::string { return std::string{"module"}; },
-						[](const mdl::BoundModuleType&) -> std::string { return std::string{"module"}; }
+						[](const mdl::BoundModuleType&) -> std::string { return std::string{"module"}; },
+						[](const mdl::ArrayType& a) -> std::string {
+							return std::format("array[{}; {}]", dtypeStr(*a.element), a.size);
+						}
 				},
 				dt
 		);

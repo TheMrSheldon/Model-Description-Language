@@ -77,6 +77,10 @@ static ::tvm::runtime::DataType toUnderlyingTVMType(mdl::DataType dtype) {
 						std::abort();
 						return ::tvm::runtime::DataType{};
 					},
+					[](const mdl::ArrayType&) {
+						std::abort(); // arrays are compile-time values
+						return ::tvm::runtime::DataType{};
+					},
 			},
 			dtype
 	);

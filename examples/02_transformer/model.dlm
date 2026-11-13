@@ -13,14 +13,14 @@ struct TransformerConf {
 
 module TransformerEncoder[conf: TransformerConf] {
     // Multi-Head Attention
-    weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key, true]
-    weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key, true]
-    weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value, true]
-    weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model, true]
-    weightIntermed: Linear[conf.dims.model, conf.dims.inner, true]
+    weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
+    weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
+    weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value]
+    weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model]
+    weightIntermed: Linear[conf.dims.model, conf.dims.inner]
     mhaNorm: LayerNorm[conf.dims.model]
     // FFN
-    weightIntermedOut: Linear[conf.dims.inner, conf.dims.model, true]
+    weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
     ffnNorm: LayerNorm[conf.dims.model]
 
     float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
@@ -93,7 +93,7 @@ module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
  * For h: [batch, seq, model], the result is [batch, model].
  */
 module BertPooler[conf: TransformerConf] {
-    dense: Linear[conf.dims.model, conf.dims.model, true]
+    dense: Linear[conf.dims.model, conf.dims.model]
 
     float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(h[..., 0, :]));
 }
@@ -121,7 +121,7 @@ module Bert[conf: TransformerConf, emb: EmbeddingConf] {
  */
 module BertForSequenceClassification[conf: TransformerConf, emb: EmbeddingConf, classes: uint] {
     bert: Bert[conf, emb]
-    classifier: Linear[conf.dims.model, classes, true]
+    classifier: Linear[conf.dims.model, classes]
 
     float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
         classifier(bert.pooled(ids, types, positions));

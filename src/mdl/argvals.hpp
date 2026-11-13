@@ -36,7 +36,16 @@ namespace mdl {
 		/** Looks up a scalar (integer, floating-point, or boolean) at a dotted path. */
 		std::expected<Scalar, ErrorCode> lookupScalar(std::string_view path) const;
 
+		/** Whether a value (of any kind) exists at a dotted path. Numeric segments index lists ("Net.ch.2"). */
+		bool contains(std::string_view path) const;
+
+		/** The number of elements of the list at a dotted path. */
+		std::expected<size_t, ErrorCode> listSize(std::string_view path) const;
+
 	private:
+		/** The node at a dotted path (maps by key, lists by numeric index); an undefined node if there is none. */
+		YAML::Node navigate(std::string_view path) const;
+
 		YAML::Node data;
 	};
 } // namespace mdl

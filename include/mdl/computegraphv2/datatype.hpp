@@ -99,6 +99,11 @@ namespace mdl {
 		std::shared_ptr<const ModuleTemplate> templ = nullptr;
 		/** @brief Whether the members are expanded (false for the uninstantiated definition of a template). */
 		bool instantiated = false;
+		/**
+		 * @brief The hyperparameter values of an instance (including defaults), flattened to (path, number) pairs,
+		 * e.g. ("conf.dims.model", 768) or ("ch.2", 256) for arrays.
+		 */
+		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameterValues;
 
 		static constexpr size_t InvalidIdx = -1;
 
@@ -119,10 +124,20 @@ namespace mdl {
 	};
 
 	/** \todo handle member functions? **/
-	using DataType = std::variant<PrimitiveType, TensorType, struct AggregateType, ModuleType, BoundModuleType>;
+	using DataType =
+			std::variant<PrimitiveType, TensorType, struct AggregateType, ModuleType, BoundModuleType, struct ArrayType>;
 
 	struct AggregateType final {
 		std::map<std::string, DataType> members;
+	};
+
+	/**
+	 * @brief A compile-time array of @p size values of type @p element (`array[uint; 5]`), e.g. a hyperparameter; not a
+	 * tensor (its values are an ArrayInstance).
+	 */
+	struct ArrayType final {
+		std::shared_ptr<const DataType> element;
+		unsigned size = 0;
 	};
 
 	using TypeArg = std::variant<Elipsis, const Node*>; /** \todo use mdl::Object instead of Node*? */

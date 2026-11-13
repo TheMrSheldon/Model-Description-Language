@@ -41,6 +41,8 @@ namespace mdl::parser {
 		 */
 		Diagnostic floatWidening = Diagnostic::error;
 		Diagnostic floatNarrowing = Diagnostic::error;
+		/** @brief Annotations that the compiler does not know (`-W[no-|error=]unknown-annotation`): a warning by default. */
+		Diagnostic unknownAnnotation = Diagnostic::warning;
 	};
 
 	/**

@@ -105,8 +105,12 @@ static void runCompileCommand(const CompileArgs& args) {
 			parseOptions.floatWidening = level;
 		else if (name == "float-narrowing")
 			parseOptions.floatNarrowing = level;
+		else if (name == "unknown-annotation")
+			parseOptions.unknownAnnotation = level;
 		else
-			throw std::runtime_error("unknown diagnostic -W" + w + " (known: float-widening, float-narrowing)");
+			throw std::runtime_error(
+					"unknown diagnostic -W" + w + " (known: float-widening, float-narrowing, unknown-annotation)"
+			);
 	}
 	auto result = mdl::parser::parse(args.inputs[0], parseOptions);
 	if (!result.has_value())
@@ -267,7 +271,8 @@ int main(int argc, char* argv[]) {
 			   "-W", args.warnings,
 			   "Diagnostics like g++: -W<name> warns, -Wno-<name> ignores, -Werror=<name> makes it an error. "
 			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or between "
-			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. Repeatable."
+			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. "
+			   "unknown-annotation (an annotation the compiler does not know) is a warning by default. Repeatable."
 	)
 			->type_name("[no-|error=]NAME");
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
