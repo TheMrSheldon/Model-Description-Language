@@ -24,10 +24,27 @@ float[...] softmax(x: float[...]) {
 }
 
 /**
+ * @brief Closed-form gradient of softmax (used by the gradient pass): only needs the result \f(y\f), which the
+ * backward pass of attention saves anyway.
+ */
+float[...] softmax_gradient(x: float[...], dy: float[...]) {
+    auto y = softmax(x);  // the forward pass's node (common subexpression)
+    return y * (dy - sum(dy * y));
+}
+
+/**
  * @brief Gaussian Error Linear Unit (exact, erf-based).
  * @details \f[\text{GELU}(x) := \frac x2\left(1 + \text{erf}\left(\frac x{\sqrt 2}\right)\right)\f]
  */
 float[...] gelu(x: float[...]) => x * 0.5 * (1 + erf(x / sqrt(2)));
+
+/**
+ * @brief Closed-form gradient of GELU (used by the gradient pass):
+ * \f(\text{GELU}'(x) = \frac12\left(1 + \text{erf}\left(\frac x{\sqrt 2}\right)\right) + x\,\varphi(x)\f) with the
+ * standard normal density \f(\varphi\f); computed from \f(x\f) alone.
+ */
+float[...] gelu_gradient(x: float[...], dy: float[...]) =>
+    dy * (0.5 * (1 + erf(x / sqrt(2))) + x * exp(-0.5 * x * x) * 0.3989422804014327);
 
 /**
  * @brief Logistic sigmoid, \f(\sigma(x) = 1 / (1 + e^{-x})\f).

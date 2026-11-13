@@ -320,31 +320,41 @@ namespace mdl::autodiff {
 			return function == "forward" || function == "operator()" ? "gradient" : function + "_gradient";
 		}
 
-		/** @brief A module call whose module provides a custom gradient function. */
+		/** @brief A call of a module or free function that provides a custom gradient function. */
 		struct CustomCall {
 			const ModuleCall* call;
 			const FunctionDecl* gradient;
 		};
 
 		/**
-		 * @brief The module call with a custom gradient that produced @p node, if any. If calls are nested (an inner
-		 * call's output is also an output of the enclosing call), the outermost one (shortest instance path) wins.
+		 * @brief The call with a custom gradient that produced @p node, if any. If calls are nested (an inner call's
+		 * output is also an output of the enclosing call), the outermost one wins: module calls (which enclose the free
+		 * functions they call) by the shortest instance path, then free functions by the latest record (the enclosing
+		 * call is recorded after the calls in its body).
 		 */
 		std::optional<CustomCall> customCallProducing(const Computegraph& graph, const Node& node) {
 			std::optional<CustomCall> best;
 			for (const ModuleCall* call : graph.moduleCallsProducing(node)) {
-				if (call->module == nullptr || !call->customGradient)
+				if (!call->customGradient)
 					continue;
-				auto fn = call->module->functions.find(customGradientName(call->function));
-				if (fn == call->module->functions.end())
+				const FunctionDecl* gradient = call->gradient;
+				if (call->module != nullptr) {
+					auto fn = call->module->functions.find(customGradientName(call->function));
+					gradient = fn == call->module->functions.end() ? nullptr : &fn->second;
+				}
+				if (gradient == nullptr)
 					continue;
 				// A call that returns one of its inputs unchanged cannot be treated as a unit.
 				if (std::any_of(call->outputs.begin(), call->outputs.end(), [&](const Node* out) {
 						return std::find(call->inputs.begin(), call->inputs.end(), out) != call->inputs.end();
 					}))
 					continue;
-				if (!best || call->path.size() < best->call->path.size())
-					best = CustomCall{call, &fn->second};
+				const bool better = !best ||
+						(call->module != nullptr
+								 ? best->call->module == nullptr || call->path.size() < best->call->path.size()
+								 : best->call->module == nullptr);
+				if (better)
+					best = CustomCall{call, gradient};
 			}
 			return best;
 		}
@@ -369,7 +379,8 @@ namespace mdl::autodiff {
 			const ModuleCall& call = *custom.call;
 			const FunctionDecl& gradient = *custom.gradient;
 			const auto where = std::format(
-					"custom gradient '{}' of '{}'", gradient.name, call.path.empty() ? call.scope : call.path
+					"custom gradient '{}' of '{}'", gradient.name,
+					call.module == nullptr ? call.function : call.path.empty() ? call.scope : call.path
 			);
 			if (gradient.parameters.size() != call.inputs.size() + call.outputs.size())
 				return std::unexpected(std::format(
@@ -395,8 +406,12 @@ namespace mdl::autodiff {
 			if (!needed)
 				return {};
 
-			BoundModuleType bound{.definition = *call.module, .hyperparamValues = call.hyperparameters};
-			auto results = graph.addModuleInvocationNode(bound, call.scope, call.path, gradient, std::move(arguments));
+			auto results = [&] {
+				if (call.module == nullptr)
+					return graph.addInvocationNode(gradient, std::move(arguments));
+				BoundModuleType bound{.definition = *call.module, .hyperparamValues = call.hyperparameters};
+				return graph.addModuleInvocationNode(bound, call.scope, call.path, gradient, std::move(arguments));
+			}();
 			if (!results)
 				return std::unexpected(where + ": " + results.error());
 			for (size_t i = 0; i < call.inputs.size(); ++i)
@@ -455,9 +470,10 @@ namespace mdl::autodiff {
 					return;
 				for (const Node* input : custom->call->inputs)
 					visit(*input);
-				for (const auto& path : weightPaths(*custom->call->module))
-					if (const Node* w = graph.findParameterNode(custom->call->scope, custom->call->weightPath(path)))
-						visit(*w);
+				if (custom->call->module != nullptr)
+					for (const auto& path : weightPaths(*custom->call->module))
+						if (const Node* w = graph.findParameterNode(custom->call->scope, custom->call->weightPath(path)))
+							visit(*w);
 				steps.push_back(Step{.node = nullptr, .custom = custom});
 				return;
 			}
@@ -473,6 +489,8 @@ namespace mdl::autodiff {
 		// The weights of a module call with custom gradient, in the order of its gradient's results.
 		auto callWeights = [&](const ModuleCall& call) {
 			std::vector<const Node*> result;
+			if (call.module == nullptr)
+				return result;
 			for (const auto& path : weightPaths(*call.module))
 				result.push_back(graph.findParameterNode(call.scope, call.weightPath(path)));
 			return result;
@@ -677,7 +695,7 @@ namespace mdl::autodiff {
 				if (!seen.insert(n).second)
 					continue;
 				for (const ModuleCall* call : graph.moduleCallsProducing(*n))
-					if (!call->path.empty() && checkpoint->selects(call->path) &&
+					if (call->module != nullptr && !call->path.empty() && checkpoint->selects(call->path) &&
 						std::find(calls.begin(), calls.end(), call) == calls.end())
 						calls.push_back(call);
 				if (const auto* inv = std::get_if<InvocationNode>(n))
@@ -710,7 +728,7 @@ namespace mdl::autodiff {
 
 		// The nodes of the forward computation (the others were created by the gradient pass).
 		std::unordered_set<const Node*> forward;
-		if (checkpoint != nullptr) {
+		{
 			std::vector<const Node*> stack;
 			for (size_t i = 0; i < numOutputs; ++i)
 				stack.push_back(&vjp.outputs[i].get());
@@ -775,6 +793,107 @@ namespace mdl::autodiff {
 				return cheap(node);
 			}
 		};
+		// Save the input of an elementwise computation instead of its result if the result depends on one computed value
+		// only (e.g. `x` instead of `1 + erf(x / sqrt(2))` in the gradient of GELU): this never needs more memory (an
+		// elementwise result is at least as large as its arguments), and the forward pass does not compute values just to
+		// save them (which would also keep backends from replacing the forward computation by a fused kernel). The
+		// backward pass recomputes the elementwise computation, where it fuses with the operations that use it.
+		// Only values that the forward pass would not store anyway are moved: those it does not compute, and those whose
+		// forward uses are all elementwise arithmetic (fused away), unlike e.g. `tanh(h)` that a matrix product takes
+		// (also through reshapes and permutations, which materialize their argument as well).
+		std::unordered_set<const Node*> stored;
+		for (size_t i = 0; i < numOutputs; ++i)
+			stored.insert(&vjp.outputs[i].get());
+		for (const Node* n : forward)
+			if (const auto* inv = std::get_if<InvocationNode>(n); inv != nullptr && (!elementwise(*n) || cheap(*n)))
+				for (const auto& arg : inv->arguments)
+					stored.insert(&arg.get());
+		// The nearest value through which the residual depends on all computed values that it depends on, if the
+		// residual is computed from it by elementwise operations (and weights and constants).
+		auto singleSource = [&](const Node* residual) -> const Node* {
+			if (boundary.contains(residual) || stored.contains(residual) || !elementwise(*residual))
+				return nullptr;
+			auto interior = [&](const Node* n) {
+				return std::holds_alternative<InvocationNode>(*n) && elementwise(*n) &&
+					   (n == residual || (!boundary.contains(n) && !stored.contains(n)));
+			};
+			// The elementwise computation (interior nodes) and the computed values it starts from.
+			const Node* source = nullptr;
+			std::vector<const Node*> nodes; // interior nodes, the residual first
+			std::unordered_set<const Node*> seen;
+			std::vector<const Node*> stack{residual};
+			while (!stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!seen.insert(n).second || !dependencies(*n).second)
+					continue; // weights and constants are not saved
+				if (interior(n)) {
+					nodes.push_back(n);
+					for (const auto& arg : std::get<InvocationNode>(*n).arguments)
+						stack.push_back(&arg.get());
+					continue;
+				}
+				if (source != nullptr && source != n)
+					return nullptr;
+				source = n;
+			}
+			if (source == nullptr)
+				return nullptr;
+			// Whether the source is reachable from the residual without passing through `avoid`.
+			auto reaches = [&](const Node* avoid) {
+				std::unordered_set<const Node*> visited;
+				std::vector<const Node*> work{residual};
+				while (!work.empty()) {
+					const Node* n = work.back();
+					work.pop_back();
+					if (n == avoid || !visited.insert(n).second || !dependencies(*n).second)
+						continue;
+					if (n == source)
+						return true;
+					if (interior(n))
+						for (const auto& arg : std::get<InvocationNode>(*n).arguments)
+							work.push_back(&arg.get());
+				}
+				return false;
+			};
+			// The dominators lie on every path to the source; the nearest one reaches all others.
+			std::vector<const Node*> dominators;
+			for (size_t i = 1; i < nodes.size(); ++i)
+				if (!reaches(nodes[i]))
+					dominators.push_back(nodes[i]);
+			dominators.push_back(source);
+			auto below = [&](const Node* from, const Node* to) { // `to` is an argument (transitively) of `from`
+				std::unordered_set<const Node*> visited;
+				std::vector<const Node*> work{from};
+				while (!work.empty()) {
+					const Node* n = work.back();
+					work.pop_back();
+					if (!visited.insert(n).second)
+						continue;
+					if (n == to)
+						return true;
+					if (interior(n))
+						for (const auto& arg : std::get<InvocationNode>(*n).arguments)
+							work.push_back(&arg.get());
+				}
+				return false;
+			};
+			for (const Node* d : dominators)
+				if (std::all_of(dominators.begin(), dominators.end(), [&](const Node* o) { return below(d, o); }))
+					return d;
+			return source;
+		};
+		{
+			std::vector<const Node*> moved;
+			std::unordered_set<const Node*> unique;
+			for (const Node* r : residuals) {
+				const Node* source = singleSource(r);
+				if (unique.insert(source != nullptr ? source : r).second)
+					moved.push_back(source != nullptr ? source : r);
+			}
+			residuals = std::move(moved);
+		}
+
 		std::unordered_set<const Node*> saved(residuals.begin(), residuals.end());
 		std::function<bool(const Node&, const Node*)> recomputable = [&](const Node& node, const Node* self) {
 			if (&node != self && saved.contains(&node))

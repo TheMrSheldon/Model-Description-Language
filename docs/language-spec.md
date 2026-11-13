@@ -102,6 +102,17 @@ shared with the forward pass (the computegraph interns nodes), so this costs not
 (frozen weights, inputs without gradient) are dropped. `std.autodiff` provides `sum_like`, `broadcast_like` and
 `nograd` (stops gradients).
 
+A free function `f` gets a custom gradient by a free function `f_gradient` with the same convention (no weights):
+```dlm
+float[...] softmax_gradient(x: float[...], dy: float[...]) {
+    auto y = softmax(x);  // the forward pass's node
+    return y * (dy - sum(dy * y));
+}
+```
+Custom gradients that need only values the forward pass keeps anyway (like softmax's result) keep the forward pass of a
+gradient build as fast as inference: it does not compute intermediates just to save them for the backward pass.
+Calls whose computation the masking pass changed (e.g. `softmax` of a masked tensor) are differentiated automatically.
+
 
 ## Overloads and masked tensors
 Functions can be overloaded on whether their tensor parameters are `masked`. A masked tensor (`masked float[..., D]`)

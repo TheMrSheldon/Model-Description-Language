@@ -1332,7 +1332,23 @@ namespace mdl {
 						}
 					}
 				}
-				return graph().addInvocationNode(callee, std::move(args));
+				// A free function `f` with a custom gradient `f_gradient`: record the call for the gradient pass.
+				std::vector<const Node*> inputs;
+				for (const auto& arg : args)
+					inputs.push_back(&arg.get());
+				auto outputs = graph().addInvocationNode(callee, std::move(args));
+				if (outputs) {
+					auto gradient = currentNamespace().get<Object>(callee.name + "_gradient");
+					if (const auto* decl = gradient ? std::get_if<FunctionDecl>(&gradient->get()) : nullptr) {
+						ModuleCall call{.scope = scope, .path = {}, .module = nullptr, .hyperparameters = {},
+										.function = callee.name, .inputs = std::move(inputs), .outputs = {},
+										.customGradient = true, .gradient = decl};
+						for (const auto& output : *outputs)
+							call.outputs.push_back(&output.get());
+						graph().addModuleCall(std::move(call));
+					}
+				}
+				return outputs;
 			}();
 			if (!resultOrErr.has_value()) {
 				auto* tok = ctx->func->start;

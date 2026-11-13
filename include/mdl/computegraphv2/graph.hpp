@@ -18,17 +18,18 @@ namespace mdl {
 	struct ModuleType;
 
 	/**
-	 * @brief Side-table annotation: the nodes produced by one call of a member function of a module instance.
-	 * @details The graph stays flat; this records which nodes a module call consumed and produced, so that passes can
-	 * treat the call as a unit (e.g. the gradient pass uses a custom `gradient` function of the module). Only passes
-	 * that need it read it; backends ignore it.
+	 * @brief Side-table annotation: the nodes produced by one call of a member function of a module instance, or of a
+	 * free function that has a custom gradient.
+	 * @details The graph stays flat; this records which nodes a call consumed and produced, so that passes can treat the
+	 * call as a unit (e.g. the gradient pass uses a custom `gradient` function of the module). Only passes that need it
+	 * read it; backends ignore it.
 	 */
 	struct ModuleCall final {
 		/** @brief The scope of the weights (see Computegraph::getOrAddParameterNode). */
 		std::string scope;
 		/** @brief The path of the instance within the scope (e.g. `layers.3.norm1`); empty for the scope's module. */
 		std::string path;
-		/** @brief The (instantiated) module. */
+		/** @brief The (instantiated) module; nullptr for a call of a free function. */
 		std::shared_ptr<const ModuleType> module;
 		/** @brief The values bound to the module's hyperparameters. */
 		std::map<std::string, const Node*> hyperparameters;
@@ -41,6 +42,8 @@ namespace mdl {
 		 * after the masking pass inserted masking into the call's computation, which the custom gradient ignores).
 		 */
 		bool customGradient = true;
+		/** @brief For a call of a free function `f`: its custom gradient function `f_gradient`. */
+		const FunctionDecl* gradient = nullptr;
 
 		/** @brief The fully qualified path of the instance's weight @p weight (a path relative to the module). */
 		std::string weightPath(const std::string& weight) const { return path.empty() ? weight : path + "." + weight; }

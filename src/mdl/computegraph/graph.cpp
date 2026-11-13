@@ -562,6 +562,8 @@ std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocat
 
 	// Module calls within the callee now belong to the instance: `inner` becomes `instanceName.inner` in `scope`.
 	inliner.propagateModuleCalls([&](ModuleCall& call) {
+		if (call.module == nullptr)
+			return; // a call of a free function: no weights
 		call.scope = scope;
 		if (!instanceName.empty())
 			call.path = call.path.empty() ? instanceName : instanceName + "." + call.path;
