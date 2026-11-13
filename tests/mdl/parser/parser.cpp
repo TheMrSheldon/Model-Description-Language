@@ -481,3 +481,51 @@ TEST_CASE("implicit float conversions can be warnings or allowed (-Wfloat-wideni
 	CHECK(std::get<InvocationNode>(narrow).id == builtins::FunctionIDs::CAST);
 	CHECK(shapes::str(getDataType(narrow)) == "bfloat16[..., 4]");
 }
+
+// ---------------------------------------------------------------------------
+// Tensors whose slots are assigned one by one (`float[n, ..., d] hs; hs[i] = h;`)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("slots assigned in a loop form a stacked tensor; a slot is the assigned node", "[parser][slots]") {
+	auto unit = parseSource(R"(
+		module M[] {
+			float[3, ..., 4] all(x: float[..., 4]) {
+				float[3, ..., 4] hs;
+				auto h = x;
+				for (i in 0..3) {
+					h = h * 2;
+					hs[i] = h;
+				}
+				return hs;
+			}
+			float[..., 4] second(x: float[..., 4]) {
+				float[3, ..., 4] hs;
+				for (i in 0..3) { hs[i] = x + i; }
+				return hs[1];
+			}
+		}
+	)");
+	REQUIRE(unit.has_value());
+	const auto& all = moduleFunction(*unit, "M", "all");
+	const auto& stack = std::get<InvocationNode>(all.outputs[0].get());
+	CHECK(stack.id == builtins::FunctionIDs::STACK);
+	CHECK(stack.arguments.size() == 3);
+	CHECK(shapes::str(getDataType(all.outputs[0].get())) == "float32[3, ..., 4]");
+	// hs[1] is x + 1 itself (no stacking).
+	const auto& second = std::get<InvocationNode>(moduleFunction(*unit, "M", "second").outputs[0].get());
+	CHECK(second.id == builtins::FunctionIDs::TENSOR_ADD);
+}
+
+TEST_CASE("slots must be assigned before use, within bounds, and with the slot type", "[parser][slots]") {
+	auto fails = [](const std::string& body) {
+		return !parseSource("module M[] { float[2, ..., 4] f(x: float[..., 4]) { " + body + " } }").has_value();
+	};
+	CHECK_FALSE(fails("float[2, ..., 4] hs; hs[0] = x; hs[1] = x; return hs;"));
+	CHECK(fails("float[2, ..., 4] hs; hs[0] = x; return hs;"));					// hs[1] not assigned
+	CHECK(fails("float[2, ..., 4] hs; hs[0] = hs[1]; hs[1] = x; return hs;"));	// read before assignment
+	CHECK(fails("float[2, ..., 4] hs; hs[2] = x; hs[0] = x; hs[1] = x; return hs;")); // out of bounds
+	CHECK(fails("float[2, ..., 4] hs; hs[0] = x; hs[1] = x[... d -> ... d 1]; return hs;")); // wrong slot shape
+	CHECK(fails("auto hs = x; hs[0] = x; return x;"));							// not a slotted tensor
+	CHECK(fails("float[..., 4] hs; return x;"));									// no compile-time slot count
+	CHECK_FALSE(fails("float[2, ..., 4] hs; hs[0] = x; hs[-1] = x * 2; return hs;")); // negative: from the end
+}

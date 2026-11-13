@@ -340,3 +340,21 @@ TEST_CASE("the forward pass saves the input of an elementwise computation, not i
 		CHECK((std::holds_alternative<InputNode>(residual) || (inv && inv->id == builtins::FunctionIDs::TENSOR_DOT)));
 	}
 }
+
+TEST_CASE("the gradient of stacked slots selects the slices of the cotangent", "[autodiff]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			s: float[4]
+			float[2, ..., 4] forward(x: float[..., 4]) {
+				float[2, ..., 4] hs;
+				hs[0] = x * s;
+				hs[1] = x * s * s;
+				return hs;
+			}
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	auto grad = autodiff::vjp(unit.graph(), m.functions.at("forward"), weightPaths(m));
+	REQUIRE(grad.has_value());
+	CHECK(countReachable(*grad, builtins::FunctionIDs::SELECT) == 2);
+}

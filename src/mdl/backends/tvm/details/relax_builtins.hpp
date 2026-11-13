@@ -541,6 +541,17 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     },
     /** CAST — converted to the node's element type by the translation (see translateRelax) **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
+    /** STACK — each tensor as [1, ...], concatenated along the first dimension **/
+    [](auto& bb, auto ts) -> ::tvm::relax::Expr {
+        ::tvm::ffi::Array<::tvm::relax::Expr> parts;
+        for (const auto& t : ts) {
+            ::tvm::ffi::Array<::tvm::PrimExpr> shape{::tvm::IntImm(::tvm::DataType::Int(64), 1)};
+            for (const auto& d : tensorShape(t))
+                shape.push_back(d);
+            parts.push_back(emitAs(bb, callRelaxOp("relax.op.reshape", t, ::tvm::relax::ShapeExpr(shape)), "slot"));
+        }
+        return callRelaxOp("relax.op.concat", ::tvm::relax::Tuple(parts), ::tvm::ffi::Optional<int64_t>(0));
+    },
 });
 
 // Every builtin needs a translation (the table is positional).

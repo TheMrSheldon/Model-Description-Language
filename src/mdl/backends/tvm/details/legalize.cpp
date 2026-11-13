@@ -857,6 +857,15 @@ namespace mdl::backend::tvm {
 					return te.finish(topi::broadcast_to(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
 				}));
 
+		map.Set("relax.concat", wrap([](const BlockBuilder& bb, const Call& call) {
+					const auto* attrs = call->attrs.as<::tvm::relax::ConcatAttrs>();
+					TECall te{bb, "concat"};
+					Array<te::Tensor> parts;
+					for (const auto& field : ::tvm::Downcast<::tvm::relax::Tuple>(call->args[0])->fields)
+						parts.push_back(te.tensor(field));
+					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
+					return te.finish(topi::concatenate(parts, axis));
+				}));
 		map.Set("relax.collapse_sum_to", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					// Sums over leading dimensions (e.g. the gradient of a bias): a column sum of [M, N] by the kernel.
 					const auto& x = call->args[0];

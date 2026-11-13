@@ -44,9 +44,23 @@ namespace mdl {
 		std::optional<std::reference_wrapper<const T>> get(std::string_view name) const {
 			/** \todo handle misses **/
 			auto it = objects.find(std::string{name});
-			if (it != std::end(objects))
-				return std::any_cast<const T&>(it->second);
+			if (it != std::end(objects)) {
+				if (const T* object = std::any_cast<T>(&it->second))
+					return *object;
+				return std::nullopt; // an entry of another kind (e.g. a tensor whose slots are assigned one by one)
+			}
 			return (parent != nullptr) ? parent->get<T>(name) : std::nullopt;
+		}
+
+		/**
+		 * @brief The entry named @p name in this or a parent namespace if it is a @p T (mutable, e.g. to assign a slot
+		 * of a tensor); nullptr otherwise.
+		 */
+		template <typename T>
+		T* find(std::string_view name) {
+			if (auto it = objects.find(std::string{name}); it != objects.end())
+				return std::any_cast<T>(&it->second);
+			return parent != nullptr ? parent->find<T>(name) : nullptr;
 		}
 
 		/**

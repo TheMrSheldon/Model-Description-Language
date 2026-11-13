@@ -1076,6 +1076,8 @@ namespace mdl {
 	public:
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
+			if (const auto* tensor = currentNamespace().find<SlottedTensor>(ctx->IDENT()->getText()))
+				return stacked(*tensor, ctx->IDENT()->getText(), ctx->IDENT()->getSymbol());
 			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
 			if (!value.has_value()) {
 				auto* sym = ctx->IDENT()->getSymbol();
@@ -1273,6 +1275,53 @@ namespace mdl {
 				return &graph().addErrorNode();
 			}
 			return static_cast<const Node*>(&result->get());
+		}
+
+		/**
+		 * @brief A tensor declared without initializer (`float[n, ..., d] hs;`): its n slots along the first dimension
+		 * are assigned one by one (`hs[i] = h;`, compile-time indices), e.g. the output of every layer in a loop.
+		 * @details Reading a slot yields the assigned node; using the tensor as a whole stacks the slots (a STACK node).
+		 * Every slot that is read must have been assigned (checked when compiling).
+		 */
+		struct SlottedTensor {
+			TensorType type;
+			std::vector<const Node*> slots; ///< nullptr: not assigned yet
+		};
+
+		/** @brief The type of a slot of @p t (the declared type without its first dimension). */
+		static TensorType slotType(const SlottedTensor& t) {
+			TensorType type = t.type;
+			type.shape.erase(type.shape.begin());
+			return type;
+		}
+
+		const Node* slotError(antlr4::Token* tok, const std::string& message) {
+			errorlistener->semanticError(PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(), message);
+			return &graph().addErrorNode();
+		}
+
+		/** @brief The slot @p index of @p t (negative: from the end), which must be assigned. */
+		const Node* slot(const SlottedTensor& t, const std::string& name, int index, antlr4::Token* tok) {
+			const int n = static_cast<int>(t.slots.size());
+			const int i = index < 0 ? index + n : index;
+			if (i < 0 || i >= n)
+				return slotError(tok, std::format("Index {} is out of bounds ({} has {} slots)", index, name, n));
+			if (t.slots[i] == nullptr)
+				return slotError(tok, std::format("{}[{}] is used before it is assigned", name, i));
+			return t.slots[i];
+		}
+
+		/** @brief @p t as a whole: its slots stacked (all must be assigned). */
+		const Node* stacked(const SlottedTensor& t, const std::string& name, antlr4::Token* tok) {
+			std::vector<Computegraph::NodeRef> parts;
+			for (size_t i = 0; i < t.slots.size(); ++i) {
+				if (t.slots[i] == nullptr)
+					return slotError(tok, std::format("{} is used before all its slots are assigned ({}[{}] is not)", name, name, i));
+				if (std::holds_alternative<ErrorNode>(*t.slots[i]))
+					return t.slots[i]; // (reported)
+				parts.push_back(std::cref(*t.slots[i]));
+			}
+			return &graph().addInvocationNode(builtins::FunctionIDs::STACK, std::move(parts));
 		}
 
 		/** @brief The float element type of a tensor node, if it has one. */
@@ -1618,6 +1667,35 @@ namespace mdl {
 		}
 
 		virtual std::any visitDeclarationStatement(mdlParser::DeclarationStatementContext* ctx) override {
+			if (ctx->expr() == nullptr) { // a tensor whose slots are assigned one by one
+				auto* tok = ctx->names[0];
+				if (ctx->type() == nullptr) {
+					slotError(tok, "A declaration without initializer needs a tensor type (e.g. `float[n, ..., d] hs;`)");
+					return std::nullopt;
+				}
+				auto dtype = std::any_cast<DataType>(ctx->type()->accept(this));
+				const auto* tensor = std::get_if<TensorType>(&dtype);
+				std::optional<int> n;
+				if (tensor != nullptr && !tensor->shape.empty()) {
+					if (const auto* u = std::get_if<unsigned>(&tensor->shape.front()))
+						n = static_cast<int>(*u);
+					else if (const auto* node = std::get_if<const Node*>(&tensor->shape.front()))
+						if (auto v = foldConstant(**node); v && std::holds_alternative<int>(*v))
+							n = std::get<int>(*v);
+				}
+				if (!n || *n <= 0) {
+					slotError(
+							tok, "A declaration without initializer needs a tensor type whose first dimension is a "
+								 "compile-time size (the number of slots, e.g. `float[n, ..., d] hs;`)"
+					);
+					return std::nullopt;
+				}
+				for (auto* name : ctx->names)
+					currentNamespace().put(
+							name->getText(), SlottedTensor{.type = *tensor, .slots = std::vector<const Node*>(*n, nullptr)}
+					);
+				return std::nullopt;
+			}
 			/** \todo check datatype with ctx->type() **/
 			auto value = ctx->expr()->accept(this);
 			if (ctx->names.size() == 1) {
@@ -1656,6 +1734,51 @@ namespace mdl {
 			return std::nullopt;
 		}
 
+		virtual std::any visitSlotAssignStatement(mdlParser::SlotAssignStatementContext* ctx) override {
+			const std::string name = ctx->name->getText();
+			auto* tensor = currentNamespace().find<SlottedTensor>(name);
+			if (tensor == nullptr) {
+				slotError(
+						ctx->name, currentNamespace().get<Object>(name)
+										   ? std::format("`{}[i] = ...` assigns a slot of a tensor declared without "
+														 "initializer (e.g. `float[n, ..., d] {};`)", name, name)
+										   : std::format("Variable {} is not defined", name)
+				);
+				return std::nullopt;
+			}
+			auto index = constantInt(ctx->index);
+			const Node* value = asNode(ctx->value->accept(this), ctx->value->start);
+			if (!index)
+				return std::nullopt;
+			const int n = static_cast<int>(tensor->slots.size());
+			const int i = *index < 0 ? *index + n : *index;
+			if (i < 0 || i >= n) {
+				slotError(ctx->index->start, std::format("Index {} is out of bounds ({} has {} slots)", *index, name, n));
+				return std::nullopt;
+			}
+			// An erroneous value (already reported) counts as assigned, so that its uses are not reported again.
+			if (std::holds_alternative<ErrorNode>(*value)) {
+				tensor->slots[i] = value;
+				return std::nullopt;
+			}
+			const TensorType type = slotType(*tensor);
+			if (isFloat(type.type))
+				value = implicitConversion(*value, type.type, ctx->value->start, std::format("Slot {}[{}]", name, i));
+			if (value == nullptr) {
+				tensor->slots[i] = &graph().addErrorNode(); // (reported)
+				return std::nullopt;
+			}
+			if (!shapes::matches(type, getDataType(*value))) {
+				tensor->slots[i] = slotError(
+						ctx->value->start, std::format("{}[{}] is assigned {}, but the slots of {} are {}", name, i,
+													   shapes::str(getDataType(*value)), name, shapes::str(type))
+				);
+				return std::nullopt;
+			}
+			tensor->slots[i] = value;
+			return std::nullopt;
+		}
+
 		virtual std::any visitForStatement(mdlParser::ForStatementContext* ctx) override {
 			auto lo = constantInt(ctx->lo), hi = constantInt(ctx->hi);
 			if (!lo || !hi)
@@ -1677,6 +1800,15 @@ namespace mdl {
 		}
 
 		virtual std::any visitIndexExpression(mdlParser::IndexExpressionContext* ctx) override {
+			// A slot of a tensor declared without initializer: the assigned node.
+			if (auto* var = dynamic_cast<mdlParser::VarAccessExpressionContext*>(ctx->base); var && ctx->indices.size() == 1)
+				if (const auto* tensor = currentNamespace().find<SlottedTensor>(var->IDENT()->getText()))
+					if (auto* value = dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[0])) {
+						auto index = constantInt(value->expr());
+						if (!index)
+							return static_cast<const Node*>(&graph().addErrorNode());
+						return slot(*tensor, var->IDENT()->getText(), *index, value->start);
+					}
 			auto base = asObject(ctx->base->accept(this), ctx->base->start);
 			if (const auto* node = std::get_if<const Node*>(&base); node && std::holds_alternative<ErrorNode>(**node))
 				return &graph().addErrorNode();

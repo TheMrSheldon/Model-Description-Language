@@ -254,6 +254,8 @@ namespace mdl::autodiff {
 				return b.op(FIDs::TAKE, {g, *other});
 			case FIDs::CAST: // the gradient in the argument's type
 				return b.castLike(g, x);
+			case FIDs::STACK: // the slice of the stacked tensor
+				return b.op(FIDs::SELECT, {g, graph.addConstNode(Atomic{0}), graph.addConstNode(Atomic{static_cast<int>(arg)})});
 			default:
 				throw NoGradientRule{inv.id};
 			}

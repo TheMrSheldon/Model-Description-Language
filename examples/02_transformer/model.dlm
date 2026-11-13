@@ -55,6 +55,17 @@ module BertEncoder[conf: TransformerConf] {
         }
         return h;
     }
+
+    /** @brief The output of every layer (e.g. for features from intermediate layers): [layers, ..., model]. */
+    float[conf.numEncoders, ..., conf.dims.model] hiddenStates(x: float[..., conf.dims.model]) {
+        float[conf.numEncoders, ..., conf.dims.model] hs;
+        auto h = x;
+        for (i in 0..conf.numEncoders) {
+            h = layers[i](h);
+            hs[i] = h;
+        }
+        return hs;
+    }
 }
 
 /** @brief Sizes of BERT's embedding tables. */

@@ -170,17 +170,35 @@ int main(int argc, char* argv[]) {
 	Model::forward(x, weights, out);
 	if (check) {
 		const int64_t D = inShape.back();
-		double maxErr = 0;
+		// The output of every layer ([layers, ..., D]), collected in a loop with `hs[i] = h`.
+		auto hsShape = std::vector<int64_t>(
+				Model::hiddenStates_outputs[0].shape.begin(),
+				Model::hiddenStates_outputs[0].shape.begin() + Model::hiddenStates_outputs[0].ndim
+		);
+		{
+			std::vector<int64_t> values = runtimeDims == 2 ? std::vector<int64_t>{batch, seq} : std::vector<int64_t>{seq};
+			size_t k = 0;
+			for (auto& d : hsShape)
+				if (d == -1)
+					d = values[k++];
+		}
+		Tensor hidden{hsShape};
+		Model::hiddenStates(x, weights, hidden);
+		double maxErr = 0, maxHiddenErr = 0;
 		for (int64_t b = 0; b < batch; ++b) {
 			std::vector<float> expected(x.data() + b * seq * D, x.data() + (b + 1) * seq * D);
-			for (int layer = 0; layer < numLayers(); ++layer)
+			for (int layer = 0; layer < numLayers(); ++layer) {
 				expected = referenceLayer(expected, tensors, seq, D, "layers." + std::to_string(layer) + ".");
+				const float* slice = hidden.data() + (layer * batch + b) * seq * D;
+				for (size_t i = 0; i < expected.size(); ++i)
+					maxHiddenErr = std::max(maxHiddenErr, double(std::abs(slice[i] - expected[i])));
+			}
 			for (size_t i = 0; i < expected.size(); ++i)
 				maxErr = std::max(maxErr, double(std::abs(out.data()[b * seq * D + i] - expected[i])));
 		}
-		std::printf("layers=%d batch=%lld seq=%lld  max |mdl - reference| = %.3g\n", numLayers(),
-					static_cast<long long>(batch), static_cast<long long>(seq), maxErr);
-		if (!(maxErr < 1e-3)) {
+		std::printf("layers=%d batch=%lld seq=%lld  max |mdl - reference| = %.3g (hidden states: %.3g)\n", numLayers(),
+					static_cast<long long>(batch), static_cast<long long>(seq), maxErr, maxHiddenErr);
+		if (!(maxErr < 1e-3) || !(maxHiddenErr < 1e-3)) {
 			std::printf("FAILED\n");
 			return 1;
 		}

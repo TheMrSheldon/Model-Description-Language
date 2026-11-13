@@ -73,6 +73,8 @@ namespace mdl::builtins {
 		UNSELECT_LIKE, /**< (g, axis, index, like): zeros like `like`, g at `index` along `axis` (the adjoint) */
 		/** Conversion of the element type **/
 		CAST, /**< (x, type): x converted to the element type `type` (a constant: the value of mdl::PrimitiveType) */
+		/** Stacking **/
+		STACK, /**< (x_0, ..., x_{n-1}): the tensors (of equal shapes) stacked along a new first dimension [n, ...] */
 
 		COUNT
 	};

@@ -85,6 +85,39 @@ error: Argument 1 of forward is float[..., 512], but the parameter x is float[..
 
 Member functions of a submodule instance are called on the instance (`norm.gradient(x, dy)`) and use its weights.
 
+## Loops
+`for (i in lo..hi) { ... }` repeats its body for `i = lo, ..., hi - 1`; the bounds are compile-time integers, and the
+loop is expanded when compiling (there is no loop at runtime). The body is a scope of its own; an assignment `h = ...`
+rebinds a variable declared outside, which carries state from one iteration to the next:
+```dlm
+module Encoder[n: uint, d: uint] {
+    layers: [Layer[d] for i in 0..n]          // an array of module instances
+    float[..., d] forward(x: float[..., d]) {
+        auto h = x;
+        for (i in 0..n) { h = layers[i](h); }
+        return h;
+    }
+}
+```
+
+A tensor declared without initializer has slots along its first dimension that are assigned one by one, e.g. to keep
+the output of every layer. Its first dimension (the number of slots) is a compile-time size, and the indices are
+compile-time integers (negative ones count from the end):
+```dlm
+float[n, ..., d] hiddenStates(x: float[..., d]) {
+    float[n, ..., d] hs;
+    auto h = x;
+    for (i in 0..n) {
+        h = layers[i](h);
+        hs[i] = h;
+    }
+    return hs;                                 // [n, ..., d]
+}
+```
+`hs[k]` is the value assigned to slot k (no copy); `hs` as a whole is the slots stacked. A slot must be assigned before
+it is read, and all slots before `hs` is used as a whole (errors otherwise). The assigned values must have the slot type
+(the declared type without its first dimension).
+
 ## Custom gradients
 A member function named `gradient` is the gradient of `forward` (for another member function `f`: `f_gradient`). It
 is an ordinary function; only the gradient pass (`mdlc --grad`) gives it this meaning. If it is defined, it is used

@@ -109,10 +109,14 @@ expr
 
 statement
       : expr ';'                                           # ExpressionStatement
-      | (type | 'auto') names+=IDENT (',' names+=IDENT)* '=' expr ';' # DeclarationStatement
+      // Without initializer (only with a tensor type `T[n, ...]`): a tensor whose n slots `name[i]` are assigned one by
+      // one (e.g. per layer in a loop); every slot must be assigned before the tensor (or the slot) is used.
+      | (type | 'auto') names+=IDENT (',' names+=IDENT)* ('=' expr)? ';' # DeclarationStatement
       | 'return' values+=expr (',' values+=expr)* ';'       # ReturnStatement
       // Rebinds a variable of an enclosing scope (e.g. the state carried through a loop)
       | name=IDENT '=' expr ';'                             # AssignStatement
+      // Assigns a slot of a tensor declared without initializer (a compile-time index)
+      | name=IDENT '[' index=expr ']' '=' value=expr ';'      # SlotAssignStatement
       // Compile-time loop: the body is expanded for var = lo, ..., hi-1
       | 'for' '(' var=IDENT 'in' lo=expr '..' hi=expr ')' '{' statement* '}' # ForStatement
       ;

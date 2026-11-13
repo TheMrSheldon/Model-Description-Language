@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <format>
 #include <functional>
+#include <numeric>
 #include <utility>
 
 namespace mdl::shapes {
@@ -311,6 +312,17 @@ namespace mdl::shapes {
 					arg(0);
 					return arg(3);
 
+				case FIDs::STACK: {
+					if (args.empty())
+						fail("stack of no tensors");
+					Shape s = arg(0);
+					for (size_t i = 1; i < args.size(); ++i)
+						if (!symbolic && arg(i) != s)
+							mismatched(std::format("the stacked tensors have different shapes ({} and {})", str(s), str(arg(i))));
+					s.insert(s.begin(), Dim::constant(static_cast<int64_t>(args.size())));
+					return s;
+				}
+
 				case FIDs::TAKE: {
 					const Shape& table = arg(0);
 					if (table.empty())
@@ -475,6 +487,14 @@ namespace mdl::shapes {
 			default:
 				return {};
 			}
+		}
+
+		std::vector<size_t> combinedOperands(FIDs id, size_t numArgs) {
+			if (id != FIDs::STACK)
+				return combinedOperands(id);
+			std::vector<size_t> all(numArgs);
+			std::iota(all.begin(), all.end(), 0);
+			return all;
 		}
 
 		/** @brief The element type of the result of @p id (see resultType). */
@@ -654,7 +674,7 @@ namespace mdl::shapes {
 	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
 		// Float tensors of different types do not combine (conversions are explicit).
 		std::optional<PrimitiveType> floatType;
-		for (size_t i : combinedOperands(id)) {
+		for (size_t i : combinedOperands(id, args.size())) {
 			const auto* t = i < args.size() ? std::get_if<TensorType>(&getDataType(args[i].get())) : nullptr;
 			if (t == nullptr || !isFloat(t->type))
 				continue;
