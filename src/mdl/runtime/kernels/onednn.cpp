@@ -332,6 +332,61 @@ namespace {
 		stream().wait();
 	}
 
+	void geluBackward(dt t, void* dx, const void* x, const void* dy, int64_t n) {
+		using Key = std::tuple<int, int64_t>;
+		static PrimitiveCache<Key, std::optional<dnnl::eltwise_backward>> cache;
+		const memory::desc md({n}, t, memory::format_tag::a);
+		const auto& prim = cache.get(Key{static_cast<int>(t), n}, [&]() -> std::optional<dnnl::eltwise_backward> {
+			auto create = [&] {
+				auto hint = dnnl::eltwise_forward::primitive_desc(
+						engine(), dnnl::prop_kind::forward_training, dnnl::algorithm::eltwise_gelu_erf, md, md, 0.f, 0.f
+				);
+				return dnnl::eltwise_backward::primitive_desc(
+						engine(), dnnl::algorithm::eltwise_gelu_erf, md, md, md, 0.f, 0.f, hint
+				);
+			};
+			if (t != dt::f32 && !implemented(create))
+				return std::nullopt;
+			return dnnl::eltwise_backward(create());
+		});
+		if (!prim) {
+			thread_local Scratch scratch;
+			float* x32 = widened(scratch, 0, t, x, n);
+			float* g32 = widened(scratch, 1, t, dy, n);
+			geluBackward(dt::f32, g32, x32, g32, n);
+			convert(dt::f32, g32, t, dx, n);
+			return;
+		}
+		prim->execute(
+				stream(), {{DNNL_ARG_SRC, memory(md, engine(), const_cast<void*>(x))},
+						   {DNNL_ARG_DIFF_DST, memory(md, engine(), const_cast<void*>(dy))},
+						   {DNNL_ARG_DIFF_SRC, memory(md, engine(), dx)}}
+		);
+		stream().wait();
+	}
+
+	/**
+	 * @brief dst[n] = sum over m of src[m, n]: the product of a row of ones with src (memory-bound like a reduction;
+	 * float32 accumulation).
+	 */
+	void sumRows(dt t, void* dst, const void* src, int64_t M, int64_t N) {
+		thread_local std::vector<uint16_t> ones16;
+		thread_local std::vector<float> ones32;
+		const void* ones = nullptr;
+		if (t == dt::f32) {
+			if (ones32.size() < static_cast<size_t>(M))
+				ones32.assign(static_cast<size_t>(M), 1.0f);
+			ones = ones32.data();
+		} else {
+			const uint16_t one = t == dt::bf16 ? 0x3f80 : 0x3c00; // 1.0 in bfloat16 / float16
+			if (ones16.size() < static_cast<size_t>(M) || ones16.front() != one)
+				ones16.assign(static_cast<size_t>(M), one);
+			ones = ones16.data();
+		}
+		const View a{{1, M}, {M, 1}}, b{{M, N}, {N, 1}}, d{{1, N}, {N, 1}};
+		matmul(t, dst, ones, src, nullptr, a, b, d, nullptr, 0, 1.0f);
+	}
+
 	void layerNorm(
 			dt t, void* dst, const void* src, const void* scale, const void* shift, int64_t rows, int64_t channels, float eps
 	) {
@@ -423,6 +478,12 @@ namespace {
 	}                                                                                                                  \
 	extern "C" int mdl_gelu_##suffix(type* dst, const type* src, int64_t n) {                                         \
 		return guarded([&] { gelu(dtype, dst, src, n); });                                                             \
+	}                                                                                                                  \
+	extern "C" int mdl_gelu_backward_##suffix(type* dx, const type* x, const type* dy, int64_t n) {                   \
+		return guarded([&] { geluBackward(dtype, dx, x, dy, n); });                                                    \
+	}                                                                                                                  \
+	extern "C" int mdl_sum_rows_##suffix(type* dst, const type* src, int64_t M, int64_t N) {                          \
+		return guarded([&] { sumRows(dtype, dst, src, M, N); });                                                       \
 	}                                                                                                                  \
 	extern "C" int mdl_layer_norm_##suffix(                                                                            \
 			type* dst, const type* src, const type* scale, const type* shift, int64_t rows, int64_t channels, float eps \

@@ -181,6 +181,25 @@ namespace mdl::backend::tvm {
 			return {"gelu", pattern, rewriter};
 		}
 
+		// ── GELU's gradient (std.gelu_gradient): dy * (0.5 * (1 + erf(x / sqrt(2))) + x * exp(-0.5 * x * x) / sqrt(2π))
+
+		PatternEntry makeGeluGradient() {
+			auto x = Wildcard(), dy = Wildcard();
+			auto sqrt2 = Wildcard(), one = Wildcard(), half = Wildcard(), minusHalf = Wildcard(), density = Wildcard();
+			auto cdf = IsOp("relax.multiply")(half, IsOp("relax.add")(one, IsOp("relax.erf")(IsOp("relax.divide")(x, sqrt2))));
+			auto gauss = IsOp("relax.exp")(IsOp("relax.multiply")(IsOp("relax.multiply")(minusHalf, x), x));
+			auto pdf = IsOp("relax.multiply")(IsOp("relax.multiply")(x, gauss), density);
+			DFPattern pattern = IsOp("relax.multiply")(dy, IsOp("relax.add")(cdf, pdf));
+			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
+				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
+				if (!near(at(sqrt2), std::sqrt(2.0)) || !near(at(one), 1.0) || !near(at(half), 0.5) ||
+					!near(at(minusHalf), -0.5) || !near(at(density), 1.0 / std::sqrt(2.0 * M_PI)))
+					return call;
+				return ::mdl::backend::tvm::makeGeluBackward(m.at(x), m.at(dy));
+			};
+			return {"gelu backward", pattern, rewriter};
+		}
+
 		// ── layer norm (std.LayerNorm) ──────────────────────────────────────────────────────────────────
 		//   mu = reshape(sum(x) / n)          xc = x - mu
 		//   s  = rsqrt(reshape(sum(xc * xc) / n) + eps)
@@ -301,6 +320,7 @@ namespace mdl::backend::tvm {
 		return {
 				makeSoftmax(),			// before the matmul patterns: the attention's softmax input is a divide
 				makeGelu(),
+				makeGeluGradient(),
 				makeLayerNorm(),
 				makeLinear(true),		// a @ W^T + b (std.Linear)
 				makeLinear(false),		// a @ W + b

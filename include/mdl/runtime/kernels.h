@@ -59,6 +59,16 @@ int mdl_gelu_f32(float* dst, const float* src, int64_t n);
 int mdl_gelu_bf16(uint16_t* dst, const uint16_t* src, int64_t n);
 int mdl_gelu_f16(uint16_t* dst, const uint16_t* src, int64_t n);
 
+/** @brief Column sums `dst[n] = sum_m src[m, n]` of a [M, N] tensor (e.g. the gradient of a bias). */
+int mdl_sum_rows_f32(float* dst, const float* src, int64_t M, int64_t N);
+int mdl_sum_rows_bf16(uint16_t* dst, const uint16_t* src, int64_t M, int64_t N);
+int mdl_sum_rows_f16(uint16_t* dst, const uint16_t* src, int64_t M, int64_t N);
+
+/** @brief The gradient of exact GELU: `dx = dy * GELU'(x)` over @p n elements. */
+int mdl_gelu_backward_f32(float* dx, const float* x, const float* dy, int64_t n);
+int mdl_gelu_backward_bf16(uint16_t* dx, const uint16_t* x, const uint16_t* dy, int64_t n);
+int mdl_gelu_backward_f16(uint16_t* dx, const uint16_t* x, const uint16_t* dy, int64_t n);
+
 /** @brief Layer normalization over the last axis of a [rows, channels] tensor with scale (gamma) and shift (beta). */
 int mdl_layer_norm_f32(
 		float* dst, const float* src, const float* scale, const float* shift, int64_t rows, int64_t channels, float eps

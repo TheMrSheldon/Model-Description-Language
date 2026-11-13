@@ -767,6 +767,23 @@ namespace mdl::backend::tvm {
 		return makeCall(m);
 	}
 
+	Expr makeGeluBackward(Expr x, Expr dy) {
+		static const auto& op = ::tvm::Op::Get("mdl.gelu_backward");
+		return Call(op, {std::move(x), std::move(dy)});
+	}
+
+	TVM_REGISTER_OP("mdl.gelu_backward")
+			.set_num_inputs(2)
+			.add_argument("x", "Tensor", "The input of GELU.")
+			.add_argument("dy", "Tensor", "The cotangent of GELU's result (same shape).")
+			.set_attr<::tvm::relax::FInferStructInfo>(
+					"FInferStructInfo",
+					[](const Call& call, const BlockBuilder&) -> ::tvm::relax::StructInfo {
+						return ::tvm::relax::GetStructInfo(call->args[1]);
+					}
+			)
+			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
+
 	::tvm::transform::Pass foldPermutesIntoMatmul() {
 		return ::tvm::relax::transform::CreateFunctionPass(
 				[](::tvm::relax::Function f, ::tvm::IRModule, ::tvm::transform::PassContext) {
@@ -840,10 +857,42 @@ namespace mdl::backend::tvm {
 					return te.finish(topi::broadcast_to(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
 				}));
 
-		map.Set("relax.collapse_sum_to", wrap([](const BlockBuilder& bb, const Call& call) {
+		map.Set("relax.collapse_sum_to", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+					// Sums over leading dimensions (e.g. the gradient of a bias): a column sum of [M, N] by the kernel.
+					const auto& x = call->args[0];
+					const auto dtype = tensorInfo(x)->dtype;
+					auto shape = shapeOf(x);
+					auto target = ::tvm::Downcast<ShapeExpr>(call->args[1])->values;
+					::tvm::arith::Analyzer analyzer;
+					size_t lead = 0; // leading 1s of the target
+					while (lead < target.size() && analyzer.CanProveEqual(target[lead], 1))
+						++lead;
+					const size_t t = target.size() - lead;
+					// (A sum of a product, e.g. the gradient of LayerNorm's scale, fuses with the product instead.)
+					bool ofProduct = false;
+					if (const auto* var = x.as<::tvm::relax::VarNode>())
+						if (auto value = bb->LookupBinding(::tvm::ffi::GetRef<::tvm::relax::Var>(var)))
+							if (const auto* producer = value.value().as<::tvm::relax::CallNode>()) {
+								static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
+								const auto* kernel = producer->op.same_as(callTir) && !producer->args.empty()
+															 ? producer->args[0].as<::tvm::GlobalVarNode>()
+															 : nullptr;
+								ofProduct = producer->op.same_as(::tvm::Op::Get("relax.multiply")) ||
+											(kernel != nullptr && std::string(kernel->name_hint).starts_with("multiply"));
+							}
+					bool suffix = vendor && !ofProduct && kernelSuffix(dtype) && t > 0 && t < shape.size();
+					for (size_t i = 0; suffix && i < t; ++i)
+						suffix = analyzer.CanProveEqual(target[lead + i], shape[shape.size() - t + i]);
+					if (suffix) {
+						ExternCall ext{bb, "mdl_sum_rows_" + *kernelSuffix(dtype)};
+						auto px = ext.input(x, "x");
+						auto pout = ext.output(target, dtype);
+						return ext.finish(
+								{pout, px, product(shape, 0, shape.size() - t), product(shape, shape.size() - t, shape.size())}
+						);
+					}
 					TECall te{bb, "collapse_sum"};
-					auto x = te.tensor(call->args[0]);
-					return te.finish(topi::collapse_sum(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
+					return te.finish(topi::collapse_sum(te.tensor(x), target));
 				}));
 		map.Set("relax.equal", wrap([](const BlockBuilder& bb, const Call& call) {
 					TECall te{bb, "equal"};
@@ -923,6 +972,36 @@ namespace mdl::backend::tvm {
 								return v * c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2)));
 							},
 							"T_gelu", topi::kElementWise
+					));
+				}));
+		map.Set("mdl.gelu_backward", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+					const auto &x = call->args[0], &dy = call->args[1];
+					auto shape = shapeOf(dy);
+					const auto dtype = tensorInfo(dy)->dtype;
+					if (vendor && kernelSuffix(dtype) && tensorInfo(x)->dtype == dtype &&
+						::tvm::ffi::StructuralEqual()(shapeOf(x), shape)) {
+						ExternCall ext{bb, "mdl_gelu_backward_" + *kernelSuffix(dtype)};
+						auto px = ext.input(x, "x");
+						auto pdy = ext.input(dy, "dy");
+						auto pout = ext.output(shape, dtype);
+						return ext.finish({pout, px, pdy, product(shape, 0, shape.size())});
+					}
+					// dy * GELU'(x) = dy * (Φ(x) + x φ(x)), in float32.
+					TECall te{bb, "gelu_backward"};
+					auto tx = te.tensor(x, "x");
+					auto tdy = te.tensor(dy, "dy");
+					return te.finish(te::compute(
+							tdy->shape,
+							[&](const Array<tirx::Var>& i) {
+								const auto f32 = ::tvm::DataType::Float(32);
+								Array<PrimExpr> index{i.begin(), i.end()};
+								PrimExpr v = ::tvm::cast(f32, tx(index));
+								auto c = [&](double d) { return ::tvm::tirx::make_const(f32, d); };
+								PrimExpr grad = c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2))) +
+												v * ::tvm::exp(c(-0.5) * v * v) * c(0.3989422804014327);
+								return ::tvm::cast(tdy->dtype, ::tvm::cast(f32, tdy(index)) * grad);
+							},
+							"T_gelu_backward", topi::kElementWise
 					));
 				}));
 		map.Set("relax.take", wrap([](const BlockBuilder& bb, const Call& call) {

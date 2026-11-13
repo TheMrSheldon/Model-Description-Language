@@ -31,6 +31,9 @@ namespace mdl::backend::tvm {
 			double alpha, bool transA = false
 	);
 
+	/** @brief Creates a call of the backend operator `mdl.gelu_backward`: dy * GELU'(x) (exact GELU). */
+	::tvm::relax::Expr makeGeluBackward(::tvm::relax::Expr x, ::tvm::relax::Expr dy);
+
 	/**
 	 * @brief Folds permutations into mdl.matmul: permuted operands are read through strides, and a permuted product
 	 * (without other uses) is written in the permuted layout (e.g. the heads of attention), instead of transposing.
