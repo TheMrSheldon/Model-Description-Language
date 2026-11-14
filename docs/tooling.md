@@ -96,9 +96,10 @@ Features:
     iteration of a loop, and one instance of an array of modules.
   - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
     equal in an instance: they are warnings (`possible-mismatch`), and errors with the `strict` option.
-- **Semantic tokens:** modules, structs, functions, hyperparameters, members, parameters, variables, annotations,
-  keywords and numbers. The axes of einops patterns get their own token type, `axis`. The token types are standard,
-  except `axis`, which an editor extension declares with a fallback.
+- **Semantic tokens:** what needs the parse tree: modules, structs, functions and methods, hyperparameters, members,
+  parameters, variables, annotations, and the axes of einops patterns (their own token type `axis`, which an editor
+  extension declares with a fallback). Keywords, literals, and operators are left to the editor's grammar: they need no
+  context, and a grammar can distinguish them further (e.g. control-flow keywords from declarations).
 - **Hover:**
   - the declaration as written;
   - its kind and container;

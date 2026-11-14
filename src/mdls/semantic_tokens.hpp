@@ -22,9 +22,10 @@ namespace mdls {
 	const std::vector<std::string>& semanticTokenModifiers();
 
 	/**
-	 * @brief Classifies the identifiers, keywords, and literals of @p text from its parse tree (no type checking, so it
-	 * works on code with errors): definitions and references of modules, structs, functions, hyperparameters, members,
-	 * parameters, variables; annotations; einops axes.
+	 * @brief Classifies the identifiers of @p text from its parse tree (no type checking, so it works on code with
+	 * errors): definitions and references of modules, structs, functions, hyperparameters, members, parameters,
+	 * variables; annotations; einops axes. Keywords, literals, and operators are left to the editor's grammar (they
+	 * need no context, and a grammar can distinguish them further, e.g. control-flow keywords).
 	 */
 	std::vector<SemanticToken> semanticTokens(std::string_view text);
 
