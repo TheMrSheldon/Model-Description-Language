@@ -1,4 +1,10 @@
 // Printing of diagnostics for a terminal (see mdl::printDiagnostic).
+#ifdef _WIN32
+// <windows.h> (also included by termcolor) must not define min and max (std::min/std::max below).
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#endif
+
 #include <mdl/diagnostics.hpp>
 
 #include <cstdint> // (termcolor uses uint8_t without including it)
