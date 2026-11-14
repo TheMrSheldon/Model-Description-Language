@@ -23,7 +23,10 @@ add_library(mdl_frontend STATIC
 	${ANTLR_mdlparser_CXX_OUTPUTS}
 )
 target_compile_features(mdl_frontend PUBLIC cxx_std_23)
+# The version (from the latest git tag, see the top-level CMakeLists.txt).
+configure_file(${PROJECT_SOURCE_DIR}/include/mdl/version.hpp.in ${PROJECT_BINARY_DIR}/generated/include/mdl/version.hpp @ONLY)
 target_include_directories(mdl_frontend PUBLIC
+	${PROJECT_BINARY_DIR}/generated/include
 	${PROJECT_SOURCE_DIR}/include
 	${PROJECT_SOURCE_DIR}/src # internal headers (e.g. mdl/argvals.hpp) for the compiler and the tests
 	${ANTLR4CPP_INCLUDE_DIRS}

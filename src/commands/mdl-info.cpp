@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include <mdl/version.hpp>
 
 #include <tvm/target/tag.h>
 #include <tvm/target/target_kind.h>
@@ -20,6 +21,7 @@ static void runInfoCommand(const InfoArgs& args) {
 
 int main(int argc, char* argv[]) {
 	CLI::App app("TODO");
+	app.set_version_flag("--version", std::string{mdl::version});
 
 	InfoArgs args;
 	setupLoggerArgs(app, args.logConf);

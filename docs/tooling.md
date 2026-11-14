@@ -9,6 +9,18 @@ Both use the same frontend as the compiler (library `mdl_frontend`: parser, type
 neither TVM/LLVM nor oneDNN, and build with each platform's native toolchain (Linux, macOS, Windows/MSVC; x86_64 and
 arm64).
 
+## Prebuilt binaries
+Each release (and the rolling `nightly` release of `main`) has archives `mdl-tools-<platform>` for `linux-x64`,
+`linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64`, plus `SHA256SUMS`. They contain
+`bin/mdl-format`, `bin/mdls`, and `share/mdl/std/`. They have no dependencies besides the operating system:
+- **Linux:** built on glibc 2.28 with libstdc++ and libgcc linked statically, so they run on distributions with glibc
+  2.28 or newer (e.g. Debian 10, Ubuntu 18.10, RHEL 8).
+- **Windows:** the static C runtime.
+- **macOS:** macOS 13.3 or newer.
+
+The version (`--version`, and `serverInfo` of `mdls`) comes from the latest git tag (`git describe --tags`; `0.0.0-dev`
+without tags).
+
 ## Building only the tooling
 ```bash
 cmake --preset conf-tooling -B build-tooling      # MDL_ENABLE_COMPILER=OFF
@@ -104,8 +116,10 @@ Features:
 - **Formatting:** the whole document, with `mdl-format`'s style (from `.mdl-format`, else the editor's tab size).
 - **Document symbols:** the outline of modules, structs and functions with their members.
 
-Documents are synchronized as full text and re-analyzed on every change (about 15 ms for the BERT example). Open
-documents take precedence over the files on disk, also for imports.
+Documents are synchronized as full text and re-analyzed on every change (about 15 ms for the BERT example), together
+with the open documents that import them. Open documents take precedence over the files on disk, also for imports.
+While a document does not parse, hover, go to definition, and completion use its last analysis (positions after the
+changed lines are mapped).
 
 Initialization options (from the editor), the same as `mdlc`'s:
 ```json

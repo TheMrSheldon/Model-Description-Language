@@ -1,6 +1,7 @@
 // mdls: the language server of the model description language (Language Server Protocol over stdin/stdout). The
 // editor starts it as a child process; it exits when the editor sends `exit` or closes stdin.
 #include "mdls/server.hpp"
+#include <mdl/version.hpp>
 
 #include <CLI/CLI.hpp>
 
@@ -15,6 +16,7 @@
 
 int main(int argc, char* argv[]) {
 	CLI::App app("mdls -- language server for the model description language (LSP over stdin/stdout)");
+	app.set_version_flag("--version", std::string{mdl::version});
 	std::string logFile;
 	app.add_option("--log", logFile, "Write a log to this file.");
 	app.add_flag("--stdio", "Communicate over stdin/stdout (the default; accepted for compatibility with clients).");

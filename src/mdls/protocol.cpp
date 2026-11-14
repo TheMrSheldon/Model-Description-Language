@@ -23,7 +23,19 @@ std::optional<mdls::json> mdls::readMessage(std::istream& in) {
 		if (line.size() > header.size() && std::equal(header.begin(), header.end(), line.begin(), [](char a, char b) {
 				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
 			})) {
-			length = std::stoul(line.substr(header.size()));
+			const std::string value = line.substr(header.size());
+			size_t used = 0;
+			unsigned long long parsed = 0;
+			try {
+				parsed = std::stoull(value, &used);
+			} catch (const std::exception&) {
+				throw ProtocolError("invalid Content-Length: " + value);
+			}
+			if (value.find_first_not_of(" \t", used) != std::string::npos || value.find('-') != std::string::npos)
+				throw ProtocolError("invalid Content-Length: " + value);
+			if (parsed > maxMessageSize)
+				throw ProtocolError("message too large: " + value + " bytes");
+			length = static_cast<size_t>(parsed);
 			haveLength = true;
 		}
 	}

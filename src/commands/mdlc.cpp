@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include <mdl/version.hpp>
 #include "mdl/argvals.hpp"
 
 #include <mdl/bindings/generator.hpp>
@@ -348,6 +349,7 @@ static void runCompileCommand(const CompileArgs& args) {
 
 int main(int argc, char* argv[]) {
 	CLI::App app("mdlc -- compiler for the model description language");
+	app.set_version_flag("--version", std::string{mdl::version});
 
 	CompileArgs args;
 	setupLoggerArgs(app, args.logConf);
