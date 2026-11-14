@@ -2,30 +2,49 @@ include(CTest)
 
 CPMAddPackage(URI "gh:catchorg/Catch2@3.8.0" EXCLUDE_FROM_ALL YES)
 
-add_executable(tests
-	# Add test files here
+# Frontend tests (parser, type checks, computegraph): no backend needed.
+add_executable(frontend_tests
     mdl/computegraph/function.cpp
     mdl/computegraph/object.cpp
-    mdl/computegraph/einops.cpp
     mdl/computegraph/graph.cpp
     mdl/parser/parser.cpp
     mdl/parser/overloads.cpp
     mdl/parser/imports.cpp
-    mdl/backends/tvm_patterns.cpp
+    mdl/parser/diagnostics.cpp
+    mdl/parser/index.cpp
     mdl/utils/pathpattern.cpp
-    mdl/passes/autodiff.cpp
     mdl/passes/shapes.cpp
+)
+target_sources(frontend_tests PRIVATE mdl/format/format.cpp)
+target_link_libraries(frontend_tests PRIVATE Catch2::Catch2WithMain mdl_frontend mdl_format)
+target_compile_definitions(frontend_tests PRIVATE MDL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_include_directories(frontend_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+add_test(NAME frontend_tests COMMAND frontend_tests)
+
+# The language server (protocol-level tests).
+add_executable(mdls_tests mdls/server.cpp)
+target_link_libraries(mdls_tests PRIVATE Catch2::Catch2WithMain mdls_lib)
+target_include_directories(mdls_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
+target_compile_definitions(mdls_tests PRIVATE MDL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+add_test(NAME mdls_tests COMMAND mdls_tests)
+
+if(NOT MDL_ENABLE_COMPILER)
+	return()
+endif()
+
+# Compiler tests (passes, exports, backend, runtime).
+add_executable(tests
+    mdl/computegraph/einops.cpp
+    mdl/backends/tvm_patterns.cpp
+    mdl/passes/autodiff.cpp
     mdl/passes/masking.cpp
     mdl/runtime/safetensors.cpp
 )
-
 target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl mdl_runtime)
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_features(tests PRIVATE cxx_std_23)
+add_test(NAME unit_tests COMMAND tests)
 
-add_test(NAME unit_tests COMMAND tests
-	#WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/testfiles
-)
 # The build settings of argument-value files (mdlc --arg-vals, see docs/build-config.md): the command line takes
 # precedence, unknown keys and builds are errors.
 set(_cfg "${CMAKE_CURRENT_LIST_DIR}/configs")

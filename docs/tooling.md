@@ -1,0 +1,133 @@
+# Editor tooling: `mdl-format` and `mdls`
+
+Besides the compiler (`mdlc`), the project builds two tools for editing `.dlm` files:
+
+- **`mdl-format`** formats source files, like clang-format.
+- **`mdls`** is a language server (Language Server Protocol) for editors.
+
+Both use the same frontend as the compiler (library `mdl_frontend`: parser, type checks, diagnostics). They need
+neither TVM/LLVM nor oneDNN, and build with each platform's native toolchain (Linux, macOS, Windows/MSVC; x86_64 and
+arm64).
+
+## Building only the tooling
+```bash
+cmake --preset conf-tooling -B build-tooling      # MDL_ENABLE_COMPILER=OFF
+cmake --build build-tooling --parallel
+cmake --install build-tooling --prefix ~/.local --component tools   # bin/mdl-format, bin/mdls, share/mdl/std
+```
+Code generation of the parser needs Java at build time. An installed tool finds the standard library in
+`<prefix>/share/mdl/std`. Otherwise it looks in `MDL_STDLIB_PATH` (separated by `:`, `;` on Windows) and in the
+source tree's `std/`.
+
+## `mdl-format`
+```bash
+mdl-format model.dlm              # prints the formatted file
+mdl-format -i *.dlm               # formats in place
+mdl-format --check $(git ls-files '*.dlm')   # exit code 1 if a file is not formatted (CI)
+cat model.dlm | mdl-format --assume-filename model.dlm
+```
+It changes only whitespace:
+- **Indentation:** blocks are indented.
+- **Line breaks:**
+  - one definition, member or statement per line;
+  - lines that are too long break after `=>`, then after the commas of the outermost list, then before binary
+    operators.
+- **Spaces:** around binary operators, `=>`, `->` and `|`; none in `.bias=false` or `h=heads`. Einops patterns are
+  written as `x[... (h d) -> h ... d | h=heads]`.
+- **Comments:** kept; block comments are re-indented as a whole, and consecutive trailing comments are aligned.
+- **Kept line breaks:** after `template<...>` and after an annotation, if the source has them.
+- **Blank lines:** at most `MaxEmptyLines` between definitions and statements; none at the start or end of a block.
+
+A file with syntax errors is left unchanged (the errors are reported). The formatter checks its own output: it must
+contain exactly the input's tokens.
+
+The style comes from `--style-file`, else from the closest `.mdl-format` file in the source's directory or one of its
+parents, else the defaults:
+
+```yaml
+# .mdl-format
+IndentWidth: 4          # spaces per level; continuation lines get twice as many
+ColumnLimit: 120
+MaxEmptyLines: 1
+ReflowComments: false   # true: comment lines longer than ColumnLimit are broken between words
+
+# Naming conventions of definitions: snake_case, camelCase, PascalCase, ALL_CAPS, lowercase, or any (the default)
+ModuleNaming: PascalCase
+StructNaming: PascalCase
+StructMemberNaming: camelCase
+ModuleMemberNaming: camelCase       # weights and submodules
+FunctionNaming: camelCase           # free and member functions
+ParameterNaming: camelCase
+HyperparameterNaming: camelCase
+TemplateParameterNaming: any
+VariableNaming: camelCase           # local and loop variables
+```
+Unknown keys and values are errors.
+
+The naming conventions are checks, not changes: renaming a definition would need changes in every file that uses it.
+A definition that breaks a rule is reported as a warning with a suggested name, e.g.
+`warning: The hyperparameter name hiddenSize is not snake_case [-Wnaming]` with `hint: rename it to hidden_size`. Only
+definitions are checked, not uses (e.g. of the standard library). `--check` fails on naming warnings, and `mdls` shows
+them as diagnostics with the code `naming`.
+
+## `mdls`
+The editor starts `mdls` as a child process and talks to it over stdin/stdout; it exits with the editor. Options:
+- `--log FILE`: write a log.
+- `--stdio`: accepted for clients that pass it.
+
+Features:
+- **Diagnostics:** the compiler's errors and warnings while you type. The hint goes in the message, and the `-W` flag
+  in the diagnostic's code.
+- **Generic modules:** modules with hyperparameters are checked too, with symbolic values, so types read
+  `float[..., dim]`.
+  - What depends on unknown values is checked conservatively: both branches of `?:`, members with `@conditional`, one
+    iteration of a loop, and one instance of an array of modules.
+  - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
+    equal in an instance, so they are not reported.
+- **Semantic tokens:** modules, structs, functions, hyperparameters, members, parameters, variables, annotations,
+  keywords and numbers. The axes of einops patterns get their own token type, `axis`. The token types are standard,
+  except `axis`, which an editor extension declares with a fallback.
+- **Hover:**
+  - the declaration as written;
+  - its kind and container;
+  - the inferred type(s), e.g. for `auto` variables, symbolic and concrete (`float32[..., d]`,
+    `float32[..., 768]`);
+  - the documentation from Doxygen-style comments (`/** @brief ... @param ... */`) as Markdown.
+- **Go to definition:** also into imported files and the standard library.
+- **Completion:**
+  - names in scope;
+  - members after `.` (module members, struct members, `data`/`mask` of masked tensors);
+  - named hyperparameters after `.` in an instantiation (`Linear[4, 3, .bias=...]`);
+  - `import std.` modules, keywords, types, annotations.
+
+  While the text does not parse (e.g. right after typing `.`), the last analysis is used.
+- **Formatting:** the whole document, with `mdl-format`'s style (from `.mdl-format`, else the editor's tab size).
+- **Document symbols:** the outline of modules, structs and functions with their members.
+
+Documents are synchronized as full text and re-analyzed on every change (about 15 ms for the BERT example). Open
+documents take precedence over the files on disk, also for imports.
+
+Initialization options (from the editor), the same as `mdlc`'s:
+```json
+{ "importDirs": ["path/to/lib"], "float": "bf16" }
+```
+
+### Using it from an editor without an extension
+Any LSP client can run it, e.g. Neovim:
+```lua
+vim.filetype.add({ extension = { dlm = "mdl" } })
+vim.lsp.start({ name = "mdls", cmd = { "mdls" }, root_dir = vim.fs.root(0, { ".git" }) })
+```
+A VS Code extension (a TextMate grammar for basic highlighting plus this server) is planned in a separate repository.
+
+## Library structure
+| Target | Contents | Dependencies |
+|---|---|---|
+| `mdl_frontend` | parser, diagnostics (`mdl::Diagnostic`), type checks, symbolic analysis, semantic index | ANTLR runtime |
+| `mdl_format` | the formatter (`mdl::format::format`) | `mdl_frontend` |
+| `mdls_lib` | the protocol, document handling and features of `mdls` | `mdl_frontend`, `mdl_format`, nlohmann/json |
+| `mdl` | passes (masking, autodiff, quantization), exports, bindings, TVM backend | `mdl_frontend`, TVM, yaml-cpp, spdlog |
+
+Tools use `mdl::parser::analyze()`, which keeps the compilation unit and an `analysis::SemanticIndex` (definitions,
+references, types, documentation) also when there are errors. The compiler uses `parse()`, which prints the
+diagnostics (or passes them to `ParseOptions::diagnostics`).

@@ -464,11 +464,11 @@ TEST_CASE("implicit float conversions can be warnings or allowed (-Wfloat-wideni
 			bfloat16[..., 4] narrow(x: float32[..., 4]) => x;
 		}
 	)";
-	auto parseWith = [&](parser::Diagnostic widening, parser::Diagnostic narrowing) {
+	auto parseWith = [&](parser::DiagnosticLevel widening, parser::DiagnosticLevel narrowing) {
 		std::istringstream stream{source};
 		return parser::parse(stream, "<test>", {.floatWidening = widening, .floatNarrowing = narrowing});
 	};
-	using D = parser::Diagnostic;
+	using D = parser::DiagnosticLevel;
 	CHECK_FALSE(parseWith(D::error, D::error).has_value());
 	CHECK_FALSE(parseWith(D::warning, D::error).has_value()); // narrowing is still an error
 	CHECK_FALSE(parseWith(D::error, D::ignored).has_value()); // widening is still an error
@@ -629,13 +629,13 @@ TEST_CASE("a member left out by @conditional cannot be used; ?: needs a compile-
 
 TEST_CASE("unknown annotations are warnings by default (or errors, or ignored)", "[parser][annotations]") {
 	const std::string source = "module M[] { @frozen W: float[3] float[..., 3] f(x: float[..., 3]) => x * W; }";
-	auto parseWith = [&](parser::Diagnostic level) {
+	auto parseWith = [&](parser::DiagnosticLevel level) {
 		std::istringstream stream{source};
 		return parser::parse(stream, "<test>", {.unknownAnnotation = level});
 	};
-	CHECK(parseWith(parser::Diagnostic::warning).has_value());
-	CHECK(parseWith(parser::Diagnostic::ignored).has_value());
-	CHECK_FALSE(parseWith(parser::Diagnostic::error).has_value());
+	CHECK(parseWith(parser::DiagnosticLevel::warning).has_value());
+	CHECK(parseWith(parser::DiagnosticLevel::ignored).has_value());
+	CHECK_FALSE(parseWith(parser::DiagnosticLevel::error).has_value());
 	// Known annotations where they do not apply, defaults of function parameters.
 	CHECK_FALSE(parseSource("struct S { @conditional(1) a: uint } module M[] { float[..., 3] f(x: float[..., 3]) => x; }")
 						.has_value());

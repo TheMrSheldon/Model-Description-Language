@@ -153,6 +153,12 @@ tokens (BERT-base with 8 tokens: 10.2 → 5.4 ms in float32). `mdl::runtime::loa
 checkpoint while loading. See [docs/build-config.md](docs/build-config.md#quantization) and
 [examples/09_quantization](examples/09_quantization/).
 
+## Editor tooling
+`mdl-format` formats `.dlm` files (like clang-format; style in `.mdl-format`), and `mdls` is a language server with
+diagnostics, hover (types and documentation), completion, go to definition, semantic highlighting (einops axes
+included), and formatting. Both build without the compiler's dependencies (`cmake --preset conf-tooling`), see
+[docs/tooling.md](docs/tooling.md).
+
 ## CMake
 ```cmake
 include(MDL)

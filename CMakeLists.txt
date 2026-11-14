@@ -95,7 +95,7 @@ include(MDL)
 if (MDL_BUILD_TESTS OR MDL_BUILD_EXAMPLES)
 	enable_testing()  # before add_subdirectory(examples) so that the examples' tests are registered
 endif()
-if (MDL_BUILD_EXAMPLES)
+if (MDL_BUILD_EXAMPLES AND MDL_ENABLE_COMPILER)
 	add_subdirectory(examples)
 endif()
 

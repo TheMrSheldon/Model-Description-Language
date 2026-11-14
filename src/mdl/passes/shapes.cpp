@@ -41,11 +41,49 @@ namespace mdl::shapes {
 		return result;
 	}
 
+	namespace {
+		/** @brief A compile-time size expression for messages, e.g. `dim`, `conf.dims.model`, or `heads * key`. */
+		std::string sizeExpression(const Node& node, int parentPrecedence = 0) {
+			using FIDs = builtins::FunctionIDs;
+			if (const auto* hp = std::get_if<HyperparameterNode>(&node))
+				return hp->name.empty() ? "N" : hp->name;
+			if (const auto* cn = std::get_if<ConstNode>(&node)) {
+				if (const auto* i = std::get_if<int>(&cn->value))
+					return std::to_string(*i);
+				return "N";
+			}
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr || inv->arguments.size() != 2)
+				return "N";
+			const char* op = nullptr;
+			int precedence = 0;
+			switch (inv->id) {
+			case FIDs::TENSOR_ADD:
+				op = " + ", precedence = 1;
+				break;
+			case FIDs::TENSOR_SUB:
+				op = " - ", precedence = 1;
+				break;
+			case FIDs::TENSOR_PROD:
+				op = " * ", precedence = 2;
+				break;
+			case FIDs::TENSOR_DIV:
+				op = " / ", precedence = 2;
+				break;
+			default:
+				return "N";
+			}
+			std::string s = sizeExpression(inv->arguments[0].get(), precedence) + op +
+							sizeExpression(inv->arguments[1].get(), precedence + 1);
+			return precedence < parentPrecedence ? "(" + s + ")" : s;
+		}
+	} // namespace
+
 	std::string Dim::str() const {
 		if (group)
 			return "...";
 		if (node != nullptr)
-			return "N";
+			return sizeExpression(*node);
 		if (!known)
 			return "?";
 		std::string s = (factor != 1 || symbols.empty()) ? std::to_string(factor) : "";
@@ -477,7 +515,7 @@ namespace mdl::shapes {
 			}
 		};
 
-		PrimitiveType defaultFloatType = PrimitiveType::float32;
+		thread_local PrimitiveType defaultFloatType = PrimitiveType::float32; // per thread: documents may be analyzed concurrently
 
 		/**
 		 * @brief The operands of @p id whose element types must agree (no implicit conversions between float types;

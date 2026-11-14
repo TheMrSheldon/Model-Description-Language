@@ -2,11 +2,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <unistd.h>
-
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <string>
 
@@ -20,7 +19,7 @@ namespace {
 		TempDir() {
 			static std::atomic<int> counter{0};
 			path = fs::temp_directory_path() /
-				   ("mdl-test-" + std::to_string(::getpid()) + "-" + std::to_string(counter++));
+				   ("mdl-test-" + std::to_string(std::random_device{}()) + "-" + std::to_string(counter++));
 			fs::create_directories(path);
 		}
 		~TempDir() { fs::remove_all(path); }

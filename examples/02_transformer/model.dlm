@@ -13,9 +13,9 @@ struct TransformerConf {
 
 module TransformerEncoder[conf: TransformerConf] {
     // Multi-Head Attention
-    weightQuery: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
-    weightKey: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.key]
-    weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value]
+    weightQuery: Linear[conf.dims.model, conf.numAttnHeads * conf.dims.key]
+    weightKey: Linear[conf.dims.model, conf.numAttnHeads * conf.dims.key]
+    weightValue: Linear[conf.dims.model, conf.numAttnHeads * conf.dims.value]
     weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model]
     weightIntermed: Linear[conf.dims.model, conf.dims.inner]
     mhaNorm: LayerNorm[conf.dims.model]
@@ -23,16 +23,20 @@ module TransformerEncoder[conf: TransformerConf] {
     weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
     ffnNorm: LayerNorm[conf.dims.model]
 
-    float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
+    float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key],
+            key: float[..., conf.numAttnHeads * conf.dims.key],
+            value: float[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto facv = value[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto prod = facq @ fack.T();
-        auto tmp = softmax(prod / sqrt(conf.dims.key)/*, -1*/) @ facv;
+        auto tmp = softmax(prod / sqrt(conf.dims.key) /*, -1*/) @ facv;
         return tmp[h ... d -> ... (h d)];
     }
-    
-    float[..., conf.dims.model] mha(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) =>
+
+    float[..., conf.dims.model] mha(query: float[..., conf.numAttnHeads * conf.dims.key],
+            key: float[..., conf.numAttnHeads * conf.dims.key],
+            value: float[..., conf.numAttnHeads * conf.dims.value]) =>
         weightOut(sdpa(query, key, value));
 
     float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {

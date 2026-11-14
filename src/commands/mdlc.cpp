@@ -1,4 +1,4 @@
-#include "commands/common.hpp"
+#include "common.hpp"
 #include "mdl/argvals.hpp"
 
 #include <mdl/bindings/generator.hpp>
@@ -260,13 +260,13 @@ static void runCompileCommand(const CompileArgs& args) {
 	mdl::parser::ParseOptions parseOptions{.importDirs = args.importdirs, .defaultFloat = args.defaultFloat};
 	// -W<name>: warning, -Wno-<name>: ignored, -Werror=<name>: error.
 	for (const auto& w : args.warnings) {
-		auto level = mdl::parser::Diagnostic::warning;
+		auto level = mdl::parser::DiagnosticLevel::warning;
 		std::string name = w;
 		if (name.starts_with("no-")) {
-			level = mdl::parser::Diagnostic::ignored;
+			level = mdl::parser::DiagnosticLevel::ignored;
 			name = name.substr(3);
 		} else if (name.starts_with("error=")) {
-			level = mdl::parser::Diagnostic::error;
+			level = mdl::parser::DiagnosticLevel::error;
 			name = name.substr(6);
 		}
 		if (name == "float-widening")
