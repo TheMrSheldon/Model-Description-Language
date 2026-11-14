@@ -75,7 +75,10 @@ TEST_CASE("mdls publishes diagnostics", "[mdls]") {
 		if (m.value("method", "") == "textDocument/publishDiagnostics")
 			published = &m;
 	REQUIRE(published != nullptr);
-	const auto& diagnostics = (*published)["params"]["diagnostics"];
+	json diagnostics = json::array();
+	for (const auto& d : (*published)["params"]["diagnostics"])
+		if (d.value("code", "") != "unused") // (hints for the unused parameter)
+			diagnostics.push_back(d);
 	REQUIRE(diagnostics.size() == 1);
 	CHECK(diagnostics[0]["message"] == "Variable y not defined");
 	CHECK(diagnostics[0]["range"]["start"] == json{{"line", 0}, {"character", 31}});
@@ -186,7 +189,10 @@ TEST_CASE("mdls publishes diagnostics under the URI the client sent", "[mdls]") 
 		while (auto m = mdls::readMessage(out))
 			if (m->value("method", "") == "textDocument/publishDiagnostics") {
 				CHECK((*m)["params"]["uri"] == clientUri);
-				CHECK((*m)["params"]["diagnostics"].size() == 1);
+				CHECK(std::count_if(
+							  (*m)["params"]["diagnostics"].begin(), (*m)["params"]["diagnostics"].end(),
+							  [](const auto& d) { return d.value("code", "") != "unused"; }
+					  ) == 1);
 				found = true;
 			}
 		CHECK(found);
@@ -271,14 +277,18 @@ TEST_CASE("mdls re-analyzes the open documents that import a changed document", 
 	std::vector<size_t> mainDiagnostics;
 	for (const auto& m : messages)
 		if (m.value("method", "") == "textDocument/publishDiagnostics" && m["params"]["uri"] == mainUri)
-			mainDiagnostics.push_back(m["params"]["diagnostics"].size());
+			mainDiagnostics.push_back(std::count_if(
+					m["params"]["diagnostics"].begin(), m["params"]["diagnostics"].end(),
+					[](const auto& d) { return d["severity"] == 1; } // errors (not the hints for unused definitions)
+			));
 	CHECK(mainDiagnostics == std::vector<size_t>{0, 1});
 }
 
 TEST_CASE("mdls shows the documentation of imported files and goes to them", "[mdls]") {
-	auto messages = session({open("import std.nn;\n"), request(1, "textDocument/hover", 0, 12),
-							 request(2, "textDocument/hover", 0, 8), request(3, "textDocument/definition", 0, 12),
-							 request(4, "textDocument/definition", 0, 8)});
+	auto messages = session(
+			{open("import std.nn;\n"), request(1, "textDocument/hover", 0, 12), request(2, "textDocument/hover", 0, 8),
+			 request(3, "textDocument/definition", 0, 12), request(4, "textDocument/definition", 0, 8)}
+	);
 	const std::string file = (*response(messages, 1))["result"]["contents"]["value"];
 	CHECK(file.find("import std.nn") != std::string::npos);
 	CHECK(file.find("Basic neural network layers.") != std::string::npos); // the @file comment of std/nn.dlm
@@ -337,8 +347,10 @@ TEST_CASE("mdls shows inferred types, axis sizes, and hyperparameter names inlin
 }
 
 TEST_CASE("mdls hovers auto, einops axes, and weights", "[mdls]") {
-	auto messages = session({open(features), request(1, "textDocument/hover", 7, 9), request(2, "textDocument/hover", 8, 28),
-							 request(3, "textDocument/hover", 7, 28)});
+	auto messages = session(
+			{open(features), request(1, "textDocument/hover", 7, 9), request(2, "textDocument/hover", 8, 28),
+			 request(3, "textDocument/hover", 7, 28)}
+	);
 	const std::string autoHover = (*response(messages, 1))["result"]["contents"]["value"];
 	CHECK(autoHover.find("auto q: float32[..., conf.dims.model]") != std::string::npos);
 	const std::string axis = (*response(messages, 2))["result"]["contents"]["value"];
@@ -353,13 +365,14 @@ TEST_CASE("mdls finds references, highlights, and renames", "[mdls]") {
 	auto renaming = request(2, "textDocument/rename", 7, 13);
 	renaming["params"]["newName"] = "query";
 	auto library = request(3, "textDocument/prepareRename", 4, 12); // Linear (std)
-	auto messages = session({open(features), references, renaming, library,
-							 request(4, "textDocument/documentHighlight", 8, 28)});
+	auto messages =
+			session({open(features), references, renaming, library, request(4, "textDocument/documentHighlight", 8, 28)}
+			);
 	CHECK((*response(messages, 1))["result"].size() == 2); // q's declaration and use
 	const auto& edits = (*response(messages, 2))["result"]["changes"][uri];
 	REQUIRE(edits.size() == 2);
 	CHECK(edits[0]["newText"] == "query");
-	CHECK((*response(messages, 3)).contains("error")); // definitions of std are not renamed
+	CHECK((*response(messages, 3)).contains("error"));	   // definitions of std are not renamed
 	CHECK((*response(messages, 4))["result"].size() == 3); // h on both sides of `->` and in the binding
 }
 
@@ -385,8 +398,9 @@ TEST_CASE("mdls offers quick fixes", "[mdls]") {
 TEST_CASE("mdls goes to struct members, folds, and formats ranges", "[mdls]") {
 	auto formatRange = request(3, "textDocument/rangeFormatting");
 	formatRange["params"]["range"] = range(1, 2);
-	auto messages = session({open(features), request(1, "textDocument/definition", 4, 28),
-							 request(2, "textDocument/foldingRange")});
+	auto messages = session(
+			{open(features), request(1, "textDocument/definition", 4, 28), request(2, "textDocument/foldingRange")}
+	);
 	CHECK((*response(messages, 1))["result"]["range"]["start"] == json{{"line", 1}, {"character", 29}}); // dims
 	CHECK((*response(messages, 2))["result"].size() >= 3);
 
@@ -397,8 +411,9 @@ TEST_CASE("mdls goes to struct members, folds, and formats ranges", "[mdls]") {
 }
 
 TEST_CASE("mdls highlights Doxygen commands and their arguments in doc comments", "[mdls]") {
-	const std::string text = "/**\n * @brief Uses \\p x and \\f$x^2\\f$ (see \\cite layernorm).\n * @param[in] x the input"
-							 "\n * \\ref Linear, mail@example.com\n */\nfloat[...] f(x: float[...]) => x;\n";
+	const std::string text =
+			"/**\n * @brief Uses \\p x and \\f$x^2\\f$ (see \\cite layernorm).\n * @param[in] x the input"
+			"\n * \\ref Linear, mail@example.com\n */\nfloat[...] f(x: float[...]) => x;\n";
 	const auto tokens = mdls::semanticTokens(text);
 	const auto& types = mdls::semanticTokenTypes();
 	auto at = [&](size_t line, size_t column) -> std::pair<std::string, size_t> {
@@ -415,7 +430,190 @@ TEST_CASE("mdls highlights Doxygen commands and their arguments in doc comments"
 	CHECK(at(2, 3) == std::pair<std::string, size_t>{"keyword", 6});	// @param
 	CHECK(at(2, 14) == std::pair<std::string, size_t>{"parameter", 1}); // x (after [in])
 	CHECK(at(3, 8) == std::pair<std::string, size_t>{"label", 6});		// Linear
-	CHECK(at(3, 19).first.empty());									// mail@example.com is no command
+	CHECK(at(3, 19).first.empty());										// mail@example.com is no command
 	const auto& modifiers = mdls::semanticTokenModifiers();
 	CHECK(std::find(modifiers.begin(), modifiers.end(), "documentation") != modifiers.end());
+}
+
+namespace {
+	const std::string models = R"(import std;
+import std.losses;
+/** @brief Uses \ref Block. */
+module Block[d: uint] {
+    lin: Linear[d, d]
+    norm: LayerNorm[d]
+    spare: float[d]
+    float[..., d] forward(x: float[..., d]) {
+        auto h = lin(x) + x;
+        auto unused = h;
+        return norm(h);
+    }
+    float[..., d] split(x: float[..., d], extra: float[...]) => x[... (a b) -> ... (a b) | a=2];
+}
+module Net[] {
+    b: Block[8]
+    float[..., 8] forward(x: float[..., 8]) => b(x);
+}
+)";
+} // namespace
+
+TEST_CASE("mdls shows parameter counts and memory, and the module tree", "[mdls]") {
+	auto tree = request(2, "textDocument/codeLens");
+	auto messages = session({open(models), request(1, "textDocument/codeLens"), request(2, "mdl/moduleTree")});
+	std::set<std::string> titles;
+	for (const auto& lens : (*response(messages, 1))["result"])
+		titles.insert(lens["command"]["title"].get<std::string>());
+	// Block[8]: Linear[8, 8] (72) + LayerNorm[8] (16) + spare (8) = 96 values.
+	CHECK(titles.contains(
+			"Block[8]: 96 parameters · 384 B (float32) · 192 B (bfloat16/float16) · 96 B (int8) · 48 B (int4)"
+	));
+	CHECK(titles.contains("Block[d]: d * d + 4 * d parameters")); // the generic module (checked symbolically)
+	CHECK(titles.contains("Net: 96 parameters · 384 B (float32) · 192 B (bfloat16/float16) · 96 B (int8) · 48 B (int4)")
+	);
+	const auto& roots = (*response(messages, 2))["result"];
+	const auto net = std::find_if(roots.begin(), roots.end(), [](const auto& r) { return r["name"] == "Net"; });
+	REQUIRE(net != roots.end());
+	CHECK((*net)["parameters"] == 96);
+	REQUIRE((*net)["children"].size() == 1);
+	CHECK((*net)["children"][0]["name"] == "b");
+	CHECK((*net)["children"][0]["children"].size() == 3); // lin, norm, spare
+}
+
+TEST_CASE("mdls shows the result types of operators and calls", "[mdls]") {
+	auto messages =
+			session({open(models), request(1, "textDocument/hover", 8, 24), request(2, "textDocument/hover", 8, 18)});
+	// +, once symbolic (Block[d]) and once concrete (Block[8] in Net)
+	CHECK((*response(messages, 1))["result"]["contents"]["value"] == "Results: `float32[..., 8]`, `float32[..., d]`");
+	const std::string call = (*response(messages, 2))["result"]["contents"]["value"]; // lin(x)
+	CHECK(call.find("`float32[..., d]`") != std::string::npos);
+}
+
+TEST_CASE("mdls marks unused variables, parameters, members, and imports", "[mdls]") {
+	auto messages = session({open(models)});
+	std::set<std::string> unused;
+	for (const auto& m : messages)
+		if (m.value("method", "") == "textDocument/publishDiagnostics")
+			for (const auto& d : m["params"]["diagnostics"])
+				if (d.value("code", "") == "unused") {
+					CHECK(d["tags"] == json::array({1}));
+					unused.insert(d["message"].get<std::string>());
+				}
+	CHECK(unused.contains("unused is never used"));
+	CHECK(unused.contains("The parameter extra is never used"));
+	CHECK(unused.contains("The member spare of Block is never used"));
+	CHECK_FALSE(unused.contains("The import std is never used"));
+}
+
+TEST_CASE("mdls completes einops axes and renames them within the pattern", "[mdls]") {
+	std::string typing = models;
+	typing.replace(typing.find("| a=2]"), 6, "| ]");
+	auto change = json{
+			{"method", "textDocument/didChange"},
+			{"params",
+			 {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", typing}}})}}},
+	};
+	auto renaming = request(2, "textDocument/rename", 12, 71);
+	renaming["params"]["newName"] = "heads";
+	auto messages = session(
+			{open(models), renaming, request(3, "textDocument/linkedEditingRange", 12, 71), change,
+			 request(4, "textDocument/completion", 12, 91)}
+	);
+	const auto& edits = (*response(messages, 2))["result"]["changes"][uri];
+	CHECK(edits.size() == 3); // a in both sides and in the binding
+	CHECK((*response(messages, 3))["result"]["ranges"].size() == 3);
+	std::set<std::string> labels;
+	for (const auto& item : (*response(messages, 4))["result"])
+		labels.insert(item["label"].get<std::string>());
+	CHECK(labels == std::set<std::string>{"a", "b"});
+}
+
+TEST_CASE("mdls links imports and references in comments", "[mdls]") {
+	auto messages = session({open(models), request(1, "textDocument/documentLink")});
+	std::set<std::string> targets;
+	for (const auto& link : (*response(messages, 1))["result"])
+		targets.insert(link["target"].get<std::string>());
+	CHECK(std::any_of(targets.begin(), targets.end(), [](const auto& t) { return t.ends_with("/std/losses.dlm"); }));
+	CHECK(targets.contains(uri + "#L4")); // \ref Block
+}
+
+TEST_CASE("mdls shows the call hierarchy", "[mdls]") {
+	auto prepare = session({open(models), request(1, "textDocument/prepareCallHierarchy", 3, 8)});
+	const auto items = (*response(prepare, 1))["result"];
+	REQUIRE(items.size() == 1);
+	CHECK(items[0]["name"] == "Block");
+	auto forward = session({open(models), request(1, "textDocument/prepareCallHierarchy", 7, 20)});
+	const auto item = (*response(forward, 1))["result"][0];
+	auto incoming = json{{"id", 2}, {"method", "callHierarchy/incomingCalls"}, {"params", {{"item", item}}}};
+	auto outgoing = json{{"id", 3}, {"method", "callHierarchy/outgoingCalls"}, {"params", {{"item", item}}}};
+	auto calls = session({open(models), incoming, outgoing});
+	std::set<std::string> callers, callees;
+	for (const auto& c : (*response(calls, 2))["result"])
+		callers.insert(c["from"]["name"].get<std::string>());
+	for (const auto& c : (*response(calls, 3))["result"])
+		callees.insert(c["to"]["name"].get<std::string>());
+	CHECK(callers.contains("forward")); // Net.forward calls b(x)
+	CHECK(callees.contains("forward")); // lin(x), norm(h): the forwards of Linear and LayerNorm
+}
+
+TEST_CASE("mdls expands selections by syntax and finds symbols in the workspace", "[mdls]") {
+	auto select = request(1, "textDocument/selectionRange");
+	select["params"]["positions"] = json::array({{{"line", 8}, {"character", 19}}});
+	auto messages = session({open(models), select});
+	const auto& s = (*response(messages, 1))["result"][0];
+	CHECK(s["range"]["start"] == json{{"line", 8}, {"character", 17}}); // `lin`
+	size_t depth = 0;
+	for (const json* p = &s; p->contains("parent"); p = &(*p)["parent"])
+		++depth;
+	CHECK(depth >= 4); // lin, lin(x), lin(x) + x, the statement, ...
+
+	const auto dir = std::filesystem::temp_directory_path() / "mdls-workspace-test";
+	std::filesystem::create_directories(dir / "sub");
+	{
+		std::ofstream{dir / "sub" / "layers.dlm"} << "module FancyLayer[] { float f(x: float) => x; }\n";
+	}
+	std::stringstream in, out;
+	mdls::writeMessage(
+			in,
+			{{"jsonrpc", "2.0"}, {"id", 0}, {"method", "initialize"}, {"params", {{"rootUri", mdls::pathToUri(dir)}}}}
+	);
+	mdls::writeMessage(
+			in, {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "workspace/symbol"}, {"params", {{"query", "fncy"}}}}
+	);
+	mdls::writeMessage(in, {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "shutdown"}});
+	mdls::writeMessage(in, {{"jsonrpc", "2.0"}, {"method", "exit"}});
+	mdls::Server{in, out}.run();
+	std::filesystem::remove_all(dir);
+	std::vector<json> replies;
+	while (auto m = mdls::readMessage(out))
+		replies.push_back(*m);
+	const auto& symbols = (*response(replies, 1))["result"];
+	REQUIRE(symbols.size() == 1);
+	CHECK(symbols[0]["name"] == "FancyLayer");
+}
+
+TEST_CASE("mdls analyzes what parses and reports errors of imported files and new settings", "[mdls]") {
+	const std::string broken = "module M[n: uint] {\n    float[..., n] good(x: float[..., n]) => x + z;\n"
+							   "    float[..., n] bad(x: float[..., n]) => x +;\n}\n";
+	auto messages = session({open(broken)});
+	std::set<std::string> found;
+	for (const auto& m : messages)
+		if (m.value("method", "") == "textDocument/publishDiagnostics")
+			for (const auto& d : m["params"]["diagnostics"])
+				found.insert(d["message"].get<std::string>());
+	CHECK(found.contains("Variable z not defined")); // in the function that parses, despite the syntax error
+
+	const std::string mismatch = "module T[a: uint, b: uint] { W: float[a, b] float[b] f(x: float[a]) => W @ x; }\n";
+	auto strict =
+			json{{"method", "workspace/didChangeConfiguration"},
+				 {"params", {{"settings", {{"mdl", {{"strict", true}}}}}}}};
+	auto configured = session({open(mismatch), strict});
+	std::vector<int> severities;
+	for (const auto& m : configured)
+		if (m.value("method", "") == "textDocument/publishDiagnostics")
+			for (const auto& d : m["params"]["diagnostics"])
+				if (d.value("code", "") == "possible-mismatch")
+					severities.push_back(d["severity"]);
+	REQUIRE_FALSE(severities.empty());
+	CHECK(severities.front() == 2); // a warning, then (strict) an error
+	CHECK(severities.back() == 1);
 }

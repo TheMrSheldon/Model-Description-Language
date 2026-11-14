@@ -33,8 +33,8 @@ namespace {
 		return {};
 	}
 
-	std::string listTypes(const std::set<std::string>& types) {
-		std::string s = types.size() > 1 ? "Types: " : "Type: ";
+	std::string listTypes(const std::set<std::string>& types, const std::string& label = "Type") {
+		std::string s = label + (types.size() > 1 ? "s: " : ": ");
 		bool first = true;
 		for (const auto& t : types) {
 			s += (first ? "`" : ", `") + t + "`";
@@ -114,8 +114,12 @@ mdls::json mdls::hover(const Document& doc, const json& params) {
 			md += "\n\n" + listTypes(types);
 		for (const auto& weight : ref->weights) // the path of the weight (e.g. in a checkpoint)
 			md += "\n\nWeight: `" + weight + "`";
+		if (!ref->results.empty()) // a call: the type of its result
+			md += "\n\n" + listTypes(ref->results, "Result");
 		if (!s.documentation.empty())
 			md += "\n\n---\n\n" + s.documentation;
+	} else if (!ref->results.empty()) { // an operator (or a call of a builtin): the type of its result
+		md = listTypes(ref->results, "Result");
 	} else if (!ref->types.empty()) {
 		md = listTypes(ref->types);
 		for (const auto& weight : ref->weights)

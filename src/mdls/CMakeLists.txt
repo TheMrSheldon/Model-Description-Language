@@ -9,6 +9,10 @@ add_library(mdls_lib STATIC
 	completion.cpp
 	formatting.cpp
 	tokens.cpp
+	partial.cpp
+	models.cpp
+	unused.cpp
+	structure.cpp
 	signature.cpp
 	hints.cpp
 	references.cpp

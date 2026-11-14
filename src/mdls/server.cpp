@@ -1,11 +1,15 @@
 #include "./server.hpp"
 
 #include "./features.hpp"
+#include "./partial.hpp"
 #include "./semantic_tokens.hpp"
 
 #include <mdl/version.hpp>
 
 #include <algorithm>
+#include <format>
+#include <fstream>
+#include <iterator>
 #include <set>
 #include <sstream>
 
@@ -36,6 +40,8 @@ int mdls::Server::run() {
 }
 
 void mdls::Server::handle(const json& message) {
+	if (!message.contains("method"))
+		return; // a response to a request of the server (e.g. client/registerCapability)
 	const std::string method = message.value("method", "");
 	const json params = message.contains("params") ? message["params"] : json::object();
 	if (!message.contains("id")) {
@@ -96,6 +102,35 @@ mdls::json mdls::Server::handleRequest(const std::string& method, const json& pa
 		return foldingRanges(document(params));
 	if (method == "textDocument/codeAction")
 		return codeActions(document(params), params, openTexts(), standardLibraryNames());
+	if (method == "textDocument/codeLens")
+		return codeLenses(document(params));
+	if (method == "mdl/moduleTree")
+		return moduleTree(document(params), params);
+	if (method == "textDocument/documentLink")
+		return documentLinks(document(params));
+	if (method == "textDocument/selectionRange")
+		return selectionRanges(document(params), params);
+	if (method == "textDocument/linkedEditingRange")
+		return linkedEditingRanges(document(params), params);
+	if (method == "textDocument/prepareCallHierarchy")
+		return prepareCallHierarchy(document(params), params);
+	if (method == "callHierarchy/incomingCalls" || method == "callHierarchy/outgoingCalls") {
+		const auto& item = params.at("item");
+		// The document the item belongs to (its index), else any open document whose index has it.
+		const Document* doc = nullptr;
+		for (const auto& [uri, d] : documents)
+			if (uri == item.value("uri", "") || doc == nullptr)
+				doc = &d;
+		if (doc == nullptr)
+			return json::array();
+		return method == "callHierarchy/incomingCalls" ? incomingCalls(*doc, item) : outgoingCalls(*doc, item);
+	}
+	if (method == "workspace/symbol") {
+		std::vector<const Document*> open;
+		for (const auto& [_, d] : documents)
+			open.push_back(&d);
+		return workspaceSymbols(workspaceRoots, open, params.value("query", ""));
+	}
 	if (method == "textDocument/rangeFormatting") {
 		const auto& doc = document(params);
 		return rangeFormatting(doc, params, styleOf(doc));
@@ -103,7 +138,60 @@ mdls::json mdls::Server::handleRequest(const std::string& method, const json& pa
 	throw RequestError(MethodNotFound, "unsupported method " + method);
 }
 
+void mdls::Server::applySettings(const json& settings) {
+	// Settings mirror mdlc's options: {"importDirs": [...], "float": "f32|bf16|f16", "strict": false}, also nested in
+	// {"mdl": {...}} (as VS Code sends a section of the configuration).
+	if (!settings.is_object())
+		return;
+	const json& options = settings.contains("mdl") && settings["mdl"].is_object() ? settings["mdl"] : settings;
+	if (options.contains("importDirs") && options["importDirs"].is_array()) {
+		parseOptions.importDirs.clear();
+		for (const auto& dir : options["importDirs"])
+			parseOptions.importDirs.emplace_back(dir.get<std::string>());
+	}
+	if (options.contains("strict")) // what may be wrong (e.g. sizes that may differ) is an error
+		parseOptions.possibleMismatch = options.value("strict", false) ? mdl::parser::DiagnosticLevel::error
+																	   : mdl::parser::DiagnosticLevel::warning;
+	if (options.contains("float")) {
+		const std::string type = options.value("float", "f32");
+		parseOptions.defaultFloat = type == "bf16"	? mdl::PrimitiveType::bfloat16
+									: type == "f16" ? mdl::PrimitiveType::float16
+													: mdl::PrimitiveType::float32;
+	}
+	stdNames.reset();
+}
+
+void mdls::Server::analyzeAll() {
+	for (auto& [_, doc] : documents)
+		analyze(doc);
+}
+
 void mdls::Server::handleNotification(const std::string& method, const json& params) {
+	if (method == "initialized" && watchFiles) {
+		// Imported files and style files that change outside of the editor.
+		json watchers = json::array({{{"globPattern", "**/*.dlm"}}, {{"globPattern", "**/.mdl-format"}}});
+		writeMessage(
+				out, {{"jsonrpc", "2.0"},
+					  {"id", "mdls-watch"},
+					  {"method", "client/registerCapability"},
+					  {"params",
+					   {{"registrations", json::array(
+												  {{{"id", "mdls-watch"},
+													{"method", "workspace/didChangeWatchedFiles"},
+													{"registerOptions", {{"watchers", watchers}}}}}
+										  )}}}}
+		);
+		return;
+	}
+	if (method == "workspace/didChangeWatchedFiles") {
+		analyzeAll();
+		return;
+	}
+	if (method == "workspace/didChangeConfiguration") {
+		applySettings(params.value("settings", json::object()));
+		analyzeAll();
+		return;
+	}
 	if (method == "textDocument/didOpen") {
 		const auto& item = params.at("textDocument");
 		const std::string uri = item.at("uri");
@@ -144,19 +232,19 @@ void mdls::Server::handleNotification(const std::string& method, const json& par
 }
 
 mdls::json mdls::Server::initialize(const json& params) {
-	// Initialization options mirror mdlc's: {"importDirs": [...], "float": "f32|bf16|f16", "strict": false}.
-	if (params.contains("initializationOptions") && params["initializationOptions"].is_object()) {
-		const auto& options = params["initializationOptions"];
-		if (options.contains("importDirs"))
-			for (const auto& dir : options["importDirs"])
-				parseOptions.importDirs.emplace_back(dir.get<std::string>());
-		if (options.value("strict", false)) // what may be wrong (e.g. sizes that may differ) is an error
-			parseOptions.possibleMismatch = mdl::parser::DiagnosticLevel::error;
-		const std::string type = options.value("float", "f32");
-		parseOptions.defaultFloat = type == "bf16"	? mdl::PrimitiveType::bfloat16
-									: type == "f16" ? mdl::PrimitiveType::float16
-													: mdl::PrimitiveType::float32;
-	}
+	if (params.contains("initializationOptions"))
+		applySettings(params["initializationOptions"]);
+	// The workspace (for the symbol search).
+	if (params.contains("workspaceFolders") && params["workspaceFolders"].is_array())
+		for (const auto& folder : params["workspaceFolders"])
+			if (auto path = uriToPath(folder.value("uri", "")))
+				workspaceRoots.push_back(*path);
+	if (workspaceRoots.empty() && params.contains("rootUri") && params["rootUri"].is_string())
+		if (auto path = uriToPath(params["rootUri"].get<std::string>()))
+			workspaceRoots.push_back(*path);
+	watchFiles =
+			params.contains("capabilities") &&
+			params["capabilities"].value("/workspace/didChangeWatchedFiles/dynamicRegistration"_json_pointer, false);
 	json legend{{"tokenTypes", semanticTokenTypes()}, {"tokenModifiers", semanticTokenModifiers()}};
 	return {
 			{"capabilities",
@@ -175,6 +263,12 @@ mdls::json mdls::Server::initialize(const json& params) {
 					 {"foldingRangeProvider", true},
 					 {"codeActionProvider", {{"codeActionKinds", json::array({"quickfix"})}}},
 					 {"documentRangeFormattingProvider", true},
+					 {"codeLensProvider", {{"resolveProvider", false}}},
+					 {"documentLinkProvider", {{"resolveProvider", false}}},
+					 {"selectionRangeProvider", true},
+					 {"linkedEditingRangeProvider", true},
+					 {"callHierarchyProvider", true},
+					 {"workspaceSymbolProvider", true},
 					 {"semanticTokensProvider", {{"legend", legend}, {"full", true}}},
 			 }},
 			{"serverInfo", {{"name", "mdls"}, {"version", mdl::version}}},
@@ -228,12 +322,32 @@ void mdls::Server::analyze(Document& document) {
 	std::istringstream stream{document.text};
 	auto result = mdl::parser::analyze(stream, document.sourceName(), options);
 	document.sources = result.unit.sources;
+	// With syntax errors, the definitions that parse are analyzed anyway (the others are blanked out).
+	const bool syntaxErrors = std::any_of(result.diagnostics.begin(), result.diagnostics.end(), [&](const auto& d) {
+		return d.syntax && d.file == document.sourceName();
+	});
+	const bool hadIndex = document.index != nullptr;
+	if (syntaxErrors) {
+		const std::string partialText = blankBrokenDefinitions(document.text);
+		std::istringstream partialStream{partialText};
+		auto partial = mdl::parser::analyze(partialStream, document.sourceName(), options);
+		// The syntax errors of the whole text, everything else from the analysis of the rest.
+		auto diagnostics = std::move(result.diagnostics);
+		std::erase_if(diagnostics, [](const auto& d) { return !d.syntax; });
+		for (auto& d : partial.diagnostics)
+			if (!d.syntax)
+				diagnostics.push_back(std::move(d));
+		result = std::move(partial);
+		result.diagnostics = std::move(diagnostics);
+	}
 	// Keep the last index that has the document's definitions (the text may not parse while it is being typed).
 	const bool translated =
 			std::any_of(result.index->references().begin(), result.index->references().end(), [&](const auto& r) {
 				return r.file == document.sourceName();
 			});
-	if (translated || document.index == nullptr) {
+	// (With syntax errors, the analysis of the rest gives the diagnostics; completion and hovers keep the last full
+	// analysis, which has the definition being typed.)
+	if ((translated && !syntaxErrors) || !hadIndex) {
 		document.index = result.index;
 		document.indexText = document.text;
 	}
@@ -246,9 +360,40 @@ void mdls::Server::analyze(Document& document) {
 	const LineIndex lines{document.text};
 	json diagnostics = json::array();
 	document.diagnostics.clear();
+	// Errors of imported files: at the import (with the location in the other file).
+	std::map<std::string, std::string> importedTexts;
+	for (const auto& d : all) {
+		if (d.file == document.sourceName() || d.severity != mdl::Severity::error)
+			continue;
+		std::error_code ec;
+		for (const auto& import : result.index->imports())
+			if (import.file == document.sourceName() &&
+				std::any_of(import.targets.begin(), import.targets.end(), [&](const auto& t) {
+					return t == d.file || std::filesystem::equivalent(t, d.file, ec);
+				})) {
+				auto& text = importedTexts[d.file];
+				if (text.empty()) {
+					std::ifstream in{d.file, std::ios::binary};
+					text.assign(std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{});
+				}
+				diagnostics.push_back({
+						{"range", toProtocol(lines, import.range)},
+						{"severity", 1},
+						{"source", "mdls"},
+						{"message", std::format("{} has errors: {}", import.name, d.message)},
+						{"relatedInformation",
+						 json::array(
+								 {{{"location",
+									{{"uri", pathToUri(d.file)}, {"range", toProtocol(LineIndex{text}, d.range)}}},
+								   {"message", d.message}}}
+						 )},
+				});
+				break;
+			}
+	}
 	for (const auto& d : all) {
 		if (d.file != document.sourceName())
-			continue; // in an imported file
+			continue; // in an imported file (above)
 		document.diagnostics.push_back(d);
 		json diagnostic{
 				{"range", toProtocol(lines, d.range)},
@@ -262,6 +407,8 @@ void mdls::Server::analyze(Document& document) {
 			diagnostic["code"] = d.flag;
 		diagnostics.push_back(std::move(diagnostic));
 	}
+	for (auto& unused : unusedDiagnostics(document, *result.index))
+		diagnostics.push_back(std::move(unused));
 	notify("textDocument/publishDiagnostics",
 		   {{"uri", document.uri}, {"version", document.version}, {"diagnostics", diagnostics}});
 }

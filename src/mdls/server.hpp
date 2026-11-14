@@ -32,6 +32,12 @@ namespace mdls {
 		std::map<std::string, Document> documents; ///< by URI
 		mdl::parser::ParseOptions parseOptions;	   ///< from the client's initialization options
 		bool shutdownRequested = false;
+		bool watchFiles = false; ///< whether the client lets the server register file watchers
+		std::vector<std::filesystem::path> workspaceRoots; ///< the client's workspace folders
+
+		/** @brief Applies the client's settings (initialization options or configuration). */
+		void applySettings(const json& settings);
+		void analyzeAll();
 
 		/** @brief A loaded style file (reloaded if it changed on disk). */
 		struct CachedStyle {

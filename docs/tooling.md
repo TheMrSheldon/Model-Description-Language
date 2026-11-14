@@ -143,13 +143,35 @@ Features:
   **range formatting**.
 - **Formatting:** the whole document, with `mdl-format`'s style (from `.mdl-format`, else the editor's tab size).
 - **Document symbols:** the outline of modules, structs and functions with their members.
+- **Code lens (parameter counts):** above each module, per instance that the program creates (or the generic module
+  checked with symbolic values), the number of parameters and their memory in float32, bfloat16/float16, int8 and
+  int4 (e.g. `Block[8]: 96 parameters · 384 B (float32) · ...`); for symbolic sizes a formula (`d * d + 4 * d`).
+- **Module tree** (custom request `mdl/moduleTree`, params `{textDocument}`): the instances of the document's modules
+  with their submodules and weights as a tree, each node `{name, type, parameters, children, weight}`, e.g. for a tree
+  view in an extension.
+- **Result types:** hovering an operator (`+`, `@`, ...) or the name of a called function shows the type of the
+  result.
+- **Unused definitions:** variables, loop variables, parameters, module members, and imports that are never used are
+  hints with the `unnecessary` tag (shown faded), code `unused`.
+- **Einops patterns:** completion of the axes of the pattern (after `|` as `name=`), rename of an axis within its
+  pattern, and linked editing of its occurrences.
+- **Document links:** import paths link to the imported file, `\ref X` in comments to the definition of `X`.
+- **Workspace symbols:** definitions of the open documents and of the `.dlm` files in the workspace folders (fuzzy
+  matching; `build`, `out`, `_deps`, `node_modules` and hidden directories are skipped).
+- **Call hierarchy:** callers and callees of functions and methods; calling an instance of a module (`lin(x)`) calls
+  its `forward`.
+- **Selection ranges:** expand the selection by syntax (name, call, expression, statement, block, definition).
 
 Documents are synchronized as full text and re-analyzed on every change (about 15 ms for the BERT example), together
 with the open documents that import them. Open documents take precedence over the files on disk, also for imports.
-While a document does not parse, hover, go to definition, and completion use its last analysis (positions after the
-changed lines are mapped).
+While a document has syntax errors, the definitions that do not parse are left out and the rest is analyzed, so its
+other diagnostics stay up to date; hover, go to definition, and completion use the last full analysis (positions after
+the changed lines are mapped). Errors in imported files are reported at the import (with the original location as
+related information). Files on disk are watched (`workspace/didChangeWatchedFiles`, registered if the client supports
+it): documents that import a changed file are re-analyzed.
 
-Initialization options (from the editor), the same as `mdlc`'s:
+Initialization options (from the editor), the same as `mdlc`'s; they can be changed later with
+`workspace/didChangeConfiguration` (`{"mdl": {...}}` or flat), which re-analyzes the open documents:
 ```json
 { "importDirs": ["path/to/lib"], "float": "bf16", "strict": true }
 ```

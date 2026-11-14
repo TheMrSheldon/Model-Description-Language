@@ -32,8 +32,9 @@ namespace mdl {
 		std::string file; ///< the path or source name (e.g. `<stream>`)
 		SourceRange range;
 		std::string message;
-		std::string hint; ///< a suggestion how to fix it (may be empty)
-		std::string flag; ///< the option that controls it (e.g. `float-widening` for `-Wfloat-widening`), if any
+		std::string hint;	 ///< a suggestion how to fix it (may be empty)
+		std::string flag;	 ///< the option that controls it (e.g. `float-widening` for `-Wfloat-widening`), if any
+		bool syntax = false; ///< a syntax error (the code around it is not translated)
 
 		/** @brief A source line around the range, for printing (the marked part is the range on its line). */
 		struct Line {
