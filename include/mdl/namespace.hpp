@@ -99,7 +99,7 @@ namespace mdl {
 		const DataType& putType(std::string_view name, DataType&& type) {
 			auto [it, inserted] = types.emplace(std::string{name}, std::move(type));
 			assert(inserted);
-			return std::any_cast<const DataType&>(it->second);
+			return it->second;
 		}
 		std::optional<std::reference_wrapper<const DataType>> getType(std::string_view name) const {
 			auto it = types.find(std::string{name});
