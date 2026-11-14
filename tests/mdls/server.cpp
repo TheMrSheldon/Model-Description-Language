@@ -274,3 +274,17 @@ TEST_CASE("mdls re-analyzes the open documents that import a changed document", 
 			mainDiagnostics.push_back(m["params"]["diagnostics"].size());
 	CHECK(mainDiagnostics == std::vector<size_t>{0, 1});
 }
+
+TEST_CASE("mdls shows the documentation of imported files and goes to them", "[mdls]") {
+	auto messages = session({open("import std.nn;\n"), request(1, "textDocument/hover", 0, 12),
+							 request(2, "textDocument/hover", 0, 8), request(3, "textDocument/definition", 0, 12),
+							 request(4, "textDocument/definition", 0, 8)});
+	const std::string file = (*response(messages, 1))["result"]["contents"]["value"];
+	CHECK(file.find("import std.nn") != std::string::npos);
+	CHECK(file.find("Basic neural network layers.") != std::string::npos); // the @file comment of std/nn.dlm
+	const std::string package = (*response(messages, 2))["result"]["contents"]["value"];
+	CHECK(package.find("*package*") != std::string::npos);
+	CHECK(package.find("`std.nn`: Basic neural network layers.") != std::string::npos);
+	CHECK((*response(messages, 3))["result"]["uri"].get<std::string>().ends_with("/std/nn.dlm"));
+	CHECK((*response(messages, 4))["result"].size() > 3); // all files of std
+}
