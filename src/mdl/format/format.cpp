@@ -603,7 +603,7 @@ namespace {
 
 		void check(antlr4::Token* t, mdl::format::Naming mdl::format::NamingOptions::* kind, const char* what) {
 			const auto convention = naming.*kind;
-			if (t == nullptr || mdl::format::follows(t->getText(), convention))
+			if (t == nullptr || t->getText() == "_" || mdl::format::follows(t->getText(), convention))
 				return;
 			const size_t line = t->getLine(), column = t->getCharPositionInLine();
 			out.push_back(mdl::Diagnostic{

@@ -16,7 +16,8 @@ namespace mdls {
 
 	/**
 	 * @brief The token types (indices into this list; the legend of the protocol). Besides the standard types, `axis`
-	 * marks the axis names of einops patterns (`x[... (h d) -> h ... d | h=heads]`).
+	 * marks the axis names of einops patterns (`x[... (h d) -> h ... d | h=heads]`), `discarded` the discarded value
+	 * `_` (`for (_ in ...)`, `auto a, _ = f(x);`, an einops `_`).
 	 */
 	const std::vector<std::string>& semanticTokenTypes();
 	const std::vector<std::string>& semanticTokenModifiers();

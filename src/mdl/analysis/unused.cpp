@@ -1,23 +1,17 @@
-// Diagnostics for definitions that are never used: local variables, parameters, loop variables, module members
-// (weights and submodules), and imports. They are hints with the tag "unnecessary" (shown faded by editors).
-#include "./features.hpp"
+// Definitions that are never used: local variables, parameters, loop variables, module members (weights and
+// submodules), and imports (see parser::ParseOptions::unused).
+#include <mdl/analysis/index.hpp>
 
+#include <algorithm>
+#include <format>
+#include <map>
 #include <set>
 
-mdls::json mdls::unusedDiagnostics(const Document& doc, const mdl::analysis::SemanticIndex& index) {
-	using mdl::analysis::SymbolKind;
-	json diagnostics = json::array();
-	const LineIndex lines{doc.text};
-	const std::string file = doc.sourceName();
-	auto hint = [&](const mdl::SourceRange& range, const std::string& message) {
-		diagnostics.push_back(
-				{{"range", toProtocol(lines, range)},
-				 {"severity", 4},
-				 {"tags", json::array({1})},
-				 {"source", "mdls"},
-				 {"code", "unused"},
-				 {"message", message}}
-		);
+std::vector<mdl::analysis::Unused>
+mdl::analysis::unusedDefinitions(const SemanticIndex& index, const std::string& file) {
+	std::vector<Unused> result;
+	auto hint = [&](const SourceRange& range, std::string message) {
+		result.push_back({.range = range, .message = std::move(message)});
 	};
 	// The uses of each definition (references other than its declaration).
 	std::vector<size_t> uses(index.symbols().size(), 0);
@@ -51,7 +45,7 @@ mdls::json mdls::unusedDiagnostics(const Document& doc, const mdl::analysis::Sem
 		}
 	}
 	// Imports whose files (and the files they import) define nothing that the document uses.
-	std::map<size_t, const mdl::analysis::ImportPath*> statements; // line -> its full path (the last part)
+	std::map<size_t, const ImportPath*> statements; // line -> its full path (the last part)
 	for (const auto& i : index.imports())
 		if (i.file == file) {
 			auto& last = statements[i.range.begin.line];
@@ -74,5 +68,6 @@ mdls::json mdls::unusedDiagnostics(const Document& doc, const mdl::analysis::Sem
 		if (std::none_of(reachable.begin(), reachable.end(), [&](const auto& f) { return used.contains(f); }))
 			hint(import->range, std::format("The import {} is never used", import->name));
 	}
-	return diagnostics;
+	std::ranges::sort(result, {}, [](const Unused& u) { return std::pair{u.range.begin.line, u.range.begin.column}; });
+	return result;
 }

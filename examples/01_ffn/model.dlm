@@ -1,5 +1,3 @@
-import std;
-
 /**
  * @brief A single fully connected layer: computes x W^T + b.
  */

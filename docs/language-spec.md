@@ -49,10 +49,12 @@ exported; every file is translated once, even if it is imported several times.
   ```
   Every instance has its own weights, identified by their path (e.g. `linear.W`, or `layers.3.attn.W` for nested
   modules); calling the same instance twice uses the same weights. Other member functions of an instance are called on
-  it (`norm.gradient(x, dy)`) and use its weights.
+  it (`norm.gradient(x, dy)`) and use its weights. The weights (and submodules) of an instance are accessed by their
+  path, e.g. for weight tying: `x @ embed.table.T()`, `encoder.layers[2].attn.W`; they are the same weights that its
+  functions use.
 - Arrays of instances, one per index (each instance may get different hyperparameters):
   ```dlm
-  layers: [Layer[d] for i in 0..n]
+  layers: [Layer[d] for _ in 0..n]
   stages: [Stage[conf.sizes[i], conf.sizes[i + 1]] for i in 0..3]
   ```
   `layers[i]` with a compile-time index is the instance `i` (weights `layers.<i>.…`).
@@ -156,6 +158,13 @@ float[...] sum(x: float[..., N]) => __builtin_sum(x);
 carry state through a loop (see [Loops](#loops)). A tensor declared without initializer has slots that are assigned one
 by one (see [Loops](#loops)).
 
+Only variables and parameters can be rebound: the members of a module (weights and submodules), hyperparameters, and
+loop variables are read-only (`W = ...;` is an error; declare a variable instead).
+
+`_` discards a value: `auto a, _ = split(x);`, `auto _ = check(x);`, `for (_ in 0..n)`, `[Layer[d] for _ in 0..n]`.
+It is not a name: it has no value, type, or members, so it cannot be used (`_ + 1` and `_.T()` are errors) and cannot
+be declared with a type (`float[4] _ = x;` is an error). It is never reported as unused.
+
 ## Signatures and `...`
 The declared types of the arguments and return values define the signature of compiled functions. `...` stands for any
 number of leading dimensions: within the language a function is rank-polymorphic (the rank of `...` is inferred per
@@ -196,7 +205,7 @@ loop is expanded when compiling (there is no loop at runtime). The body is a sco
 rebinds a variable declared outside, which carries state from one iteration to the next:
 ```dlm
 module Encoder[n: uint, d: uint] {
-    layers: [Layer[d] for i in 0..n]          // an array of module instances
+    layers: [Layer[d] for _ in 0..n]          // an array of module instances (`_`: the index is not used)
     float[..., d] forward(x: float[..., d]) {
         auto h = x;
         for (i in 0..n) { h = layers[i](h); }
@@ -353,9 +362,12 @@ show their name, e.g. `[-Wfloat-widening]`.
 | `float-widening` | error | error | an implicit conversion from bfloat16/float16 to float32 (as a warning or ignored, it is inserted; see [Float types](#float-types)) |
 | `float-narrowing` | error | error | an implicit conversion from float32 to 16 bits, or between bfloat16 and float16 (likewise) |
 | `unknown-annotation` | warning | warning | an annotation the compiler does not know (see [Compile-time conditionals and annotations](#compile-time-conditionals-and-annotations)) |
+| `unused` | warning | warning | a definition of the compiled file that is never used: a local or loop variable, a parameter, a member of a module, or an import (names starting with `_` and the loop variable `_` are exempt) |
+| `shadow` | warning | warning | a local variable, parameter, or loop variable that hides a variable, parameter, loop variable, member, or hyperparameter of an enclosing scope (as g++'s `-Wshadow`) |
 | `permits-illegal-instantiation` | warning | error | code that is an error for some hyperparameter values: sizes that may differ where equal ones are needed (see [Type checks](#type-checks)), or a member with `@conditional(c)` used where `c` may be false |
 
-`--strict` (`strict: true`) reports what may be wrong as an error; explicit `-W` options take precedence. All other
+The compiler and `mdls` run the same checks, also of modules that are never instantiated (with symbolic
+hyperparameters). `--strict` (`strict: true`) reports what may be wrong as an error; explicit `-W` options take precedence. All other
 diagnostics are errors.
 
 # Standard library

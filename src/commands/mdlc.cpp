@@ -286,13 +286,17 @@ static void runCompileCommand(const CompileArgs& args) {
 			parseOptions.floatNarrowing = level;
 		else if (name == "unknown-annotation")
 			parseOptions.unknownAnnotation = level;
+		else if (name == "shadow")
+			parseOptions.shadow = level;
+		else if (name == "unused")
+			parseOptions.unused = level;
 		else if (name == "permits-illegal-instantiation")
 			parseOptions.permitsIllegalInstantiation = level;
 		else
 			throw std::runtime_error(
 					"unknown diagnostic -W" + w +
 					" (known: float-widening, float-narrowing, unknown-annotation, "
-					"permits-illegal-instantiation)"
+					"permits-illegal-instantiation, unused, shadow)"
 			);
 	}
 	auto result = mdl::parser::parse(args.inputs[0], parseOptions);
@@ -493,7 +497,8 @@ int main(int argc, char* argv[]) {
 			   "permits-illegal-instantiation (code that is an error for some hyperparameter values: sizes that are "
 			   "different compile-time expressions where equal ones are needed, e.g. the hyperparameters input and "
 			   "output in `W @ x`, or a member with @conditional(c) used where c may be false) is a warning by "
-			   "default and an error with --strict. Repeatable."
+			   "default and an error with --strict. unused (definitions of the compiled file that are never used) and "
+			   "shadow (a local definition that hides one of an enclosing scope) are warnings by default. Repeatable."
 	)
 			->type_name("[no-|error=]NAME");
 	app.add_flag(

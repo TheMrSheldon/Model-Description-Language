@@ -7,6 +7,7 @@ antlr_target(mdlparser ${CMAKE_CURRENT_LIST_DIR}/mdl.g4 LEXER PARSER VISITOR LIS
 
 add_library(mdl_frontend STATIC
 	analysis/index.cpp
+	analysis/unused.cpp
 	computegraph/datatype.cpp
 	computegraph/graph.cpp
 	computegraph/node.cpp

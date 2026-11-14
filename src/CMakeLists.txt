@@ -20,10 +20,11 @@ if (NOT BUILD_SHARED_LIBS)
 endif()
 # The C runtime of antlr4_runtime (Visual C++ only): static (/MT) if the project uses the static runtime (release builds
 # of the tools, -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded), else /MD.
+# (A cache variable: ANTLR's option() would ignore a normal variable; its default is ON.)
 if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded(Debug)?$")
-	set(ANTLR4_WITH_STATIC_CRT ON)
+	set(WITH_STATIC_CRT ON CACHE BOOL "" FORCE)
 else()
-	set(ANTLR4_WITH_STATIC_CRT OFF)
+	set(WITH_STATIC_CRT OFF CACHE BOOL "" FORCE)
 endif()
 set(ANTLR_BUILD_CPP_TESTS OFF)
 FetchContent_Declare(

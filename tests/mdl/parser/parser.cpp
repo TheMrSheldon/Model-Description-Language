@@ -657,3 +657,41 @@ TEST_CASE("array hyperparameters: literals, indexing, and the declared size", "[
 	CHECK_FALSE(parseSource(mlp + "module Net[] { m: MLP[[4, 8], [true, false]] float[..., 2] f(x: float[..., 4]) => m(x); }")
 						.has_value());
 }
+
+TEST_CASE("weights of submodules can be accessed (proj.W)", "[parser][weights]") {
+	auto unit = parseSource(R"(
+		struct Scale { gain: float[4] }
+		module Lin[n: uint] {
+			W: float[n, n]
+			s: Scale
+			float[..., n] forward(x: float[..., n]) => x @ W;
+		}
+		module Pair[] {
+			a: Lin[4]
+			layers: [Lin[4] for _ in 0..2]
+			float[..., 4] forward(x: float[..., 4]) => a(x);
+		}
+		module Model[] {
+			proj: Lin[4]
+			pair: Pair[]
+			float[..., 4] forward(x: float[..., 4]) => proj(x) + x @ proj.W.T();
+			float[4, 4] nested() => pair.a.W + pair.layers[1].W;
+			float[4] gain() => proj.s.gain;
+		}
+	)");
+	REQUIRE(unit.has_value());
+	// The same weight as the one the submodule's call uses (one node, one ABI entry).
+	CHECK(weightNames(moduleFunction(*unit, "Model", "forward")) == std::vector<std::string>{"proj.W"});
+	CHECK(weightNames(moduleFunction(*unit, "Model", "nested")) ==
+		  std::vector<std::string>{"pair.a.W", "pair.layers.1.W"});
+	CHECK(weightNames(moduleFunction(*unit, "Model", "gain")) == std::vector<std::string>{"proj.s.gain"});
+
+	parser::ParseOptions options;
+	std::vector<std::string> messages;
+	options.diagnostics = [&](const Diagnostic& d) { messages.push_back(d.message); };
+	std::istringstream source{R"(
+		module Lin[] { W: float[4, 4] float[4] forward(x: float[4]) => x @ W; }
+		module M[] { proj: Lin[] float[4, 4] f() => proj.V; })"};
+	CHECK_FALSE(parser::parse(source, "<test>", options).has_value());
+	CHECK(std::ranges::contains(messages, std::string{"No member 'V' in Lin"}));
+}
