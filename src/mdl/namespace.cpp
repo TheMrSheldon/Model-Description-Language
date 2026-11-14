@@ -1,5 +1,5 @@
-#include <optional>
 #include <mdl/namespace.hpp>
+#include <optional>
 
 #include <mdl/computegraphv2/builtins.hpp>
 #include <mdl/computegraphv2/function.hpp>
@@ -26,7 +26,7 @@ static std::map<std::string, std::any> initBuiltins() {
 		const char* name;
 		FunctionIDs id;
 		std::vector<std::pair<const char*, DataType>> extraParams = {}; ///< Parameters after `x`
-		bool extraParamsAreArguments = false; ///< Whether the extra parameters are arguments of the builtin
+		bool extraParamsAreArguments = false;		  ///< Whether the extra parameters are arguments of the builtin
 		std::optional<DataType> xType = std::nullopt; ///< Type of `x` (default: a float tensor)
 	};
 	/** \todo template the base type? **/
@@ -56,7 +56,10 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_take", FunctionIDs::TAKE, {{"ids", intTensor}}, true},
 			{"__builtin_one_hot_like", FunctionIDs::ONE_HOT_LIKE, {{"like", tensor}}, true, intTensor},
 			{"__builtin_where", FunctionIDs::WHERE, {{"a", tensor}, {"b", tensor}}, true, boolTensor},
-			{"__builtin_select", FunctionIDs::SELECT, {{"axis", PrimitiveType::integer}, {"index", PrimitiveType::integer}}, true},
+			{"__builtin_select",
+			 FunctionIDs::SELECT,
+			 {{"axis", PrimitiveType::integer}, {"index", PrimitiveType::integer}},
+			 true},
 	};
 
 	std::map<std::string, std::any> builtins;
@@ -74,14 +77,12 @@ static std::map<std::string, std::any> initBuiltins() {
 		}
 		const auto& output = graph.addInvocationNode(builtin.id, std::move(arguments));
 		builtins.emplace(
-				builtin.name, mdl::Object(
-									  mdl::FunctionDecl{
-											  .name = builtin.name,
-											  .templateParameters = {},
-											  .parameters = std::move(params),
-											  .outputs = {std::cref(output)}
-									  }
-							  )
+				builtin.name, mdl::Object(mdl::FunctionDecl{
+									  .name = builtin.name,
+									  .templateParameters = {},
+									  .parameters = std::move(params),
+									  .outputs = {std::cref(output)}
+							  })
 		);
 	}
 	return builtins;

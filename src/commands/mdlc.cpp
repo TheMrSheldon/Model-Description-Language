@@ -1,13 +1,13 @@
 #include "common.hpp"
-#include <mdl/version.hpp>
 #include "mdl/argvals.hpp"
+#include <mdl/version.hpp>
 
 #include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
-#include <mdl/exports.hpp>
-#include <mdl/utils/pathpattern.hpp>
 #include <mdl/computegraphv2/function.hpp>
+#include <mdl/exports.hpp>
 #include <mdl/parser.hpp>
+#include <mdl/utils/pathpattern.hpp>
 #include <mdl/utils/utils.hpp>
 
 #include <yaml-cpp/yaml.h>
@@ -76,7 +76,9 @@ public:
 			const std::string name = buildOption.results().front();
 			const YAML::Node builds = root["builds"];
 			if (!builds || !builds.IsMap() || !builds[name])
-				throw CLI::ConfigError(std::format("--build {}: the argument values have no section builds.{}", name, name));
+				throw CLI::ConfigError(
+						std::format("--build {}: the argument values have no section builds.{}", name, name)
+				);
 			collect(builds[name], "builds." + name);
 		}
 
@@ -124,7 +126,9 @@ public:
 					for (const auto& entry : rule) {
 						const auto name = entry.first.as<std::string>();
 						if (name != "weights" && name != "format" && name != "group")
-							throw CLI::ConfigError("build key quantize: unknown key " + name + " (weights, format, group)");
+							throw CLI::ConfigError(
+									"build key quantize: unknown key " + name + " (weights, format, group)"
+							);
 					}
 					std::string value = rule["format"].as<std::string>();
 					if (rule["group"])
@@ -144,7 +148,9 @@ public:
 			} else {
 				item.name = key == "bindings" ? "binding" : key;
 				if (app.get_option_no_throw("--" + item.name) == nullptr)
-					throw CLI::ConfigError(std::format("unknown build key {} (the keys are mdlc's long option names)", key));
+					throw CLI::ConfigError(
+							std::format("unknown build key {} (the keys are mdlc's long option names)", key)
+					);
 				item.inputs = scalars(node, key);
 			}
 			items.push_back(std::move(item));
@@ -288,7 +294,10 @@ static void runCompileCommand(const CompileArgs& args) {
 	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
 	mdl::GradientRequest gradients{
-			.functions = args.gradFunctions, .options = {}, .fused = args.gradFused, .accumulate = !args.gradOverwrite,
+			.functions = args.gradFunctions,
+			.options = {},
+			.fused = args.gradFused,
+			.accumulate = !args.gradOverwrite,
 			.checkpoint = args.checkpoint
 	};
 	{
@@ -321,7 +330,9 @@ static void runCompileCommand(const CompileArgs& args) {
 	}
 	for (const auto& [name, rank] : compileOpts.inputEllipsisRanks)
 		if (rank > compileOpts.ellipsisRank)
-			throw std::runtime_error("--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`");
+			throw std::runtime_error(
+					"--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`"
+			);
 	auto exports = mdl::exportedFunctions(
 			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks,
 			parseQuantizationRules(args.quantize)
@@ -330,8 +341,8 @@ static void runCompileCommand(const CompileArgs& args) {
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
 		logger->info(
-				"Exporting {} ({} input(s), {} weight(s), {} output(s))", fn.symbol, fn.inputs.size(), fn.weights.size(),
-				fn.outputs.size()
+				"Exporting {} ({} input(s), {} weight(s), {} output(s))", fn.symbol, fn.inputs.size(),
+				fn.weights.size(), fn.outputs.size()
 		);
 
 	mdl::compileToFile(exports, output, argvals, compileOpts);
@@ -372,8 +383,10 @@ int main(int argc, char* argv[]) {
 	config->check(CLI::ExistingFile);
 	app.add_option(
 			   "--binding", args.bindings,
-			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ header), "
-			   "python, python-torch, python-tensorflow, json (metadata). Without PATH, the file is placed next to the output. Repeatable."
+			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ "
+			   "header), "
+			   "python, python-torch, python-tensorflow, json (metadata). Without PATH, the file is placed next to the "
+			   "output. Repeatable."
 	)
 			->type_name("TYPE[=PATH]");
 	app.add_option("--depfile", args.depfile, "Write a dependency file listing all (imported) source files.");
@@ -415,7 +428,8 @@ int main(int argc, char* argv[]) {
 	app.add_option(
 			   "--quantize", args.quantize,
 			   "Quantize the weights selected by the patterns (e.g. 'int4:128=**.W,!classifier.**'): FORMAT int8 (one "
-			   "scale per output unless GROUP is given), int4 (symmetric), or int4-asym (with zero points); GROUP values "
+			   "scale per output unless GROUP is given), int4 (symmetric), or int4-asym (with zero points); GROUP "
+			   "values "
 			   "of the input dimension share a scale (default 128 for int4). A weight W [N, K] becomes W.qweight, "
 			   "W.scales (and W.zeros); quantized weights are frozen. Repeatable; later rules take precedence."
 	)
@@ -441,27 +455,31 @@ int main(int argc, char* argv[]) {
 			}));
 	app.add_option(
 			   "--ellipsis-rank", args.ellipsisRanks,
-			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, seq]). "
+			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, "
+			   "seq]). "
 			   "NAME=K gives the input NAME a smaller rank: its `...` are the leading K dimensions (e.g. labels=1 for "
 			   "labels [batch] next to token ids [batch, seq]). Repeatable."
 	)
 			->type_name("N|NAME=K");
 	app.add_option(
 			   "--float", args.defaultFloat,
-			   "The type that `float` stands for: f32 (default), bf16, or f16. The explicit types float32, bfloat16 and "
+			   "The type that `float` stands for: f32 (default), bf16, or f16. The explicit types float32, bfloat16 "
+			   "and "
 			   "float16 are not affected; conversions between float types are explicit (e.g. float32(x))."
 	)
 			->transform(CLI::CheckedTransformer(
 					std::map<std::string, mdl::PrimitiveType>{
 							{"f32", mdl::PrimitiveType::float32},
 							{"bf16", mdl::PrimitiveType::bfloat16},
-							{"f16", mdl::PrimitiveType::float16}},
+							{"f16", mdl::PrimitiveType::float16}
+					},
 					CLI::ignore_case
 			));
 	app.add_option(
 			   "-W", args.warnings,
 			   "Diagnostics like g++: -W<name> warns, -Wno-<name> ignores, -Werror=<name> makes it an error. "
-			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or between "
+			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or "
+			   "between "
 			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. "
 			   "unknown-annotation (an annotation the compiler does not know) is a warning by default. Repeatable."
 	)

@@ -59,11 +59,13 @@ namespace {
 			const size_t line = t->getLine(), column = t->getCharPositionInLine();
 			// Columns in code points: count the UTF-8 lead bytes.
 			auto points = [](std::string_view v) {
-				return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; }));
+				return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; })
+				);
 			};
-			const mdl::SourcePosition end = newlines == 0
-													? mdl::SourcePosition{line, column + points(s)}
-													: mdl::SourcePosition{line + newlines, points(std::string_view{s}.substr(lastLine + 1))};
+			const mdl::SourcePosition end =
+					newlines == 0
+							? mdl::SourcePosition{line, column + points(s)}
+							: mdl::SourcePosition{line + newlines, points(std::string_view{s}.substr(lastLine + 1))};
 			tokens.push_back({t->getType(), s, {line, column}, end});
 		}
 		return tokens;
@@ -87,7 +89,8 @@ namespace {
 				if (t.type != mdlLexer::BLOCKCOMMENT && t.type != mdlLexer::LINECOMMENT)
 					before.push_back(&t);
 			}
-			if (!before.empty() && before.back()->end == cursor && (before.back()->identifier() || isWord(*before.back())))
+			if (!before.empty() && before.back()->end == cursor &&
+				(before.back()->identifier() || isWord(*before.back())))
 				before.pop_back(); // the word being typed
 			auto at = [&](size_t fromEnd) -> const Token* {
 				return fromEnd < before.size() ? before[before.size() - 1 - fromEnd] : nullptr;
@@ -117,7 +120,9 @@ namespace {
 		mdls::json items = mdls::json::array();
 		std::set<std::string> seen;
 
-		static bool isWord(const Token& t) { return !t.text.empty() && std::isalpha(static_cast<unsigned char>(t.text[0])); }
+		static bool isWord(const Token& t) {
+			return !t.text.empty() && std::isalpha(static_cast<unsigned char>(t.text[0]));
+		}
 
 		void add(const std::string& label, int kind, const std::string& detail, const std::string& documentation) {
 			if (!seen.insert(label).second)
@@ -145,7 +150,8 @@ namespace {
 			if (path.empty())
 				add("std", 9, "the standard library", "");
 			else if (path == std::vector<std::string>{"std"}) {
-				for (const auto& dir : options.stdlibDirs.empty() ? mdl::parser::defaultStdlibDirs() : options.stdlibDirs) {
+				for (const auto& dir :
+					 options.stdlibDirs.empty() ? mdl::parser::defaultStdlibDirs() : options.stdlibDirs) {
 					std::error_code ec;
 					for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
 						if (entry.path().extension() == ".dlm")
@@ -178,7 +184,8 @@ namespace {
 					if (module == nullptr || module->kind != SymbolKind::module)
 						return;
 					for (const auto& s : doc.index->symbols())
-						if (s.kind == SymbolKind::hyperparameter && s.container == module->name && s.file == module->file)
+						if (s.kind == SymbolKind::hyperparameter && s.container == module->name &&
+							s.file == module->file)
 							add(s);
 					return;
 				}
@@ -221,7 +228,8 @@ namespace {
 				for (const auto* s : doc.index->visibleAt(doc.sourceName(), doc.toIndex(cursor)))
 					add(*s);
 			for (const char* keyword :
-				 {"auto", "return", "for", "in", "masked", "module", "struct", "import", "template", "array", "true", "false"})
+				 {"auto", "return", "for", "in", "masked", "module", "struct", "import", "template", "array", "true",
+				  "false"})
 				add(keyword, 14, "", "");
 			for (const char* type : {"float", "float32", "bfloat16", "float16", "int", "uint", "bool"})
 				add(type, 25, "", "");

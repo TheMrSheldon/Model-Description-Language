@@ -1,7 +1,8 @@
 // textDocument/formatting: mdl-format's style.
 #include "./features.hpp"
 
-mdls::json mdls::formatting(const Document& doc, const json& params, const std::optional<mdl::format::FormatOptions>& style) {
+mdls::json
+mdls::formatting(const Document& doc, const json& params, const std::optional<mdl::format::FormatOptions>& style) {
 	mdl::format::FormatOptions options;
 	if (style)
 		options = *style;

@@ -150,7 +150,6 @@ namespace mdl::masking {
 
 			const Node& intConst(int v) { return graph.addConstNode(Atomic{v}); }
 
-
 			/** @brief The mask of dimension @p d of a tensor of shape @p s, as a bool tensor broadcastable to @p s. */
 			const Node& dimMask(const shapes::Shape& s, size_t d) {
 				const std::string key = shapes::str(s) + "#" + std::to_string(d);
@@ -183,9 +182,7 @@ namespace mdl::masking {
 					std::sort(order.begin(), order.end(), [&](int a, int b) { return positions[a] < positions[b]; });
 					const Node* m = &mask;
 					if (!std::is_sorted(positions.begin(), positions.end()))
-						m = &graph.addInvocationNode(
-								FIDs::PERMUTE, {*m, graph.addConstNode(Atomic{order})}
-						);
+						m = &graph.addInvocationNode(FIDs::PERMUTE, {*m, graph.addConstNode(Atomic{order})});
 					std::vector<int> sorted(positions);
 					std::sort(sorted.begin(), sorted.end());
 					// Insert size-1 dimensions everywhere else (-1 copies the next dimension of the mask).
@@ -215,15 +212,17 @@ namespace mdl::masking {
 				const auto* type = std::get_if<TensorType>(&getDataType(w));
 				if (target == nullptr || type == nullptr || !isFloat(target->type) || target->type == type->type)
 					return w;
-				return graph.addInvocationNode(FIDs::CAST, {w, graph.addConstNode(Atomic{static_cast<int>(target->type)})});
+				return graph.addInvocationNode(
+						FIDs::CAST, {w, graph.addConstNode(Atomic{static_cast<int>(target->type)})}
+				);
 			}
 
 			/** @brief @p x with @p value at the masked positions of the dimensions @p dims. */
 			const Node& fill(const Node& x, const shapes::Shape& s, const std::vector<size_t>& dims, double value) {
 				const Node& cond = combinedMask(s, dims);
 				// Already filled with the same mask and value (e.g. the forward part of a gradient function)?
-				if (const auto* inv = std::get_if<InvocationNode>(&x); inv && inv->id == FIDs::WHERE &&
-																	 &inv->arguments[0].get() == &cond) {
+				if (const auto* inv = std::get_if<InvocationNode>(&x);
+					inv && inv->id == FIDs::WHERE && &inv->arguments[0].get() == &cond) {
 					const auto* c = std::get_if<ConstNode>(&inv->arguments[2].get());
 					if (c != nullptr && std::holds_alternative<double>(c->value) && std::get<double>(c->value) == value)
 						return x;
@@ -263,9 +262,9 @@ namespace mdl::masking {
 					const size_t last = s.size() - 1;
 					if (s.empty() || !isMasked(s[last]) || plain(0))
 						return make();
-					const double value = inv.id == FIDs::MAX ? std::numeric_limits<float>::lowest()
-									   : inv.id == FIDs::MIN ? std::numeric_limits<float>::max()
-															 : 0.0;
+					const double value = inv.id == FIDs::MAX   ? std::numeric_limits<float>::lowest()
+										 : inv.id == FIDs::MIN ? std::numeric_limits<float>::max()
+															   : 0.0;
 					args[0] = std::cref(fill(args[0].get(), s, {last}, value));
 					const Node& reduced = graph.addInvocationNode(inv.id, std::vector<NodeRef>(args));
 					if (inv.id != FIDs::MEAN)
@@ -287,8 +286,7 @@ namespace mdl::masking {
 						return sum;
 					const Node& indicator = this->indicator(combinedMask(s, dims), inv.arguments[0].get());
 					const Node& count = graph.addInvocationNode(
-							FIDs::SUM_ALL,
-							{graph.addInvocationNode(FIDs::BROADCAST_LIKE, {indicator, args[0]})}
+							FIDs::SUM_ALL, {graph.addInvocationNode(FIDs::BROADCAST_LIKE, {indicator, args[0]})}
 					);
 					return graph.addInvocationNode(FIDs::TENSOR_DIV, {sum, count});
 				}
@@ -316,9 +314,11 @@ namespace mdl::masking {
 					const auto& sl = argShape(1);
 					std::vector<size_t> dims;
 					for (size_t k = 0; k < sg.size(); ++k) {
-						const auto offset = static_cast<std::ptrdiff_t>(sg.size()) - static_cast<std::ptrdiff_t>(sl.size());
+						const auto offset =
+								static_cast<std::ptrdiff_t>(sg.size()) - static_cast<std::ptrdiff_t>(sl.size());
 						const auto kl = static_cast<std::ptrdiff_t>(k) - offset;
-						const bool summed = kl < 0 || (sl[kl] == shapes::Dim::constant(1) && !(sg[k] == shapes::Dim::constant(1)));
+						const bool summed =
+								kl < 0 || (sl[kl] == shapes::Dim::constant(1) && !(sg[k] == shapes::Dim::constant(1)));
 						if (summed && isMasked(sg[k]))
 							dims.push_back(k);
 					}
@@ -356,9 +356,8 @@ namespace mdl::masking {
 		};
 	} // namespace
 
-	std::expected<Masked, std::string> apply(
-			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes
-	) {
+	std::expected<Masked, std::string>
+	apply(Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes) {
 		FunctionDecl result = func;
 		const Node* mask = &graph.addInputNode(TensorType{PrimitiveType::boolean, {Elipsis{}}}, "mask");
 		result.parameters.emplace_back("mask", std::cref(std::get<InputNode>(*mask)));

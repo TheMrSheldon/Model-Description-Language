@@ -137,10 +137,9 @@ public:
 	constexpr size_t getNumWarnings() const { return numWarnings; }
 
 private:
-	void report(
-			ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
-			const std::string& msg, const std::string& hint = "", const std::string& flag = ""
-	);
+	void
+	report(ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
+		   const std::string& msg, const std::string& hint = "", const std::string& flag = "");
 };
 
 #endif

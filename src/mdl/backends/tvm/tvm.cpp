@@ -7,11 +7,11 @@
 #include "./details/relax_builtins.hpp"
 
 #include <mdl/compiler.hpp>
-#include <mdl/exports.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
+#include <mdl/exports.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
 #include <mdl/passes/shapes.hpp>
 #include <mdl/utils/utils.hpp>
@@ -25,20 +25,20 @@
 
 #include <algorithm>
 #include <any>
-#include <concepts>
-#include <utility>
 #include <cassert>
 #include <cctype>
 #include <cmath>
-#include <optional>
+#include <concepts>
 #include <cstdlib>
-#include <format>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <ranges>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 
 // ── type helpers ──────────────────────────────────────────────────────────────
 
@@ -153,7 +153,9 @@ struct TranslationContext {
 
 	TranslationContext(const mdl::ArgVals& argVals, unsigned ellipsisRank) : argVals(argVals) {
 		for (unsigned i = 0; i < ellipsisRank; ++i)
-			ellipsis.emplace_back(ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(i), ::tvm::DataType::Int(64));
+			ellipsis.emplace_back(
+					ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(i), ::tvm::DataType::Int(64)
+			);
 	}
 };
 
@@ -174,7 +176,9 @@ static ::tvm::ffi::Array<::tvm::PrimExpr> getShape(mdl::DataType dtype, const Tr
 							}
 							auto expr = std::visit(
 									mdl::overloaded{
-											[&](mdl::Elipsis) -> ::tvm::PrimExpr { return ctx.ellipsis.front(); }, // expanded above
+											[&](mdl::Elipsis) -> ::tvm::PrimExpr {
+												return ctx.ellipsis.front();
+											}, // expanded above
 											[](unsigned u) -> ::tvm::PrimExpr {
 												return ::tvm::IntImm(::tvm::DataType::Int(64), u);
 											},
@@ -208,10 +212,8 @@ static ::tvm::relax::Expr translateRelax(
 		const mdl::Node& node, const mdl::ArgVals& argVals
 );
 
-static ::tvm::relax::Expr translateRelax(
-		::tvm::relax::BlockBuilder& bb, RelaxCache&, std::vector<::tvm::relax::Var>& params, const mdl::ConstNode& node,
-		const mdl::ArgVals&
-) {
+static ::tvm::relax::Expr
+translateRelax(::tvm::relax::BlockBuilder& bb, RelaxCache&, std::vector<::tvm::relax::Var>& params, const mdl::ConstNode& node, const mdl::ArgVals&) {
 	return std::visit(
 			mdl::overloaded{
 					[](int v) -> ::tvm::relax::Expr {
@@ -238,19 +240,15 @@ static ::tvm::relax::Expr translateRelax(
 	);
 }
 
-static ::tvm::relax::Expr translateRelax(
-		::tvm::relax::BlockBuilder& bb, RelaxCache&, std::vector<::tvm::relax::Var>& /*params*/,
-		const mdl::ErrorNode& /*node*/, const mdl::ArgVals&
-) {
+static ::tvm::relax::Expr
+translateRelax(::tvm::relax::BlockBuilder& bb, RelaxCache&, std::vector<::tvm::relax::Var>& /*params*/, const mdl::ErrorNode& /*node*/, const mdl::ArgVals&) {
 	std::abort(); // compile-time error: should not reach here
 }
 
 template <typename LeafNode>
 	requires std::same_as<LeafNode, mdl::ParameterNode> || std::same_as<LeafNode, mdl::InputNode>
-static ::tvm::relax::Expr translateRelax(
-		::tvm::relax::BlockBuilder&, RelaxCache&, std::vector<::tvm::relax::Var>&, const LeafNode& node,
-		const mdl::ArgVals&
-) {
+static ::tvm::relax::Expr
+translateRelax(::tvm::relax::BlockBuilder&, RelaxCache&, std::vector<::tvm::relax::Var>&, const LeafNode& node, const mdl::ArgVals&) {
 	// All arguments and weights of an exported function are Relax parameters (pre-seeded in the cache).
 	throw std::runtime_error("TVM backend: " + mdl::getName(node) + " is not an argument of the compiled function");
 }
@@ -361,9 +359,10 @@ static ::tvm::relax::Expr translateRelax(
 	// evaluated here and passed as float32 constants. (Relax's FoldConstant cannot evaluate operators without TVM's
 	// Python legalizations, and backend patterns rely on seeing the constant values.)
 	using FIDs = mdl::builtins::FunctionIDs;
-	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND ||
-					  node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE ||
-					  node.id == FIDs::DEQUANT); // integer arguments stay integers
+	bool isShapeOp =
+			(node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND ||
+			 node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE ||
+			 node.id == FIDs::DEQUANT); // integer arguments stay integers
 	// The element type of the result: float constants are created in it (the operands have it already: conversions
 	// between float types are explicit CASTs).
 	const auto* tensorType = std::get_if<mdl::TensorType>(&node.type);
@@ -372,7 +371,8 @@ static ::tvm::relax::Expr translateRelax(
 	const auto floatType = mdl::isFloat(element) ? toTVMType(element) : ::tvm::DataType::Float(32);
 	auto isFloatTensor = [](const ::tvm::relax::Expr& e) {
 		const auto* sinfo = e->struct_info_.as<::tvm::relax::TensorStructInfoNode>();
-		return sinfo != nullptr && !sinfo->IsUnknownDtype() && sinfo->dtype.is_float() || sinfo != nullptr && sinfo->dtype.is_bfloat16();
+		return sinfo != nullptr && !sinfo->IsUnknownDtype() && sinfo->dtype.is_float() ||
+			   sinfo != nullptr && sinfo->dtype.is_bfloat16();
 	};
 	std::vector<::tvm::relax::Expr> translatedArgs;
 	translatedArgs.reserve(node.arguments.size());
@@ -420,10 +420,11 @@ static ::tvm::relax::Expr translateRelax(
 
 // ── per-function Relax IR builder ─────────────────────────────────────────────
 
-static ::tvm::relax::Var makeRelaxParam(
-		const std::string& name, const mdl::DataType& dtype, const TranslationContext& ctx, int rank = -1
-) {
-	auto sinfo = ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(getShape(dtype, ctx, rank)), toUnderlyingTVMType(dtype));
+static ::tvm::relax::Var
+makeRelaxParam(const std::string& name, const mdl::DataType& dtype, const TranslationContext& ctx, int rank = -1) {
+	auto sinfo = ::tvm::relax::TensorStructInfo(
+			::tvm::relax::ShapeExpr(getShape(dtype, ctx, rank)), toUnderlyingTVMType(dtype)
+	);
 	return ::tvm::relax::Var(name, sinfo);
 }
 
@@ -449,7 +450,11 @@ static void checkOutputShape(const mdl::ExportedFunction& fn, size_t i, const ::
 	for (size_t d = 0; d < shape.size(); ++d) {
 		const auto* imm = shape[d].as<::tvm::IntImmNode>();
 		if (declared.shape[d] >= 0 && (imm == nullptr || imm->value != declared.shape[d]))
-			error(std::format("has a different size in dimension {}: {}", d, [&] { std::ostringstream o; o << shape; return o.str(); }()));
+			error(std::format("has a different size in dimension {}: {}", d, [&] {
+				std::ostringstream o;
+				o << shape;
+				return o.str();
+			}()));
 	}
 }
 
@@ -470,7 +475,9 @@ static mdl::shapes::Dim toDim(const ::tvm::PrimExpr& e) {
 static std::string describe(const mdl::Node& node) {
 	return std::visit(
 			mdl::overloaded{
-					[](const mdl::InvocationNode& inv) { return std::format("builtin #{}", std::to_underlying(inv.id)); },
+					[](const mdl::InvocationNode& inv) {
+						return std::format("builtin #{}", std::to_underlying(inv.id));
+					},
 					[](const mdl::InputNode& in) { return "input " + in.name; },
 					[](const mdl::ParameterNode& p) { return "weight " + p.name; },
 					[](const auto&) { return std::string{"constant"}; },
@@ -483,8 +490,9 @@ static std::string describe(const mdl::Node& node) {
  * @brief Checks the shapes inferred on the computegraph (mdl::shapes::infer) against the shapes Relax computed for the
  * translated nodes (enabled with the environment variable MDL_VERIFY_SHAPES=1; a development aid for the inference).
  */
-static void verifyShapes(const mdl::ExportedFunction& fn, const RelaxCache& cache, const mdl::ArgVals& argVals,
-						 unsigned ellipsisRank) {
+static void verifyShapes(
+		const mdl::ExportedFunction& fn, const RelaxCache& cache, const mdl::ArgVals& argVals, unsigned ellipsisRank
+) {
 	// The packed inputs (residuals) have the shapes their producer computed; their declared types are imprecise.
 	std::unordered_map<const mdl::Node*, mdl::shapes::Shape> known;
 	for (const auto& t : fn.inputs)
@@ -516,7 +524,10 @@ static void verifyShapes(const mdl::ExportedFunction& fn, const RelaxCache& cach
 			same = !actual[i].known || !(*inferred)[i].known || actual[i] == (*inferred)[i];
 		++checked;
 		if (!same)
-			mismatches += std::format("\n  {}: inferred {}, Relax {}", describe(*node), mdl::shapes::str(*inferred), mdl::shapes::str(actual));
+			mismatches += std::format(
+					"\n  {}: inferred {}, Relax {}", describe(*node), mdl::shapes::str(*inferred),
+					mdl::shapes::str(actual)
+			);
 	}
 	if (!mismatches.empty())
 		throw std::runtime_error(fn.symbol + ": inferred shapes differ from Relax:" + mismatches);
@@ -576,7 +587,8 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 			rename.Set(layout->second.ellipsis[d], ctx.ellipsis[d]);
 		const auto& sinfo = layout->second.tensors[nextPacked++];
 		auto shape = ::tvm::tirx::Substitute(sinfo->GetShape().value(), rename);
-		bind(t, ::tvm::relax::Var(t.name, ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(shape), sinfo->dtype)), true);
+		bind(t, ::tvm::relax::Var(t.name, ::tvm::relax::TensorStructInfo(::tvm::relax::ShapeExpr(shape), sinfo->dtype)),
+			 true);
 	}
 	for (const auto& w : fn.weights)
 		bind(w, makeRelaxParam(w.name, mdl::getDataType(*w.node), ctx), false);

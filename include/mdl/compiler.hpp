@@ -62,10 +62,9 @@ namespace mdl {
 
 	/** @brief Compiles the exported functions (see mdl::exportedFunctions) into @p output. */
 	void compileToFile(
-			const std::vector<ExportedFunction>& exports,
-			const std::filesystem::path& output,
-			const ArgVals& argvals,
-			const CompileOptions& opts = {});
+			const std::vector<ExportedFunction>& exports, const std::filesystem::path& output, const ArgVals& argvals,
+			const CompileOptions& opts = {}
+	);
 
 	/**
 	 * @brief Returns the mangled symbol name for a module member function.

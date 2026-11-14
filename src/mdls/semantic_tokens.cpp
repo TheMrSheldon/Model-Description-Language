@@ -117,7 +117,8 @@ namespace {
 					if (f->IDENT())
 						declare(f->IDENT()->getSymbol(), Method, false);
 				for (auto* child : ctx->children)
-					if (dynamic_cast<mdlParser::VardeclContext*>(child) || dynamic_cast<mdlParser::FuncdefContext*>(child) ||
+					if (dynamic_cast<mdlParser::VardeclContext*>(child) ||
+						dynamic_cast<mdlParser::FuncdefContext*>(child) ||
 						dynamic_cast<antlr4::tree::TerminalNode*>(child))
 						visit(child);
 			} else if (auto* ctx = dynamic_cast<mdlParser::Struct_defContext*>(tree)) {
@@ -273,7 +274,7 @@ namespace {
 
 const std::vector<std::string>& mdls::semanticTokenTypes() {
 	static const std::vector<std::string> types{
-			"namespace", "type",	 "class",	"struct",	"typeParameter", "parameter", "variable", "property",
+			"namespace", "type",   "class",	  "struct", "typeParameter", "parameter", "variable", "property",
 			"function",	 "method", "keyword", "number", "operator",		 "decorator", "axis",
 	};
 	return types;

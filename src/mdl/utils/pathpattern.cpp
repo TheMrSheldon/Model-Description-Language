@@ -51,9 +51,8 @@ namespace {
 	 * @brief Whether the pattern segments [pi, end) match a prefix of the path segments [si, end) (a match of a
 	 * prefix selects the whole subtree).
 	 */
-	bool matchesPrefix(
-			const std::vector<std::string>& pattern, size_t pi, const std::vector<std::string>& path, size_t si
-	) {
+	bool
+	matchesPrefix(const std::vector<std::string>& pattern, size_t pi, const std::vector<std::string>& path, size_t si) {
 		if (pi == pattern.size())
 			return true; // the pattern is exhausted: matched a prefix (or the whole path)
 		if (pattern[pi] == "**") {
