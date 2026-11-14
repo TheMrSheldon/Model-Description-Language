@@ -34,7 +34,16 @@ mdls::json mdls::definition(const Document& doc, const json& params) {
 	if (doc.index == nullptr)
 		return nullptr;
 	const LineIndex lines{doc.text};
-	const auto* ref = doc.index->referenceAt(doc.sourceName(), doc.toIndex(toSource(lines, params.at("position"))));
+	const auto position = doc.toIndex(toSource(lines, params.at("position")));
+	// A part of an import path: the imported file (or all files of a package).
+	if (const auto* import = doc.index->importAt(doc.sourceName(), position)) {
+		json locations = json::array();
+		const json start{{"line", 0}, {"character", 0}};
+		for (const auto& target : import->targets)
+			locations.push_back({{"uri", pathToUri(target)}, {"range", {{"start", start}, {"end", start}}}});
+		return locations.size() == 1 ? locations[0] : locations;
+	}
+	const auto* ref = doc.index->referenceAt(doc.sourceName(), position);
 	if (ref == nullptr || !ref->symbol)
 		return nullptr;
 	const auto& s = doc.index->symbols()[*ref->symbol];

@@ -1,6 +1,7 @@
 // textDocument/hover: the declaration, kind, inferred types, and documentation of the name at the cursor.
 #include "./features.hpp"
 
+#include <filesystem>
 #include <set>
 
 namespace {
@@ -48,7 +49,28 @@ mdls::json mdls::hover(const Document& doc, const json& params) {
 		return nullptr;
 	const LineIndex lines{doc.text};
 	// The index may be of an earlier text (while the current one does not parse): positions are mapped.
-	const auto* ref = doc.index->referenceAt(doc.sourceName(), doc.toIndex(toSource(lines, params.at("position"))));
+	const auto position = doc.toIndex(toSource(lines, params.at("position")));
+	// A part of an import path: the documentation of the file (`@file`), or the files of the package.
+	if (const auto* import = doc.index->importAt(doc.sourceName(), position)) {
+		const bool package = import->targets.size() > 1 || std::filesystem::path{import->targets.front()}.stem().string(
+														   ) != import->name.substr(import->name.rfind('.') + 1);
+		std::string md = "```mdl\nimport " + import->name + "\n```\n";
+		md += package ? "*package*"
+					  : "*file* `" + std::filesystem::path{import->targets.front()}.filename().string() + "`";
+		if (!import->documentation.empty())
+			md += "\n\n---\n\n" + import->documentation;
+		json result{{"contents", {{"kind", "markdown"}, {"value", md}}}};
+		if (auto begin = doc.fromIndex(import->range.begin))
+			result["range"] = toProtocol(
+					lines,
+					mdl::SourceRange{
+							*begin,
+							{begin->line, begin->column + (import->range.end.column - import->range.begin.column)}
+					}
+			);
+		return result;
+	}
+	const auto* ref = doc.index->referenceAt(doc.sourceName(), position);
 	if (ref == nullptr)
 		return nullptr;
 	const auto range = doc.fromIndex(ref->range.begin);

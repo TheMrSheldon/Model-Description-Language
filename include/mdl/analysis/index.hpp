@@ -50,9 +50,29 @@ namespace mdl::analysis {
 		std::set<std::string> members;
 	};
 
+	/** @brief A part of an import path (`std` or `nn` in `import std.nn;`) and the file(s) it stands for. */
+	struct ImportPath {
+		std::string file; ///< the importing file
+		SourceRange range;
+		std::string name;				  ///< the path up to this part, e.g. `std.nn`
+		std::vector<std::string> targets; ///< the imported file, or the files of the directory (package)
+		std::string documentation;		  ///< the file's `@file` comment, or the list of the package's files (Markdown)
+	};
+
 	/** @brief Definitions and references of a program (see parser::analyze), from all its elaborations. */
 	class SemanticIndex {
 	public:
+		void addImport(ImportPath path) { imports_.push_back(std::move(path)); }
+		const std::vector<ImportPath>& imports() const { return imports_; }
+		/** @brief The import path part at @p position of @p file, if any. */
+		const ImportPath* importAt(std::string_view file, SourcePosition position) const {
+			for (const auto& i : imports_)
+				if (i.file == file && i.range.begin.line == position.line && i.range.begin.column <= position.column &&
+					position.column <= i.range.end.column)
+					return &i;
+			return nullptr;
+		}
+
 		/** @brief Records a definition (once per position); returns its index. */
 		size_t define(Symbol symbol);
 		/** @brief Records a use (merged with earlier records at the same position). */
@@ -76,14 +96,22 @@ namespace mdl::analysis {
 	private:
 		std::vector<Symbol> symbols_;
 		std::vector<Reference> references_;
+		std::vector<ImportPath> imports_;
 		std::map<std::tuple<std::string, size_t, size_t>, size_t> symbolAt_, referenceAt_;
 	};
 
 	/**
 	 * @brief The Markdown of a Doxygen-style doc comment (`/** ... *\/` or `///` lines): `@brief`, `@details`,
-	 * `@param`, `@return`, `@todo`, `\p`, `\f$...\f$`, `\f[...\f]`; other commands are dropped.
+	 * `@param`, `@tparam`, `@return`, `@todo`, `\p`, math (`\f$...\f$`, `\f(...\f)`, `\f[...\f]`,
+	 * `\f{env}{...\f}`, also spelled with `@`), `\cite`; other commands are dropped.
 	 */
 	std::string docCommentToMarkdown(std::string_view comment);
+
+	/** @brief The documentation of the parameter @p name (`@param name ...` or `@tparam`) in @p comment (Markdown). */
+	std::string docParameter(std::string_view comment, std::string_view name);
+
+	/** @brief The `@file` doc comment of the source @p text (before its first definition) as Markdown, if any. */
+	std::string fileDocumentation(std::string_view text);
 } // namespace mdl::analysis
 
 #endif

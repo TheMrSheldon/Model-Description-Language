@@ -23,6 +23,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -129,6 +130,12 @@ namespace mdl {
 
 		/** @brief The doc comment before @p ctx (`/** ... *\/` or `///` lines) as Markdown, if any. */
 		std::string documentation(antlr4::ParserRuleContext* ctx) {
+			const std::string comment = docComment(ctx);
+			return comment.empty() ? std::string{} : analysis::docCommentToMarkdown(comment);
+		}
+
+		/** @brief The doc comment before @p ctx as written (empty if there is none). */
+		std::string docComment(antlr4::ParserRuleContext* ctx) {
 			auto it = tokenStreams.find(currentFile());
 			if (it == tokenStreams.end() || ctx == nullptr || ctx->start == nullptr)
 				return {};
@@ -154,7 +161,20 @@ namespace mdl {
 			std::string joined;
 			for (const auto& c : comments)
 				joined += c + "\n";
-			return comments.empty() ? std::string{} : analysis::docCommentToMarkdown(joined);
+			return joined;
+		}
+
+		/**
+		 * @brief Gives the definition of the parameter @p name (a hyperparameter, template parameter, or function
+		 * parameter) its `@param` (or `@tparam`) documentation from the doc comment of @p owner (the module or function).
+		 */
+		void documentParameter(antlr4::Token* name, antlr4::ParserRuleContext* owner) {
+			if (index() == nullptr || name == nullptr)
+				return;
+			auto id = index()->find(currentFile(), rangeOf(name).begin);
+			if (!id || !index()->symbol(*id).documentation.empty())
+				return;
+			index()->symbol(*id).documentation = analysis::docParameter(docComment(owner), name->getText());
 		}
 
 		/** @brief The type of @p type for hovers, e.g. `float32[..., dim]`, `Linear`, `struct`. */
@@ -478,6 +498,45 @@ namespace mdl {
 			}
 			for (const auto& file : files)
 				translateFile(file, /*main=*/false);
+			if (index() != nullptr)
+				indexImport(ctx);
+		}
+
+		/** @brief Records every part of an import path with the file(s) it stands for (for hover and go to definition). */
+		void indexImport(mdlParser::Import_stmtContext* ctx) {
+			auto read = [](const std::filesystem::path& file) {
+				std::ifstream in{file, std::ios::binary};
+				return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+			};
+			std::filesystem::path relative;
+			std::string dotted;
+			for (auto* part : ctx->path) {
+				relative /= part->getText();
+				dotted += (dotted.empty() ? "" : ".") + part->getText();
+				auto files = resolveImport(relative);
+				if (files.empty())
+					continue;
+				analysis::ImportPath path{.file = currentFile(), .range = rangeOf(part), .name = dotted};
+				const bool package = files.size() > 1 || std::filesystem::path{files.front()}.stem() != part->getText();
+				for (const auto& file : files) {
+					std::error_code ec;
+					auto absolute = std::filesystem::weakly_canonical(file, ec);
+					path.targets.push_back((ec ? file : absolute).string());
+					auto doc = analysis::fileDocumentation(
+							options.readFile && options.readFile(file) ? *options.readFile(file) : read(file)
+					);
+					if (!package) {
+						path.documentation = doc;
+						continue;
+					}
+					// A package: its files with the first paragraph of their documentation.
+					path.documentation += std::format("- `{}.{}`", dotted, file.stem().string());
+					if (auto brief = doc.substr(0, doc.find("\n\n")); !brief.empty())
+						path.documentation += ": " + brief;
+					path.documentation += "\n";
+				}
+				index()->addImport(std::move(path));
+			}
 		}
 
 	public:
@@ -730,10 +789,12 @@ namespace mdl {
 							define(ctx->IDENT()->getSymbol(), analysis::SymbolKind::module, sourceText(ctx, close), ctx,
 								   fileScope()))
 					currentNamespace().setSymbol(name, *id);
-				for (size_t i = 0; i < ctx->param().size() && i < m.typeargs.size(); ++i)
+				for (size_t i = 0; i < ctx->param().size() && i < m.typeargs.size(); ++i) {
 					define(ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::hyperparameter,
 						   sourceText(ctx->param()[i]), nullptr, rangeOf(ctx),
 						   {typeString(m.typeargs[i].second.get().type)}, name);
+					documentParameter(ctx->param()[i]->IDENT()->getSymbol(), ctx);
+				}
 			}
 			if (m.typeargs.empty())
 				if (auto instance = instantiate(m, {}))
@@ -1463,12 +1524,14 @@ namespace mdl {
 								decl->IDENT()->getSymbol(), analysis::SymbolKind::templateParameter, sourceText(decl),
 								nullptr, rangeOf(ctx), {std::format("{} = {}", typeString(dtype), value->second)}
 						);
+						documentParameter(decl->IDENT()->getSymbol(), ctx);
 						continue;
 					}
 					defineHere(
 							decl->IDENT()->getSymbol(), analysis::SymbolKind::templateParameter, sourceText(decl),
 							nullptr, rangeOf(ctx), {typeString(dtype)}
 					);
+					documentParameter(decl->IDENT()->getSymbol(), ctx);
 					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype, name)});
 					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
@@ -1490,6 +1553,7 @@ namespace mdl {
 						ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::parameter,
 						sourceText(ctx->param()[i]), nullptr, rangeOf(ctx), {typeString(dtype)}
 				);
+				documentParameter(ctx->param()[i]->IDENT()->getSymbol(), ctx);
 				params.emplace_back(name, std::get<mdl::InputNode>(*std::get<const mdl::Node*>(p)));
 			}
 			std::vector<std::variant<PrimitiveType, TensorType>> returnTypes;

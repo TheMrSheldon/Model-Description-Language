@@ -1,6 +1,7 @@
 #include <mdl/analysis/index.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <regex>
 #include <sstream>
 
@@ -71,40 +72,46 @@ std::vector<const Symbol*> SemanticIndex::visibleAt(std::string_view file, Sourc
 	return local;
 }
 
-std::string mdl::analysis::docCommentToMarkdown(std::string_view comment) {
-	// The text without comment markers, line by line.
-	std::vector<std::string> lines;
-	std::istringstream in{std::string{comment}};
-	std::string line;
-	while (std::getline(in, line)) {
-		if (!line.empty() && line.back() == '\r')
-			line.pop_back();
-		size_t start = line.find_first_not_of(" \t");
-		if (start == std::string::npos) {
-			lines.emplace_back();
-			continue;
-		}
-		std::string_view l{line};
-		l.remove_prefix(start);
-		for (std::string_view marker : {"/**", "/*!", "///", "//!", "/*"})
-			if (l.substr(0, marker.size()) == marker) {
-				l.remove_prefix(marker.size());
-				break;
+namespace {
+	/** @brief The parts of a Doxygen comment (Markdown, without the inline conversions). */
+	struct DocComment {
+		std::string brief, details, returns, todo;
+		std::vector<std::pair<std::string, std::string>> params;
+	};
+
+	/** @brief The text of the lines of a comment without the comment markers. */
+	std::vector<std::string> commentLines(std::string_view comment) {
+		std::vector<std::string> lines;
+		std::istringstream in{std::string{comment}};
+		std::string line;
+		while (std::getline(in, line)) {
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			size_t start = line.find_first_not_of(" \t");
+			if (start == std::string::npos) {
+				lines.emplace_back();
+				continue;
 			}
-		if (l.size() >= 2 && l.substr(l.size() - 2) == "*/")
-			l.remove_suffix(2);
-		if (!l.empty() && l.front() == '*')
-			l.remove_prefix(1);
-		if (!l.empty() && l.front() == ' ')
-			l.remove_prefix(1);
-		while (!l.empty() && (l.back() == ' ' || l.back() == '\t'))
-			l.remove_suffix(1);
-		lines.emplace_back(l);
-	}
-	// Commands in the middle of a line start a new paragraph (like in Doxygen): one line per command.
-	{
+			std::string_view l{line};
+			l.remove_prefix(start);
+			for (std::string_view marker : {"/**", "/*!", "///", "//!", "/*"})
+				if (l.substr(0, marker.size()) == marker) {
+					l.remove_prefix(marker.size());
+					break;
+				}
+			if (l.size() >= 2 && l.substr(l.size() - 2) == "*/")
+				l.remove_suffix(2);
+			if (!l.empty() && l.front() == '*')
+				l.remove_prefix(1);
+			if (!l.empty() && l.front() == ' ')
+				l.remove_prefix(1);
+			while (!l.empty() && (l.back() == ' ' || l.back() == '\t'))
+				l.remove_suffix(1);
+			lines.emplace_back(l);
+		}
+		// Commands in the middle of a line start a new paragraph (like in Doxygen): one line per command.
 		std::vector<std::string> split;
-		const std::regex command{R"(\s+(?=[@\\](brief|details|param|returns?|todo)\b))"};
+		const std::regex command{R"(\s+(?=[@\\](brief|details|t?param|returns?|todo)\b))"};
 		for (const auto& l : lines) {
 			std::sregex_token_iterator it{l.begin(), l.end(), command, -1}, end;
 			for (; it != end; ++it)
@@ -112,64 +119,77 @@ std::string mdl::analysis::docCommentToMarkdown(std::string_view comment) {
 			if (l.empty())
 				split.emplace_back();
 		}
-		lines = std::move(split);
+		return split;
 	}
-	// Commands.
-	std::string brief, details, returns, todo;
-	std::vector<std::pair<std::string, std::string>> params;
-	std::string* current = &details;
-	std::string* lastParam = nullptr;
-	auto append = [](std::string& to, const std::string& text) {
-		if (text.empty()) {
-			if (!to.empty() && to.substr(to.size() - 2) != "\n\n")
-				to += "\n\n";
-			return;
-		}
-		if (!to.empty() && to.back() != '\n')
-			to += ' ';
-		to += text;
-	};
-	for (auto& l : lines) {
-		std::string text = l;
-		auto command = [&](std::string_view name) {
-			for (char lead : {'@', '\\'})
-				if (text.size() > name.size() && text[0] == lead && text.compare(1, name.size(), name) == 0 &&
-					(text.size() == name.size() + 1 || text[name.size() + 1] == ' ')) {
-					text = text.substr(std::min(text.size(), name.size() + 2));
-					return true;
-				}
-			return false;
+
+	DocComment parseDoc(std::string_view comment) {
+		DocComment doc;
+		std::string* current = &doc.details;
+		auto append = [](std::string& to, const std::string& text) {
+			if (text.empty()) {
+				if (!to.empty() && to.substr(to.size() - 2) != "\n\n")
+					to += "\n\n";
+				return;
+			}
+			if (!to.empty() && to.back() != '\n')
+				to += ' ';
+			to += text;
 		};
-		if (command("brief")) {
-			current = &brief;
-		} else if (command("details")) {
-			current = &details;
-		} else if (command("param")) {
-			std::string name = text.substr(0, text.find(' '));
-			text = text.size() > name.size() ? text.substr(name.size() + 1) : "";
-			params.emplace_back(name, "");
-			current = lastParam = &params.back().second;
-		} else if (command("return") || command("returns")) {
-			current = &returns;
-		} else if (command("todo")) {
-			current = &todo;
-		} else if (command("file") || command("ingroup") || command("defgroup") || command("addtogroup")) {
-			continue;
+		for (auto text : commentLines(comment)) {
+			auto command = [&](std::string_view name) {
+				for (char lead : {'@', '\\'})
+					if (text.size() > name.size() && text[0] == lead && text.compare(1, name.size(), name) == 0 &&
+						(text.size() == name.size() + 1 || text[name.size() + 1] == ' ' || text[name.size() + 1] == '['
+						)) {
+						text = text.substr(name.size() + 1);
+						// `@param[in] name`: the direction is not shown.
+						if (!text.empty() && text[0] == '[')
+							text = text.substr(std::min(text.size(), text.find(']') + 1));
+						text.erase(0, text.find_first_not_of(' '));
+						return true;
+					}
+				return false;
+			};
+			if (command("brief")) {
+				current = &doc.brief;
+			} else if (command("details")) {
+				current = &doc.details;
+			} else if (command("param") || command("tparam")) {
+				std::string name = text.substr(0, text.find(' '));
+				text = text.size() > name.size() ? text.substr(name.size() + 1) : "";
+				doc.params.emplace_back(name, "");
+				current = &doc.params.back().second;
+			} else if (command("return") || command("returns")) {
+				current = &doc.returns;
+			} else if (command("todo")) {
+				current = &doc.todo;
+			} else if (command("file") || command("ingroup") || command("defgroup") || command("addtogroup")) {
+				continue;
+			}
+			append(*current, text);
 		}
-		(void)lastParam;
-		append(*current, text);
+		return doc;
 	}
-	auto inline_ = [](std::string s) {
+
+	/** @brief Inline commands as Markdown: `\p x`, math (`\f$`, `\f(`, `\f[`, `\f{env}{`; also with `@`), `\cite`. */
+	std::string inlineMarkdown(std::string s) {
 		s = std::regex_replace(s, std::regex{R"([@\\]p\s+(\w+))"}, "`$1`");
-		s = std::regex_replace(s, std::regex{R"(\\f\$(.*?)\\f\$)"}, "$$$1$$");
-		s = std::regex_replace(s, std::regex{R"(\\f\((.*?)\\f\))"}, "$$$1$$");
-		s = std::regex_replace(s, std::regex{R"(\\f\[(.*?)\\f\])"}, "$$$$$1$$$$");
+		s = std::regex_replace(s, std::regex{R"([@\\]f\$(.*?)[@\\]f\$)"}, "$$$1$$");
+		s = std::regex_replace(s, std::regex{R"([@\\]f\((.*?)[@\\]f\))"}, "$$$1$$");
+		s = std::regex_replace(s, std::regex{R"([@\\]f\[(.*?)[@\\]f\])"}, "$$$$$1$$$$");
+		s = std::regex_replace(
+				s, std::regex{R"([@\\]f\{(\w+\*?)\}\{?(.*?)[@\\]f\})"}, "$$$$\\begin{$1}$2\\end{$1}$$$$"
+		);
 		s = std::regex_replace(s, std::regex{R"([@\\]cite\s+(\S+))"}, "[$1]");
 		while (!s.empty() && (s.back() == '\n' || s.back() == ' '))
 			s.pop_back();
 		return s;
-	};
-	std::string md = inline_(brief);
+	}
+} // namespace
+
+std::string mdl::analysis::docCommentToMarkdown(std::string_view comment) {
+	const DocComment doc = parseDoc(comment);
+	std::string md = inlineMarkdown(doc.brief);
 	auto section = [&](const std::string& text) {
 		if (text.empty())
 			return;
@@ -177,16 +197,46 @@ std::string mdl::analysis::docCommentToMarkdown(std::string_view comment) {
 			md += "\n\n";
 		md += text;
 	};
-	section(inline_(details));
-	if (!params.empty()) {
+	section(inlineMarkdown(doc.details));
+	if (!doc.params.empty()) {
 		std::string list = "**Parameters**";
-		for (const auto& [name, text] : params)
-			list += "\n- `" + name + "`: " + inline_(text);
+		for (const auto& [name, text] : doc.params)
+			list += "\n- `" + name + "`: " + inlineMarkdown(text);
 		section(list);
 	}
-	if (!returns.empty())
-		section("**Returns** " + inline_(returns));
-	if (!todo.empty())
-		section("**Todo** " + inline_(todo));
+	if (!doc.returns.empty())
+		section("**Returns** " + inlineMarkdown(doc.returns));
+	if (!doc.todo.empty())
+		section("**Todo** " + inlineMarkdown(doc.todo));
 	return md;
+}
+
+std::string mdl::analysis::docParameter(std::string_view comment, std::string_view name) {
+	for (const auto& [param, text] : parseDoc(comment).params)
+		if (param == name)
+			return inlineMarkdown(text);
+	return {};
+}
+
+std::string mdl::analysis::fileDocumentation(std::string_view text) {
+	// The comments at the start of the file (before the first code), the first one with `@file`.
+	size_t pos = 0;
+	while (pos < text.size()) {
+		while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
+			++pos;
+		if (text.compare(pos, 2, "//") == 0) {
+			pos = text.find('\n', pos);
+			continue;
+		}
+		if (text.compare(pos, 2, "/*") != 0)
+			break;
+		const size_t end = text.find("*/", pos + 2);
+		if (end == std::string_view::npos)
+			break;
+		const std::string_view comment = text.substr(pos, end + 2 - pos);
+		if (comment.find("@file") != std::string_view::npos || comment.find("\\file") != std::string_view::npos)
+			return docCommentToMarkdown(comment);
+		pos = end + 2;
+	}
+	return {};
 }

@@ -108,3 +108,46 @@ TEST_CASE("the visible names at a position", "[parser][index]") {
 	CHECK_FALSE(names({6, 8}).contains("h")); // before its declaration
 	CHECK_FALSE(names({12, 8}).contains("h")); // in another function
 }
+
+TEST_CASE("doc comments become Markdown, including math in all spellings", "[parser][index]") {
+	using analysis::docCommentToMarkdown;
+	CHECK(docCommentToMarkdown("/** @brief Computes \\f$x^2\\f$ and @f$y@f$. */") == "Computes $x^2$ and $y$.");
+	CHECK(docCommentToMarkdown("/** @brief Inline \\f(a\\f) and @f(b@f). */") == "Inline $a$ and $b$.");
+	CHECK(docCommentToMarkdown("/** @brief Display @f[ x = y @f] */") == "Display $$ x = y $$");
+	CHECK(docCommentToMarkdown("/** @brief Env \\f{align}{a &= b\\f} */") == "Env $$\\begin{align}a &= b\\end{align}$$");
+	CHECK(analysis::docParameter("/** @param[in] x the input @tparam N the size */", "x") == "the input");
+	CHECK(analysis::docParameter("/** @param[in] x the input @tparam N the size */", "N") == "the size");
+}
+
+TEST_CASE("parameters get their @param documentation", "[parser][index]") {
+	const std::string source = R"(/**
+ * @brief A layer.
+ * @param width the number of features
+ */
+module Layer[width: uint] {
+    W: float[width, width]
+    /**
+     * @brief Applies it.
+     * @param x the input
+     */
+    float[..., width] forward(x: float[..., width]) => x @ W;
+}
+/**
+ * @tparam N the size
+ * @param y the values
+ */
+template<N: uint>
+float[...] total(y: float[..., N]) => __builtin_sum(y);
+)";
+	auto result = analyzeSource(source);
+	auto doc = [&](size_t line, const std::string& name) {
+		const auto* ref = at(result, source, line, name);
+		REQUIRE(ref != nullptr);
+		REQUIRE(ref->symbol);
+		return result.index->symbols()[*ref->symbol].documentation;
+	};
+	CHECK(doc(5, "width") == "the number of features"); // hyperparameter
+	CHECK(doc(11, "x") == "the input");				   // function parameter
+	CHECK(doc(17, "N") == "the size");				   // template parameter
+	CHECK(doc(18, "y") == "the values");
+}

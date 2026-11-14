@@ -105,8 +105,13 @@ Features:
   - its kind and container;
   - the inferred type(s), e.g. for `auto` variables, symbolic and concrete (`float32[..., d]`,
     `float32[..., 768]`);
-  - the documentation from Doxygen-style comments (`/** @brief ... @param ... */`) as Markdown.
-- **Go to definition:** also into imported files and the standard library.
+  - the documentation from Doxygen-style comments (`/** @brief ... @param ... */`) as Markdown, with math (`\f$`,
+    `\f(`, `\f[`, `\f{env}{`, also spelled with `@`); hyperparameters, template parameters, and function parameters
+    show their `@param`/`@tparam` text from the comment of their module or function;
+  - on an import path (`import std.nn;`): the file's `@file` comment, or for a package (`std`) its files with the
+    first paragraph of their documentation.
+- **Go to definition:** also into imported files and the standard library; on an import path, the imported file (or
+  the files of a package).
 - **Completion:**
   - names in scope;
   - members after `.` (module members, struct members, `data`/`mask` of masked tensors);
