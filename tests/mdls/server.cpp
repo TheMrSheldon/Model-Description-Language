@@ -641,11 +641,26 @@ module Test3[] {
 	for (const auto& m : messages)
 		if (m.value("method", "") == "textDocument/publishDiagnostics")
 			for (const auto& d : m["params"]["diagnostics"])
-				if (d.value("code", "") != "unused")
+				if (d.value("code", "") != "unused" && d.value("code", "") != "shadow")
 					found.emplace_back(d["range"]["start"]["line"], d["severity"], d.value("code", ""));
 	// Test2: a warning where `test` is used unguarded (not in `bias ? ... : ...`, not the parameter `test`);
 	// Test3: the error of the instance Test2[false] at its instantiation (and inside Test2.forward).
 	CHECK(std::ranges::contains(found, std::tuple{8, 2, std::string{"permits-illegal-instantiation"}}));
 	CHECK(std::ranges::count_if(found, [](const auto& f) { return std::get<0>(f) == 9 || std::get<0>(f) == 10; }) == 0);
 	CHECK(std::ranges::count_if(found, [](const auto& f) { return std::get<0>(f) == 13 && std::get<1>(f) == 1; }) == 1);
+}
+
+TEST_CASE("mdls highlights `_` as a discarded value", "[mdls]") {
+	const std::string text = "float[4] f(x: float[4]) {\n    for (_ in 0..2) { x = x + 1.0; }\n    auto a, _ = g(x);\n"
+							 "    return a[_ d -> d];\n}\n";
+	const auto tokens = mdls::semanticTokens(text);
+	const auto& types = mdls::semanticTokenTypes();
+	std::vector<std::pair<size_t, size_t>> discarded;
+	for (const auto& t : tokens)
+		if (types[t.type] == "discarded")
+			discarded.emplace_back(t.line, t.column);
+	CHECK(discarded == std::vector<std::pair<size_t, size_t>>{{1, 9}, {2, 12}, {3, 13}});
+	auto messages = session({open(text), request(1, "textDocument/hover", 2, 12)});
+	CHECK((*response(messages, 1))["result"]["contents"]["value"] ==
+		  "`_`: a discarded value (no value, type, or members)");
 }

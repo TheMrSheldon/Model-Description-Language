@@ -1,5 +1,6 @@
 // textDocument/hover: the declaration, kind, inferred types, and documentation of the name at the cursor.
 #include "./features.hpp"
+#include "./semantic_tokens.hpp"
 
 #include <filesystem>
 #include <set>
@@ -45,9 +46,23 @@ namespace {
 } // namespace
 
 mdls::json mdls::hover(const Document& doc, const json& params) {
+	const LineIndex lines{doc.text};
+	// `_`: a discarded value (found by the parse tree, so not in names or comments).
+	{
+		const auto at = params.at("position");
+		const size_t line = at.at("line"), column = lines.fromUtf16(line, at.at("character"));
+		const auto& types = semanticTokenTypes();
+		const unsigned discarded = std::ranges::find(types, "discarded") - types.begin();
+		for (const auto& t : semanticTokens(doc.text))
+			if (t.type == discarded && t.line == line && t.column <= column && column <= t.column + t.length)
+				return {{"contents",
+						 {{"kind", "markdown"}, {"value", "`_`: a discarded value (no value, type, or members)"}}},
+						{"range",
+						 {{"start", {{"line", line}, {"character", lines.toUtf16(line, t.column)}}},
+						  {"end", {{"line", line}, {"character", lines.toUtf16(line, t.column + 1)}}}}}};
+	}
 	if (doc.index == nullptr)
 		return nullptr;
-	const LineIndex lines{doc.text};
 	// The index may be of an earlier text (while the current one does not parse): positions are mapped.
 	const auto position = doc.toIndex(toSource(lines, params.at("position")));
 	// A part of an import path: the documentation of the file (`@file`), or the files of the package.

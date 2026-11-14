@@ -68,8 +68,6 @@ namespace mdls {
 	 */
 	json moduleTree(const Document& doc, const json& params);
 	json documentLinks(const Document& doc);
-	/** @brief Hints (tag "unnecessary") for unused variables, parameters, members, and imports of the document. */
-	json unusedDiagnostics(const Document& doc, const mdl::analysis::SemanticIndex& index);
 	json workspaceSymbols(
 			const std::vector<std::filesystem::path>& roots, const std::vector<const Document*>& open,
 			const std::string& query

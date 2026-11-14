@@ -91,7 +91,7 @@ Features:
 - **Diagnostics:** the compiler's errors and warnings while you type. The hint goes in the message, and the `-W` flag
   in the diagnostic's code.
 - **Generic modules:** modules with hyperparameters are checked too, with symbolic values, so types read
-  `float[..., dim]`.
+  `float[..., dim]`. (The compiler runs the same checks: `mdlc` reports the same diagnostics as `mdls`.)
   - What depends on unknown values is checked conservatively: both branches of `?:`, members with `@conditional`, one
     iteration of a loop, and one instance of an array of modules.
   - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
@@ -101,12 +101,13 @@ Features:
   - An instance that has an error only for its values (e.g. `Test2[.bias=false]` using a member that `bias` removes)
     is also an error where it is created.
 - **Semantic tokens:** what needs the parse tree: modules, structs, functions and methods, hyperparameters, members,
-  parameters, variables, annotations, and the axes of einops patterns (their own token type `axis`, which an editor
-  extension declares with a fallback). Keywords, literals, and operators are left to the editor's grammar: they need no
-  context, and a grammar can distinguish them further (e.g. control-flow keywords from declarations). In doc comments,
+  parameters, variables, annotations, the axes of einops patterns (their own token type `axis`, which an editor
+  extension declares with a fallback), and the discarded value `_` (token type `discarded`, likewise). Keywords,
+  literals, and operators are left to the editor's grammar: they need no context, and a grammar can distinguish them
+  further (e.g. control-flow keywords from declarations). In doc comments,
   with the modifier `documentation`: the Doxygen commands (`keyword`), parameter names after `@param`/`@tparam`/`\p`
   (`parameter`), the targets of `\ref`, `\see`, `\sa` and the keys of `\cite` (`label`), and math (`string`).
-- **Hover:**
+- **Hover:** (on `_`: that it is a discarded value)
   - the declaration as written;
   - its kind and container;
   - the inferred type(s), e.g. for `auto` variables, symbolic and concrete (`float32[..., d]`,
@@ -155,8 +156,8 @@ Features:
   view in an extension.
 - **Result types:** hovering an operator (`+`, `@`, ...) or the name of a called function shows the type of the
   result.
-- **Unused definitions:** variables, loop variables, parameters, module members, and imports that are never used are
-  hints with the `unnecessary` tag (shown faded), code `unused`.
+- **Unused definitions:** variables, loop variables, parameters, module members, and imports that are never used
+  (the compiler's `-Wunused`) are hints with the `unnecessary` tag (shown faded), code `unused`.
 - **Einops patterns:** completion of the axes of the pattern (after `|` as `name=`), rename of an axis within its
   pattern, and linked editing of its occurrences.
 - **Document links:** import paths link to the imported file, `\ref X` in comments to the definition of `X`.

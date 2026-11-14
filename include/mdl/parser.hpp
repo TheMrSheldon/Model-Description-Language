@@ -58,6 +58,17 @@ namespace mdl::parser {
 		DiagnosticLevel permitsIllegalInstantiation = DiagnosticLevel::warning;
 		/** @brief Annotations that the compiler does not know (`-W[no-|error=]unknown-annotation`): a warning by default. */
 		DiagnosticLevel unknownAnnotation = DiagnosticLevel::warning;
+		/**
+		 * @brief Definitions of the parsed file that are never used (`-W[no-|error=]unused`): local variables,
+		 * parameters, loop variables, members of modules, imports (see analysis::unusedDefinitions). A warning by
+		 * default.
+		 */
+		DiagnosticLevel unused = DiagnosticLevel::warning;
+		/**
+		 * @brief A local variable, parameter, or loop variable that hides a variable, parameter, loop variable, member,
+		 * or hyperparameter of an enclosing scope (`-W[no-|error=]shadow`, as in g++). A warning by default.
+		 */
+		DiagnosticLevel shadow = DiagnosticLevel::warning;
 
 		/**
 		 * @brief Receives the diagnostics (errors and warnings) as they are found; if empty, parse() prints them to
@@ -93,7 +104,8 @@ namespace mdl::parser {
 
 	/**
 	 * @brief Parses a program into a compilation unit.
-	 * @details Imported definitions are visible to the program but are not part of CompilationUnit::definitions, i.e.,
+	 * @details Reports the same diagnostics as analyze() (also of modules with hyperparameters, checked with symbolic
+	 * values). Imported definitions are visible to the program but are not part of CompilationUnit::definitions, i.e.,
 	 * only the definitions of the parsed file itself are compiled and exported.
 	 */
 	std::optional<CompilationUnit>
@@ -103,9 +115,10 @@ namespace mdl::parser {
 	/**
 	 * @brief Like parse(), for tools (e.g. a language server): keeps the compilation unit also if there are errors
 	 * (with error nodes where the code is wrong; a file with syntax errors is not translated), and returns the
-	 * diagnostics instead of printing them (they also go to ParseOptions::diagnostics if set). Modules with
-	 * hyperparameters are also checked without values: with symbolic hyperparameters (types like `float[..., dim]`;
-	 * what depends on unknown values, e.g. `?:` or loop bounds, is checked conservatively).
+	 * diagnostics instead of printing them (they also go to ParseOptions::diagnostics if set), and the semantic
+	 * index. Modules with hyperparameters are checked without values, as in parse(): with symbolic hyperparameters
+	 * (types like `float[..., dim]`; what depends on unknown values, e.g. `?:` or loop bounds, is checked
+	 * conservatively).
 	 */
 	AnalysisResult
 	analyze(std::istream& stream, std::string_view sourcename = "<stream>", const ParseOptions& options = {});

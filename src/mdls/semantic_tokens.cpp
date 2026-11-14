@@ -25,9 +25,10 @@ namespace {
 		Method,
 		Decorator,
 		Axis,
-		Keyword, ///< (only in doc comments: the commands)
-		Label,	 ///< (only in doc comments: targets of `\ref`, `\see`, keys of `\cite`)
-		String,	 ///< (only in doc comments: math)
+		Keyword,   ///< (only in doc comments: the commands)
+		Label,	   ///< (only in doc comments: targets of `\ref`, `\see`, keys of `\cite`)
+		String,	   ///< (only in doc comments: math)
+		Discarded, ///< `_`: a discarded value (loop variable, declaration, einops axis)
 	};
 	enum Modifier : unsigned { Declaration = 1, Readonly = 2, DefaultLibrary = 4, Documentation = 8 };
 
@@ -68,8 +69,8 @@ namespace {
 
 		/** @brief Declares @p t in the innermost scope (and emits it as a declaration if @p emitIt). */
 		void declare(antlr4::Token* t, unsigned type, bool emitIt = true, unsigned modifiers = 0) {
-			if (t == nullptr)
-				return;
+			if (t == nullptr || t->getText() == "_")
+				return; // `_` is not bound (and is emitted with its terminal, see visit)
 			scopes.back()[t->getText()] = {type, modifiers};
 			if (emitIt)
 				emit(t, type, modifiers | Declaration);
@@ -96,8 +97,11 @@ namespace {
 		void visit(antlr4::tree::ParseTree* tree) {
 			if (tree == nullptr)
 				return;
-			if (dynamic_cast<antlr4::tree::TerminalNode*>(tree))
+			if (auto* terminal = dynamic_cast<antlr4::tree::TerminalNode*>(tree)) {
+				if (terminal->getSymbol()->getText() == "_")
+					emit(terminal->getSymbol(), Discarded); // a discarded value: not a variable
 				return; // keywords, literals, operators: lexical (the editor's grammar colors them)
+			}
 			if (auto* ctx = dynamic_cast<mdlParser::Import_stmtContext*>(tree)) {
 				for (auto* part : ctx->path)
 					emit(part, Namespace);
@@ -352,7 +356,7 @@ namespace {
 const std::vector<std::string>& mdls::semanticTokenTypes() {
 	static const std::vector<std::string> types{
 			"namespace", "type",   "class",		"struct", "typeParameter", "parameter", "variable", "property",
-			"function",	 "method", "decorator", "axis",	  "keyword",	   "label",		"string",
+			"function",	 "method", "decorator", "axis",	  "keyword",	   "label",		"string",	"discarded",
 	};
 	return types;
 }
