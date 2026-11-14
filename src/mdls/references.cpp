@@ -98,6 +98,16 @@ mdls::json mdls::documentHighlight(const Document& doc, const json& params) {
 }
 
 mdls::json mdls::prepareRename(const Document& doc, const json& params) {
+	if (const auto axis = einopsAxisAt(doc, params); !axis.empty()) { // an einops axis: within its pattern
+		const LineIndex lines{doc.text};
+		const auto cursor = toSource(lines, params.at("position"));
+		for (const auto& r : axis)
+			if (r.begin <= cursor && cursor <= r.end)
+				return {{"range", toProtocol(lines, r)},
+						{"placeholder",
+						 std::string{lines.line(r.begin.line - 1).substr(r.begin.column, r.end.column - r.begin.column)}
+						}};
+	}
 	const auto* ref = referenceAtCursor(doc, params);
 	if (ref == nullptr || !ref->symbol)
 		throw RequestError(RequestFailed, "nothing to rename here");
@@ -112,6 +122,13 @@ mdls::json mdls::rename(const Document& doc, const json& params, const std::map<
 	static const std::regex identifier{"[_a-zA-Z][_a-zA-Z0-9]*"};
 	if (!std::regex_match(name, identifier) || keywords.contains(name))
 		throw RequestError(InvalidParams, "`" + name + "` is not a valid name");
+	if (const auto axis = einopsAxisAt(doc, params); !axis.empty()) { // an einops axis: its occurrences in the pattern
+		const LineIndex lines{doc.text};
+		json edits = json::array();
+		for (const auto& r : axis)
+			edits.push_back({{"range", toProtocol(lines, r)}, {"newText", name}});
+		return {{"changes", {{doc.uri, edits}}}};
+	}
 	prepareRename(doc, params); // (checks)
 	const auto* ref = referenceAtCursor(doc, params);
 	json changes = json::object();

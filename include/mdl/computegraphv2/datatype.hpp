@@ -108,6 +108,8 @@ namespace mdl {
 		 * e.g. ("conf.dims.model", 768) or ("ch.2", 256) for arrays.
 		 */
 		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameterValues;
+		/** @brief The instance for messages and tools, e.g. `Linear[768, 3, 1]` or `Linear[d, d, bias]` (symbolic). */
+		std::string instanceName;
 
 		static constexpr size_t InvalidIdx = -1;
 

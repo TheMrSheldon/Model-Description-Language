@@ -97,7 +97,7 @@ public:
 			start = lexer->tokenStartCharIndex;
 		}
 		if (input == nullptr) {
-			report(ErrorLevel::Error, {}, line, charPositionInLine, msg);
+			report(ErrorLevel::Error, {}, line, charPositionInLine, msg, "", "", {}, /*syntax=*/true);
 			return;
 		}
 		report(ErrorLevel::Error,
@@ -106,7 +106,7 @@ public:
 					   {.number = line, .text = getline(*input, 0, start), .markBegin = column, .markWidth = width},
 					   {.number = line + 1, .text = getline(*input, 1, start)},
 			   },
-			   line, charPositionInLine, msg);
+			   line, charPositionInLine, msg, "", "", {}, /*syntax=*/true);
 	}
 
 	void semanticError(
@@ -141,7 +141,7 @@ private:
 	void
 	report(ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
 		   const std::string& msg, const std::string& hint = "", const std::string& flag = "",
-		   std::vector<mdl::Diagnostic::Fix> fixes = {});
+		   std::vector<mdl::Diagnostic::Fix> fixes = {}, bool syntax = false);
 };
 
 #endif

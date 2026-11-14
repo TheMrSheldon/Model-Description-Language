@@ -2,7 +2,8 @@
 
 void PrettyErrorListener::report(
 		ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
-		const std::string& msg, const std::string& hint, const std::string& flag, std::vector<mdl::Diagnostic::Fix> fixes
+		const std::string& msg, const std::string& hint, const std::string& flag,
+		std::vector<mdl::Diagnostic::Fix> fixes, bool syntax
 ) {
 	if (!reported.emplace(offendingLine, offendingCol, msg).second)
 		return; // the same code elaborated again (e.g. another instantiation of a module)
@@ -20,6 +21,7 @@ void PrettyErrorListener::report(
 			.context = std::move(context),
 			.fixes = std::move(fixes),
 	};
+	d.syntax = syntax;
 	// The range: the marked part of the context (one line), else the position.
 	for (const auto& line : d.context)
 		if (line.markWidth > 0) {

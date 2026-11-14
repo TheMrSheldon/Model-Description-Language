@@ -7,6 +7,7 @@
 #include <mdl/format.hpp>
 #include <mdl/parser.hpp>
 
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -59,6 +60,27 @@ namespace mdls {
 	json prepareRename(const Document& doc, const json& params);
 	json rename(const Document& doc, const json& params, const std::map<std::string, std::string>& openTexts);
 	json foldingRanges(const Document& doc);
+	/** @brief The parameter counts and weight memory (per float format) of the modules of the document. */
+	json codeLenses(const Document& doc);
+	/**
+	 * @brief `mdl/moduleTree` {textDocument, module?}: per module instance of the document (or of the named module) the
+	 * tree of its submodules and weights: {name, type, parameters (a number or a formula), children, weight?}.
+	 */
+	json moduleTree(const Document& doc, const json& params);
+	json documentLinks(const Document& doc);
+	/** @brief Hints (tag "unnecessary") for unused variables, parameters, members, and imports of the document. */
+	json unusedDiagnostics(const Document& doc, const mdl::analysis::SemanticIndex& index);
+	json workspaceSymbols(
+			const std::vector<std::filesystem::path>& roots, const std::vector<const Document*>& open,
+			const std::string& query
+	);
+	json selectionRanges(const Document& doc, const json& params);
+	json prepareCallHierarchy(const Document& doc, const json& params);
+	json incomingCalls(const Document& doc, const json& item);
+	json outgoingCalls(const Document& doc, const json& item);
+	json linkedEditingRanges(const Document& doc, const json& params);
+	/** @brief The occurrences of the einops axis at the request's position in its pattern (empty if none). */
+	std::vector<mdl::SourceRange> einopsAxisAt(const Document& doc, const json& params);
 	/**
 	 * @param stdNames the module of each definition of the standard library (e.g. `softmax` -> `std.activations`),
 	 * for the quick fix that adds an import

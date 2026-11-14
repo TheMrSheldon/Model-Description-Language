@@ -260,6 +260,11 @@ namespace mdl {
 					.detail = detail,
 					.documentation = documentation(docCtx),
 					.scope = scope,
+					.extent = kind == analysis::SymbolKind::module || kind == analysis::SymbolKind::structure ||
+											  kind == analysis::SymbolKind::function ||
+											  kind == analysis::SymbolKind::method
+									  ? rangeOf(docCtx)
+									  : SourceRange{},
 					.types = std::move(types),
 			});
 		}
@@ -927,6 +932,28 @@ namespace mdl {
 			return std::nullopt;
 		}
 
+		/** @brief A hyperparameter value for messages, e.g. `768`, `d` (symbolic), `{...}`, `[8, 16]`. */
+		static std::string valueName(const Object& value) {
+			if (const auto* node = std::get_if<const Node*>(&value)) {
+				if (auto v = foldConstant(**node))
+					return std::visit(
+							overloaded{
+									[](const std::vector<int>&) { return std::string{"[...]"}; },
+									[](auto x) { return std::format("{}", x); },
+							},
+							*v
+					);
+				return shapes::Dim::of(**node).str();
+			}
+			if (const auto* array = std::get_if<ArrayInstance>(&value)) {
+				std::string s = "[";
+				for (size_t i = 0; i < array->elements.size(); ++i)
+					s += (i > 0 ? ", " : "") + valueName(array->elements[i]);
+				return s + "]";
+			}
+			return "{...}";
+		}
+
 		/** @brief A string identifying a (concrete) hyperparameter value; used to cache module instances. */
 		static std::string valueKey(const Object& value) {
 			return std::visit(
@@ -1155,6 +1182,13 @@ namespace mdl {
 			m.typeargs = def.typeargs;
 			m.templ = def.templ;
 			m.instantiated = true;
+			m.instanceName = t.name;
+			if (!values.empty()) {
+				m.instanceName += "[";
+				for (size_t i = 0; i < values.size(); ++i)
+					m.instanceName += (i > 0 ? ", " : "") + valueName(values[i]);
+				m.instanceName += "]";
+			}
 			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i)
 				flattenHyperparameter(def.typeargs[i].first, values[i], m.hyperparameterValues);
 
@@ -1206,7 +1240,62 @@ namespace mdl {
 			numErrors += newErrors;
 			if (newErrors > 0)
 				return std::unexpected(std::format("{} error(s) while instantiating {}", newErrors, key));
+			if (index() != nullptr)
+				recordLayout(t, m, key);
 			return std::cref(instances.emplace(std::pair{&t, key}, std::move(m)).first->second);
+		}
+
+		/** @brief Records the weights of the instance @p m of the module @p t in the index (parameter counts). */
+		void recordLayout(const ModuleTemplate& t, const ModuleType& m, const std::string& key) {
+			auto module = index()->find(t.errors->getFile(), rangeOf(t.ctx->IDENT()->getSymbol()).begin);
+			if (!module)
+				return;
+			const std::string& instance = m.instanceName;
+			analysis::ModuleLayout layout{.module = *module, .instance = instance, .weights = {}};
+			for (const auto& [path, weight] : m.variables) {
+				const auto& type = weight.get().type;
+				analysis::ModuleLayout::Weight w{
+						.path = path, .type = typeString(type), .count = std::nullopt, .formula = {}
+				};
+				if (const auto* bound = std::get_if<BoundModuleType>(&type)) {
+					w.submodule = true;
+					w.instance = bound->definition.instanceName;
+					if (const auto& sub = bound->definition.templ)
+						w.module = index()->find(sub->errors->getFile(), rangeOf(sub->ctx->IDENT()->getSymbol()).begin);
+				} else if (const auto* tensor = std::get_if<TensorType>(&type)) {
+					int64_t count = 1;
+					bool constant = true;
+					for (const auto& dim : tensor->shape) {
+						std::string factor;
+						if (const auto* u = std::get_if<unsigned>(&dim)) {
+							count *= *u;
+							factor = std::to_string(*u);
+						} else if (const auto* n = std::get_if<const Node*>(&dim)) {
+							auto v = foldConstant(**n);
+							if (v && std::holds_alternative<int>(*v)) {
+								count *= std::get<int>(*v);
+								factor = std::to_string(std::get<int>(*v));
+							} else {
+								constant = false;
+								factor = shapes::Dim::of(**n).str();
+								if (factor.find(' ') != std::string::npos)
+									factor = "(" + factor + ")";
+							}
+						} else {
+							constant = false;
+							factor = "?";
+						}
+						w.formula += (w.formula.empty() ? "" : " * ") + factor;
+					}
+					if (constant)
+						w.count = count;
+				} else {
+					w.count = 1;
+					w.formula = "1";
+				}
+				layout.weights.push_back(std::move(w));
+			}
+			index()->addLayout(std::move(layout));
 		}
 
 		/** @brief A member that an annotation left out of an instance (e.g. `@conditional(bias)` with bias false). */
@@ -2363,6 +2452,33 @@ namespace mdl {
 		}
 
 		virtual std::any visitMethodcallExpression(mdlParser::MethodcallExpressionContext* ctx) override {
+			auto result = methodcallExpression(ctx);
+			// The type of the result at the callee's name (for hovers).
+			antlr4::Token* name = nullptr;
+			if (auto* var = dynamic_cast<mdlParser::VarAccessExpressionContext*>(ctx->func); var && var->IDENT())
+				name = var->IDENT()->getSymbol();
+			else if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func);
+					 access && access->IDENT())
+				name = access->IDENT()->getSymbol();
+			if (index() != nullptr && name != nullptr) {
+				std::string type;
+				if (const auto* node = std::any_cast<const Node*>(&result)) {
+					if (!std::holds_alternative<ErrorNode>(**node))
+						type = typeString(getDataType(**node));
+				} else if (const auto* multi = std::any_cast<MultiValue>(&result)) {
+					for (const auto* n : multi->nodes)
+						type += (type.empty() ? "(" : ", ") + typeString(getDataType(*n));
+					type += ")";
+				}
+				if (!type.empty())
+					index()->reference(analysis::Reference{
+							.file = currentFile(), .range = rangeOf(name), .symbol = std::nullopt, .results = {type}
+					});
+			}
+			return result;
+		}
+
+		std::any methodcallExpression(mdlParser::MethodcallExpressionContext* ctx) {
 			if (auto converted = conversion(ctx))
 				return *converted;
 			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
@@ -2595,6 +2711,13 @@ namespace mdl {
 										 .value()
 										 .front()
 										 .get();
+			if (index() != nullptr) // the type of the result at the operator (for hovers)
+				index()->reference(analysis::Reference{
+						.file = currentFile(),
+						.range = rangeOf(ctx->bop),
+						.symbol = std::nullopt,
+						.results = {typeString(getDataType(result))}
+				});
 			if (const auto* inv = std::get_if<InvocationNode>(&result))
 				if (auto problem = shapes::check(inv->id, inv->arguments)) {
 					auto* tok = ctx->bop;

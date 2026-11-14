@@ -33,6 +33,7 @@ void SemanticIndex::reference(Reference reference) {
 		existing.types.insert(reference.types.begin(), reference.types.end());
 		existing.members.insert(reference.members.begin(), reference.members.end());
 		existing.weights.insert(reference.weights.begin(), reference.weights.end());
+		existing.results.insert(reference.results.begin(), reference.results.end());
 		if (!existing.symbol)
 			existing.symbol = reference.symbol;
 		return;

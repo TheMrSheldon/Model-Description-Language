@@ -64,6 +64,8 @@ namespace {
 
 			if (importPath(before))
 				return items;
+			if (einops(tokens, before, cursor))
+				return items;
 			if (at(0) != nullptr && at(0)->is("@")) {
 				add("conditional", 14, "@conditional(c): the member exists only if c holds", "");
 				return items;
@@ -102,6 +104,61 @@ namespace {
 		}
 
 		void add(const mdl::analysis::Symbol& s) { add(s.name, completionKind(s.kind), s.detail, s.documentation); }
+
+		/**
+		 * @brief Inside an einops pattern (`x[... (h d) -> |`): the axis names of the pattern; after `|` the names to
+		 * bind (`h=`). Whether the cursor is in one: an open `[` whose contents (up to its `]`) have `->`.
+		 */
+		bool
+		einops(const std::vector<Token>& tokens, const std::vector<const Token*>& before, mdl::SourcePosition cursor) {
+			int depth = 0;
+			const Token* open = nullptr;
+			for (auto it = before.rbegin(); it != before.rend(); ++it) {
+				if ((*it)->is("]") || (*it)->is(")"))
+					++depth;
+				else if ((*it)->is("(") && depth > 0)
+					--depth;
+				else if ((*it)->is("[") && depth-- == 0) {
+					open = *it;
+					break;
+				} else if ((*it)->is("(")) {
+					continue; // a group of axes `(h d)`
+				}
+			}
+			if (open == nullptr)
+				return false;
+			std::vector<const Token*> pattern;
+			bool arrow = false, binding = false;
+			int d = 0;
+			for (const auto& t : tokens) {
+				if (t.begin <= open->begin || t.comment())
+					continue;
+				if (t.is("[") || t.is("("))
+					++d;
+				else if ((t.is("]") || t.is(")")) && d-- == 0)
+					break;
+				arrow |= t.is("->");
+				if (t.is("|") && t.begin < cursor)
+					binding = true;
+				if (t.identifier() && !(t.begin <= cursor && cursor <= t.end))
+					pattern.push_back(&t);
+			}
+			if (!arrow)
+				return false;
+			std::set<std::string> names;
+			for (const auto* t : pattern)
+				names.insert(t->text);
+			if (doc.index != nullptr)
+				for (const auto& a : doc.index->axes())
+					if (a.file == doc.sourceName() && a.range.begin.line == doc.toIndex(open->begin).line)
+						names.insert(a.name);
+			for (const auto& name : names) {
+				add(name, 25, binding ? "the size of the axis" : "an axis of the pattern", "");
+				if (binding)
+					items.back()["insertText"] = name + "=";
+			}
+			return true;
+		}
 
 		/** @brief `import a.b.`: the packages and files there (only the standard library is listed). */
 		bool importPath(const std::vector<const Token*>& before) {
