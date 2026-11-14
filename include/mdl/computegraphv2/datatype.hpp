@@ -3,6 +3,7 @@
 
 #include "../utils/overload.hpp"
 #include "node_decl.hpp"
+#include <algorithm>
 
 #include <expected>
 #include <format>

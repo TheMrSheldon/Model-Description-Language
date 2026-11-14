@@ -10,7 +10,7 @@ include(GNUInstallDirs)
 # Dependencies of the frontend and the tooling
 ##########################################################################################
 # ANTLR4 (parser generator: the jar at build time, the C++ runtime)
-set(ANTLR_VERSION 4.13.2) # 4.13.1 misses <chrono> for MSVC
+set(ANTLR_VERSION 4.13.2)
 FetchContent_Declare(antlrjar URL https://www.antlr.org/download/antlr-${ANTLR_VERSION}-complete.jar DOWNLOAD_NO_EXTRACT TRUE)
 FetchContent_MakeAvailable(antlrjar)
 set(ANTLR_EXECUTABLE ${antlrjar_SOURCE_DIR}/antlr-${ANTLR_VERSION}-complete.jar)
@@ -34,6 +34,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(antlr)
 set_target_properties(antlr4_shared PROPERTIES EXCLUDE_FROM_ALL ON) # only the static runtime is used
+if(MSVC)
+	# The runtime uses std::chrono without including <chrono> (ProfilingATNSimulator.cpp); libstdc++ and libc++ include it
+	# indirectly, MSVC's standard library does not.
+	target_compile_options(antlr4_static PRIVATE /FIchrono)
+endif()
 set(ANTLR4CPP_INCLUDE_DIRS ${antlr_SOURCE_DIR}/runtime/Cpp/runtime/src)
 include(${antlr_SOURCE_DIR}/runtime/Cpp/cmake/FindANTLR.cmake)
 

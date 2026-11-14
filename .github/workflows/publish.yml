@@ -43,6 +43,7 @@ jobs:
     container: ${{ matrix.container }}
     env:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      CMAKE_GENERATOR: Ninja
     steps:
       - name: Checkout Repository (with tags, for the version)
         uses: actions/checkout@v6
@@ -66,6 +67,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Install Ninja (if missing)
+        shell: bash
+        run: command -v ninja || pipx install ninja || python3 -m pip install ninja || python -m pip install ninja
       - name: Set Up MSVC (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -78,7 +82,7 @@ jobs:
         run: |
           case "${{ runner.os }}" in
             Linux)   extra=(-DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc") ;;
-            Windows) extra=(-G Ninja -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl) ;;
+            Windows) extra=(-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl) ;;
             macOS)   extra=(-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64") ;;
           esac
           cmake --preset conf-tooling -B build "${extra[@]}"
