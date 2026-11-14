@@ -9,7 +9,10 @@
 
 #include <algorithm>
 #include <set>
+#include <span>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 using namespace antlr4;
 
@@ -25,6 +28,8 @@ private:
 	std::string file;
 	const mdl::DiagnosticSink* sink;
 	std::set<std::tuple<size_t, size_t, std::string>> reported;
+	std::vector<mdl::Diagnostic> encountered; ///< all errors, also the ones reported before (see errorsSince)
+	bool muted = false;
 
 public:
 	using ContextLine = mdl::Diagnostic::Line;
@@ -134,7 +139,16 @@ public:
 		report(level, std::move(context), offendingLine, offendingCol, msg, hint, flag, std::move(fixes));
 	}
 
+	/** @brief While muted, errors are only recorded (see errorsSince), not reported; returns the previous state. */
+	bool setMuted(bool mute) { return std::exchange(muted, mute); }
+
 	constexpr size_t getNumErrors() const { return numErrors; }
+	/** @brief The number of errors encountered, also of repeated ones (e.g. in another use of the same instance). */
+	size_t getNumEncountered() const { return encountered.size(); }
+	/** @brief The errors encountered after the first @p count (see getNumEncountered). */
+	std::span<const mdl::Diagnostic> errorsSince(size_t count) const {
+		return std::span{encountered}.subspan(std::min(count, encountered.size()));
+	}
 	constexpr size_t getNumWarnings() const { return numWarnings; }
 
 private:

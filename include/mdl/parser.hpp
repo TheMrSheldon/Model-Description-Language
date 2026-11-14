@@ -47,11 +47,15 @@ namespace mdl::parser {
 		DiagnosticLevel floatWidening = DiagnosticLevel::error;
 		DiagnosticLevel floatNarrowing = DiagnosticLevel::error;
 		/**
-		 * @brief Sizes that are different compile-time expressions where equal sizes are needed, e.g. `W @ x` with
-		 * `W: float[input, output]` and `x: float[input]` (`-W[no-|error=]possible-mismatch`): they may differ in an
-		 * instance (and be equal in others). A warning by default, an error in strict mode (`mdlc --strict`).
+		 * @brief Code that is fine for some values of the hyperparameters but an error for others
+		 * (`-W[no-|error=]permits-illegal-instantiation`):
+		 * - sizes that are different compile-time expressions where equal sizes are needed, e.g. `W @ x` with
+		 *   `W: float[input, output]` and `x: float[input]` (they may differ in an instance);
+		 * - a member with `@conditional(c)` used where `c` may be false (not in the first branch of `c ? ... : ...`).
+		 *
+		 * A warning by default, an error in strict mode (`mdlc --strict`).
 		 */
-		DiagnosticLevel possibleMismatch = DiagnosticLevel::warning;
+		DiagnosticLevel permitsIllegalInstantiation = DiagnosticLevel::warning;
 		/** @brief Annotations that the compiler does not know (`-W[no-|error=]unknown-annotation`): a warning by default. */
 		DiagnosticLevel unknownAnnotation = DiagnosticLevel::warning;
 

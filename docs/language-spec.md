@@ -111,8 +111,12 @@ module Linear[indim: uint, outdim: uint, bias: bool = true] {
     float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
 }
 ```
-Unknown annotations are a warning (`-Wunknown-annotation`); `-Werror=unknown-annotation` makes them errors and
-`-Wno-unknown-annotation` ignores them.
+The error is reported where the member is used and, for an instance that lacks it (`Linear[4, 3, .bias=false]`),
+also where that instance is created. Before any instance exists, a use outside the first branch of `c ? ... : ...` is
+a warning (`-Wpermits-illegal-instantiation`, an error in strict mode, see [Diagnostics](#diagnostics)): the instances
+where `c` is false would fail there. (Tools
+like `mdls` check modules with symbolic hyperparameters, so they show this warning.)
+Unknown annotations are a warning (`-Wunknown-annotation`, see [Diagnostics](#diagnostics)).
 
 # Functions
 ```dlm
@@ -172,8 +176,8 @@ error: Argument 1 of forward is float[..., 512], but the parameter x is float[..
 Errors point to their location in the source, with the line and the marked expression.
 
 Sizes that are different compile-time expressions, e.g. two hyperparameters, may be equal in one instance and differ in
-another. Where equal sizes are needed, they are a warning (`-Wpossible-mismatch`), and an error in strict mode
-(`mdlc --strict`, or `-Werror=possible-mismatch`):
+another. Where equal sizes are needed, they are a warning (`-Wpermits-illegal-instantiation`), and an error in strict mode
+(`mdlc --strict`, or `-Werror=permits-illegal-instantiation`; see [Diagnostics](#diagnostics)):
 ```dlm
 module Test[input: uint, output: uint] {
     W: float[input, output]
@@ -182,8 +186,8 @@ module Test[input: uint, output: uint] {
 }
 ```
 ```
-warning: Operator @: the inner dimensions of the matrix product may differ ([input, output] @ [input]) [-Wpossible-mismatch]
-warning: Operator +: cannot broadcast [input] and [output] (the sizes may differ) [-Wpossible-mismatch]
+warning: Operator @: the inner dimensions of the matrix product may differ ([input, output] @ [input]) [-Wpermits-illegal-instantiation]
+warning: Operator +: cannot broadcast [input] and [output] (the sizes may differ) [-Wpermits-illegal-instantiation]
 ```
 
 # Loops
@@ -311,7 +315,7 @@ float32[..., 4] f(x: float32[..., 4], w: bfloat16[4]) => x * float32(w);
 Implicit conversions can be enabled like g++ diagnostics, separately for widening (bfloat16/float16 to float32) and
 narrowing (float32 to 16 bits, or between bfloat16 and float16, which is lossy in both directions): `-Werror=<name>`
 (the default) reports an error, `-W<name>` a warning and inserts the conversion, `-Wno-<name>` inserts it silently, with
-the names `float-widening` and `float-narrowing`. Operands of different types are then both converted to the wider type
+the names `float-widening` and `float-narrowing` (see [Diagnostics](#diagnostics)). Operands of different types are then both converted to the wider type
 (float32 for bfloat16 with float16), arguments to their parameter's type, and results to the declared type.
 ```
 warning: Operator *: implicit widening from bfloat16 to float32 [-Wfloat-widening]
@@ -337,6 +341,22 @@ stored quantized (int8/int4); this is a build setting and does not change the mo
 - Calls: `f(x)`, `instance(x)` (its `forward`), `instance.member(x)`.
 - Members: `conf.dims.model` (struct), `x.data` / `x.mask` (masked tensor).
 - Literals: `1`, `2.5`, `1e-12`, `true`, arrays `[8, 16, 4]`. Identifiers may contain digits (`layer1`).
+
+# Diagnostics
+Some diagnostics have a name and a configurable level, like g++'s: `-W<name>` makes it a warning, `-Werror=<name>` an
+error, `-Wno-<name>` ignores it. In a build configuration they are set with `diagnostics:` (e.g.
+`{ float-widening: warning }`, see [build-config.md](build-config.md)); in `mdls` with the `strict` setting. Warnings
+show their name, e.g. `[-Wfloat-widening]`.
+
+| Name | Default | `--strict` | What it reports |
+|---|---|---|---|
+| `float-widening` | error | error | an implicit conversion from bfloat16/float16 to float32 (as a warning or ignored, it is inserted; see [Float types](#float-types)) |
+| `float-narrowing` | error | error | an implicit conversion from float32 to 16 bits, or between bfloat16 and float16 (likewise) |
+| `unknown-annotation` | warning | warning | an annotation the compiler does not know (see [Compile-time conditionals and annotations](#compile-time-conditionals-and-annotations)) |
+| `permits-illegal-instantiation` | warning | error | code that is an error for some hyperparameter values: sizes that may differ where equal ones are needed (see [Type checks](#type-checks)), or a member with `@conditional(c)` used where `c` may be false |
+
+`--strict` (`strict: true`) reports what may be wrong as an error; explicit `-W` options take precedence. All other
+diagnostics are errors.
 
 # Standard library
 `import std;` (directory `std/`):

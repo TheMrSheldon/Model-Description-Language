@@ -268,7 +268,7 @@ static void runCompileCommand(const CompileArgs& args) {
 	mdl::parser::ParseOptions parseOptions{.importDirs = args.importdirs, .defaultFloat = args.defaultFloat};
 	// Strict: what may be wrong (e.g. sizes that may differ) is an error; -W options below take precedence.
 	if (args.strict)
-		parseOptions.possibleMismatch = mdl::parser::DiagnosticLevel::error;
+		parseOptions.permitsIllegalInstantiation = mdl::parser::DiagnosticLevel::error;
 	// -W<name>: warning, -Wno-<name>: ignored, -Werror=<name>: error.
 	for (const auto& w : args.warnings) {
 		auto level = mdl::parser::DiagnosticLevel::warning;
@@ -286,12 +286,13 @@ static void runCompileCommand(const CompileArgs& args) {
 			parseOptions.floatNarrowing = level;
 		else if (name == "unknown-annotation")
 			parseOptions.unknownAnnotation = level;
-		else if (name == "possible-mismatch")
-			parseOptions.possibleMismatch = level;
+		else if (name == "permits-illegal-instantiation")
+			parseOptions.permitsIllegalInstantiation = level;
 		else
 			throw std::runtime_error(
 					"unknown diagnostic -W" + w +
-					" (known: float-widening, float-narrowing, unknown-annotation, possible-mismatch)"
+					" (known: float-widening, float-narrowing, unknown-annotation, "
+					"permits-illegal-instantiation)"
 			);
 	}
 	auto result = mdl::parser::parse(args.inputs[0], parseOptions);
@@ -489,16 +490,16 @@ int main(int argc, char* argv[]) {
 			   "between "
 			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. "
 			   "unknown-annotation (an annotation the compiler does not know) is a warning by default. "
-			   "possible-mismatch (sizes that are different compile-time expressions where equal ones are needed, e.g. "
-			   "the hyperparameters input and output in `W @ x`; they may differ in an instance) is a warning by "
-			   "default "
-			   "and an error with --strict. Repeatable."
+			   "permits-illegal-instantiation (code that is an error for some hyperparameter values: sizes that are "
+			   "different compile-time expressions where equal ones are needed, e.g. the hyperparameters input and "
+			   "output in `W @ x`, or a member with @conditional(c) used where c may be false) is a warning by "
+			   "default and an error with --strict. Repeatable."
 	)
 			->type_name("[no-|error=]NAME");
 	app.add_flag(
 			"--strict", args.strict,
 			"Strict checking: report what may be wrong as errors, e.g. sizes that may differ "
-			"(-Werror=possible-mismatch)."
+			"or members with @conditional(c) used where c may be false (-Werror=permits-illegal-instantiation)."
 	);
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(

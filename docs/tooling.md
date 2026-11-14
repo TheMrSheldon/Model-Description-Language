@@ -95,7 +95,11 @@ Features:
   - What depends on unknown values is checked conservatively: both branches of `?:`, members with `@conditional`, one
     iteration of a loop, and one instance of an array of modules.
   - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
-    equal in an instance: they are warnings (`possible-mismatch`), and errors with the `strict` option.
+    equal in an instance: they are warnings, and errors with the `strict` option. Likewise a member with
+    `@conditional(c)` used outside `c ? ... : ...`. Both are `permits-illegal-instantiation`: the module accepts
+    hyperparameter values for which it fails (see [Diagnostics](language-spec.md#diagnostics)).
+  - An instance that has an error only for its values (e.g. `Test2[.bias=false]` using a member that `bias` removes)
+    is also an error where it is created.
 - **Semantic tokens:** what needs the parse tree: modules, structs, functions and methods, hyperparameters, members,
   parameters, variables, annotations, and the axes of einops patterns (their own token type `axis`, which an editor
   extension declares with a fallback). Keywords, literals, and operators are left to the editor's grammar: they need no

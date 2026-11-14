@@ -611,9 +611,41 @@ TEST_CASE("mdls analyzes what parses and reports errors of imported files and ne
 	for (const auto& m : configured)
 		if (m.value("method", "") == "textDocument/publishDiagnostics")
 			for (const auto& d : m["params"]["diagnostics"])
-				if (d.value("code", "") == "possible-mismatch")
+				if (d.value("code", "") == "permits-illegal-instantiation")
 					severities.push_back(d["severity"]);
 	REQUIRE_FALSE(severities.empty());
 	CHECK(severities.front() == 2); // a warning, then (strict) an error
 	CHECK(severities.back() == 1);
+}
+
+TEST_CASE("mdls reports uses of conditional members where they may not exist", "[mdls]") {
+	const std::string source = R"(module Test[input: uint, output: uint] {
+    W: float[input, output]
+    float[output] forward(x: float[input]) => x @ W;
+}
+module Test2[bias: bool = true] {
+    @conditional(bias)
+    test: Test[4, 5]
+    other: Test[4, 5]
+    float[5] forward(x: float[4]) => test.forward(x);
+    float[5] guarded(x: float[4]) => bias ? test(x) : other(x);
+    float[4] shadowed(test: float[4]) => test;
+}
+module Test3[] {
+    test: Test2[.bias = false]
+    float[5] forward(x: float[4]) => test(x);
+}
+)";
+	auto messages = session({open(source)});
+	std::vector<std::tuple<int, int, std::string>> found; // line, severity, code
+	for (const auto& m : messages)
+		if (m.value("method", "") == "textDocument/publishDiagnostics")
+			for (const auto& d : m["params"]["diagnostics"])
+				if (d.value("code", "") != "unused")
+					found.emplace_back(d["range"]["start"]["line"], d["severity"], d.value("code", ""));
+	// Test2: a warning where `test` is used unguarded (not in `bias ? ... : ...`, not the parameter `test`);
+	// Test3: the error of the instance Test2[false] at its instantiation (and inside Test2.forward).
+	CHECK(std::ranges::contains(found, std::tuple{8, 2, std::string{"permits-illegal-instantiation"}}));
+	CHECK(std::ranges::count_if(found, [](const auto& f) { return std::get<0>(f) == 9 || std::get<0>(f) == 10; }) == 0);
+	CHECK(std::ranges::count_if(found, [](const auto& f) { return std::get<0>(f) == 13 && std::get<1>(f) == 1; }) == 1);
 }
