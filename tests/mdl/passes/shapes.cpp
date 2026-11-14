@@ -55,7 +55,7 @@ TEST_CASE("reductions, reshapes, and embeddings", "[shapes]") {
 			table: float[10, 4]
 			float[...] means(x: float[..., 4]) => __builtin_mean(x);
 			float[..., 4] sums(x: float[..., 4]) => x - __builtin_sum(x);
-			float[..., 4] embed(ids: int[...]) => __builtin_take(table, ids);
+			float[..., 4] embed(ids: int[...]) => table[ids];
 			float[...] flat(x: float[..., 4]) => x[... d -> (...) d];
 			float total(x: float[..., 4]) => __builtin_mean_all(x);
 		}

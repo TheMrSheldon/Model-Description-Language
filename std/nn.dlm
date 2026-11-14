@@ -58,5 +58,5 @@ module Linear[indim: uint, outdim: uint, bias: bool = true] {
 module Embedding[num: uint, dim: uint] {
     table: float[num, dim]
 
-    float[..., dim] forward(ids: int[...]) => __builtin_take(table, ids);
+    float[..., dim] forward(ids: int[...]) => table[ids];
 }
