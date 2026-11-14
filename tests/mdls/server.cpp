@@ -1,8 +1,8 @@
 // The language server (mdls) driven through its protocol: diagnostics, hover, definition, completion, formatting,
 // semantic tokens, document symbols.
+#include "mdls/server.hpp"
 #include "mdls/protocol.hpp"
 #include "mdls/semantic_tokens.hpp"
-#include "mdls/server.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -82,7 +82,8 @@ TEST_CASE("mdls publishes diagnostics", "[mdls]") {
 }
 
 TEST_CASE("mdls shows types and documentation on hover", "[mdls]") {
-	auto messages = session({open(model), request(1, "textDocument/hover", 5, 13), request(2, "textDocument/hover", 3, 10)});
+	auto messages =
+			session({open(model), request(1, "textDocument/hover", 5, 13), request(2, "textDocument/hover", 3, 10)});
 	const auto* variable = response(messages, 1);
 	REQUIRE(variable != nullptr);
 	const std::string text = (*variable)["result"]["contents"]["value"];
@@ -94,7 +95,9 @@ TEST_CASE("mdls shows types and documentation on hover", "[mdls]") {
 }
 
 TEST_CASE("mdls goes to definitions, also into the standard library", "[mdls]") {
-	auto messages = session({open(model), request(1, "textDocument/definition", 3, 10), request(2, "textDocument/definition", 6, 19)});
+	auto messages = session(
+			{open(model), request(1, "textDocument/definition", 3, 10), request(2, "textDocument/definition", 6, 19)}
+	);
 	const auto& linear = (*response(messages, 1))["result"];
 	CHECK(linear["uri"].get<std::string>().ends_with("/std/nn.dlm"));
 	const auto& x = (*response(messages, 2))["result"];
@@ -107,10 +110,13 @@ TEST_CASE("mdls completes members and names in scope", "[mdls]") {
 	typing.replace(typing.find("        return"), 0, "        auto y = lin.\n");
 	auto change = json{
 			{"method", "textDocument/didChange"},
-			{"params", {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", typing}}})}}},
+			{"params",
+			 {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", typing}}})}}},
 	};
-	auto messages = session({open(model), change, request(1, "textDocument/completion", 6, 21),
-							 request(2, "textDocument/completion", 7, 15)});
+	auto messages = session(
+			{open(model), change, request(1, "textDocument/completion", 6, 21),
+			 request(2, "textDocument/completion", 7, 15)}
+	);
 	auto labels = [&](int id) {
 		std::set<std::string> set;
 		for (const auto& item : (*response(messages, id))["result"])
@@ -141,7 +147,7 @@ TEST_CASE("mdls classifies tokens, including einops axes", "[mdls]") {
 				return types[t.type];
 		return "";
 	};
-	CHECK(typeAt(2, 0) == "keyword");		 // module
+	CHECK(typeAt(2, 0).empty());			 // module (a keyword: left to the editor's grammar)
 	CHECK(typeAt(2, 7) == "class");			 // Block
 	CHECK(typeAt(2, 13) == "typeParameter"); // d
 	CHECK(typeAt(3, 4) == "property");		 // lin
@@ -170,7 +176,9 @@ TEST_CASE("mdls publishes diagnostics under the URI the client sent", "[mdls]") 
 		};
 		send({{"id", 0}, {"method", "initialize"}, {"params", json::object()}});
 		send({{"method", "textDocument/didOpen"},
-			  {"params", {{"textDocument", {{"uri", clientUri}, {"version", 1}, {"text", "float[...] f(x: float[...]) => y;"}}}}}});
+			  {"params",
+			   {{"textDocument", {{"uri", clientUri}, {"version", 1}, {"text", "float[...] f(x: float[...]) => y;"}}}}}}
+		);
 		send({{"id", 1}, {"method", "shutdown"}});
 		send({{"method", "exit"}});
 		mdls::Server{in, out}.run();
@@ -206,10 +214,13 @@ TEST_CASE("mdls hovers and goes to definitions while the text does not parse", "
 	typing.replace(typing.find("        return"), 0, "        auto y = lin.\n");
 	auto change = json{
 			{"method", "textDocument/didChange"},
-			{"params", {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", typing}}})}}},
+			{"params",
+			 {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", typing}}})}}},
 	};
 	// `return h + x` moved one line down; its x is defined in the unchanged line 4.
-	auto messages = session({open(model), change, request(1, "textDocument/hover", 7, 19), request(2, "textDocument/definition", 7, 19)});
+	auto messages = session(
+			{open(model), change, request(1, "textDocument/hover", 7, 19), request(2, "textDocument/definition", 7, 19)}
+	);
 	const std::string text = (*response(messages, 1))["result"]["contents"]["value"];
 	CHECK(text.find("x: float[..., d]") != std::string::npos);
 	CHECK((*response(messages, 1))["result"]["range"]["start"] == json{{"line", 7}, {"character", 19}});
@@ -218,10 +229,15 @@ TEST_CASE("mdls hovers and goes to definitions while the text does not parse", "
 
 TEST_CASE("mdls completes named hyperparameters and nothing in comments", "[mdls]") {
 	const std::string text = "import std;\nmodule M[] {\n    l: Linear[4, 3, .\n    // l.\n}\n";
-	auto messages = session({open("import std;\nmodule M[] {\n    l: Linear[4, 3]\n    // l\n}\n"),
-							 {{"method", "textDocument/didChange"},
-							  {"params", {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", text}}})}}}},
-							 request(1, "textDocument/completion", 2, 21), request(2, "textDocument/completion", 3, 9)});
+	auto messages = session(
+			{open("import std;\nmodule M[] {\n    l: Linear[4, 3]\n    // l\n}\n"),
+			 {{"method", "textDocument/didChange"},
+			  {"params",
+			   {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", text}}})}}}
+			 },
+			 request(1, "textDocument/completion", 2, 21),
+			 request(2, "textDocument/completion", 3, 9)}
+	);
 	std::set<std::string> labels;
 	for (const auto& item : (*response(messages, 1))["result"])
 		labels.insert(item["label"].get<std::string>());
@@ -232,17 +248,25 @@ TEST_CASE("mdls completes named hyperparameters and nothing in comments", "[mdls
 TEST_CASE("mdls re-analyzes the open documents that import a changed document", "[mdls]") {
 	const auto dir = std::filesystem::temp_directory_path() / "mdls-import-test";
 	std::filesystem::create_directories(dir);
-	{ std::ofstream{dir / "lib.dlm"} << "float[...] twice(x: float[...]) => x + x;\n"; }
+	{
+		std::ofstream{dir / "lib.dlm"} << "float[...] twice(x: float[...]) => x + x;\n";
+	}
 	const std::string libUri = mdls::pathToUri(dir / "lib.dlm"), mainUri = mdls::pathToUri(dir / "main.dlm");
 	auto openDoc = [](const std::string& u, const std::string& text) {
-		return json{{"method", "textDocument/didOpen"}, {"params", {{"textDocument", {{"uri", u}, {"version", 1}, {"text", text}}}}}};
+		return json{
+				{"method", "textDocument/didOpen"},
+				{"params", {{"textDocument", {{"uri", u}, {"version", 1}, {"text", text}}}}}
+		};
 	};
 	// Renaming the function in the open library makes the importer's call an error.
-	auto messages = session({openDoc(libUri, "float[...] twice(x: float[...]) => x + x;\n"),
-							 openDoc(mainUri, "import lib;\nfloat[...] f(x: float[...]) => twice(x);\n"),
-							 {{"method", "textDocument/didChange"},
-							  {"params", {{"textDocument", {{"uri", libUri}, {"version", 2}}},
-										  {"contentChanges", json::array({{{"text", "float[...] double(x: float[...]) => x + x;\n"}}})}}}}});
+	auto messages = session(
+			{openDoc(libUri, "float[...] twice(x: float[...]) => x + x;\n"),
+			 openDoc(mainUri, "import lib;\nfloat[...] f(x: float[...]) => twice(x);\n"),
+			 {{"method", "textDocument/didChange"},
+			  {"params",
+			   {{"textDocument", {{"uri", libUri}, {"version", 2}}},
+				{"contentChanges", json::array({{{"text", "float[...] double(x: float[...]) => x + x;\n"}}})}}}}}
+	);
 	std::filesystem::remove_all(dir);
 	std::vector<size_t> mainDiagnostics;
 	for (const auto& m : messages)

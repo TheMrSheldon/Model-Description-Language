@@ -22,9 +22,6 @@ namespace {
 		Property,
 		Function,
 		Method,
-		Keyword,
-		Number,
-		Operator,
 		Decorator,
 		Axis,
 	};
@@ -95,10 +92,8 @@ namespace {
 		void visit(antlr4::tree::ParseTree* tree) {
 			if (tree == nullptr)
 				return;
-			if (auto* t = dynamic_cast<antlr4::tree::TerminalNode*>(tree)) {
-				terminal(t->getSymbol());
-				return;
-			}
+			if (dynamic_cast<antlr4::tree::TerminalNode*>(tree))
+				return; // keywords, literals, operators: lexical (the editor's grammar colors them)
 			if (auto* ctx = dynamic_cast<mdlParser::Import_stmtContext*>(tree)) {
 				for (auto* part : ctx->path)
 					emit(part, Namespace);
@@ -256,26 +251,13 @@ namespace {
 		}
 
 		unsigned memberKind() const { return Property; }
-
-		void terminal(antlr4::Token* t) {
-			const auto type = t->getType();
-			const std::string text = t->getText();
-			if (type == mdlLexer::INTEGER || type == mdlLexer::FLOAT)
-				emit(t, Number);
-			else if (type == mdlLexer::BOOL)
-				emit(t, Keyword);
-			else if (type != mdlLexer::IDENT && !text.empty() && std::isalpha(static_cast<unsigned char>(text[0])))
-				emit(t, Keyword); // import, module, struct, for, in, return, auto, masked, template, array
-			else if (text == "->" || text == "|" || text == "=>")
-				emit(t, Operator);
-		}
 	};
 } // namespace
 
 const std::vector<std::string>& mdls::semanticTokenTypes() {
 	static const std::vector<std::string> types{
-			"namespace", "type",   "class",	  "struct", "typeParameter", "parameter", "variable", "property",
-			"function",	 "method", "keyword", "number", "operator",		 "decorator", "axis",
+			"namespace", "type",	 "class",	 "struct", "typeParameter", "parameter",
+			"variable",	 "property", "function", "method", "decorator",		"axis",
 	};
 	return types;
 }
