@@ -1,6 +1,6 @@
-#include <cstring>
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
+#include <cstring>
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/relax/attrs/manipulate.h>
@@ -186,7 +186,9 @@ namespace mdl::backend::tvm {
 		PatternEntry makeGeluGradient() {
 			auto x = Wildcard(), dy = Wildcard();
 			auto sqrt2 = Wildcard(), one = Wildcard(), half = Wildcard(), minusHalf = Wildcard(), density = Wildcard();
-			auto cdf = IsOp("relax.multiply")(half, IsOp("relax.add")(one, IsOp("relax.erf")(IsOp("relax.divide")(x, sqrt2))));
+			auto cdf = IsOp("relax.multiply")(
+					half, IsOp("relax.add")(one, IsOp("relax.erf")(IsOp("relax.divide")(x, sqrt2)))
+			);
 			auto gauss = IsOp("relax.exp")(IsOp("relax.multiply")(IsOp("relax.multiply")(minusHalf, x), x));
 			auto pdf = IsOp("relax.multiply")(IsOp("relax.multiply")(x, gauss), density);
 			DFPattern pattern = IsOp("relax.multiply")(dy, IsOp("relax.add")(cdf, pdf));
@@ -214,16 +216,15 @@ namespace mdl::backend::tvm {
 			auto sumSq = IsOp("relax.sum")(IsOp("relax.multiply")(xc, xc));
 			auto var = IsOp("relax.reshape")(IsOp("relax.divide")(sumSq, n2), Wildcard());
 			auto s = IsOp("relax.rsqrt")(IsOp("relax.add")(var, eps));
-			DFPattern pattern =
-					IsOp("relax.add")(IsOp("relax.multiply")(IsOp("relax.multiply")(xc, s), gamma), beta);
+			DFPattern pattern = IsOp("relax.add")(IsOp("relax.multiply")(IsOp("relax.multiply")(xc, s), gamma), beta);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
 				const Expr& in = m.at(x);
 				auto n = scalarConstant(at(n1));
 				auto epsilon = scalarConstant(at(eps));
 				if (!reducesLastAxis(at(sumX), false) || !reducesLastAxis(at(sumSq), false) || !n ||
-					!lastDimEquals(in, *n) || !near(at(n2), *n) || !epsilon ||
-					!isVectorOverLastDim(m.at(gamma), in) || !isVectorOverLastDim(m.at(beta), in))
+					!lastDimEquals(in, *n) || !near(at(n2), *n) || !epsilon || !isVectorOverLastDim(m.at(gamma), in) ||
+					!isVectorOverLastDim(m.at(beta), in))
 					return call;
 				static const auto layerNorm = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.layer_norm");
 				return layerNorm(in, m.at(gamma), m.at(beta), Array<::tvm::Integer>{-1}, *epsilon, true, true)
@@ -295,8 +296,8 @@ namespace mdl::backend::tvm {
 		/** (a @ op(B)) / c → mdl.matmul with alpha = 1/c (e.g. the attention scale 1/sqrt(d)). */
 		PatternEntry makeScaledMatmul() {
 			auto product = IsOp("mdl.matmul")(
-					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(),
-					Wildcard(), Wildcard(), Wildcard()
+					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(),
+					Wildcard(), Wildcard(), Wildcard(), Wildcard()
 			);
 			auto c = Wildcard();
 			DFPattern pattern = IsOp("relax.divide")(product, c);
@@ -319,16 +320,16 @@ namespace mdl::backend::tvm {
 
 	std::vector<PatternEntry> defaultPatterns() {
 		return {
-				makeSoftmax(),			// before the matmul patterns: the attention's softmax input is a divide
+				makeSoftmax(), // before the matmul patterns: the attention's softmax input is a divide
 				makeGelu(),
 				makeGeluGradient(),
 				makeLayerNorm(),
-				makeLinear(true),		// a @ W^T + b (std.Linear)
-				makeLinear(false),		// a @ W + b
-				makeMatmulTransposed(), // remaining a @ B^T
+				makeLinear(true),		 // a @ W^T + b (std.Linear)
+				makeLinear(false),		 // a @ W + b
+				makeMatmulTransposed(),	 // remaining a @ B^T
 				makeMatmulTransposedA(), // A^T @ b
 				makePlainMatmul(),		 // remaining a @ b
-				makeScaledMatmul(),		// (a @ B^T) / c
+				makeScaledMatmul(),		 // (a @ B^T) / c
 		};
 	}
 

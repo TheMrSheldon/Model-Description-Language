@@ -18,10 +18,8 @@ namespace mdl::backends::tvm {
 	 * the inputs, the weights, and the preallocated outputs (see mdl::ExportedFunction).
 	 */
 	void compileToFile(
-			const std::vector<mdl::ExportedFunction>& exports,
-			const std::filesystem::path& output,
-			const mdl::ArgVals& argvals,
-			const mdl::CompileOptions& opts = {}
+			const std::vector<mdl::ExportedFunction>& exports, const std::filesystem::path& output,
+			const mdl::ArgVals& argvals, const mdl::CompileOptions& opts = {}
 	);
 } // namespace mdl::backends::tvm
 

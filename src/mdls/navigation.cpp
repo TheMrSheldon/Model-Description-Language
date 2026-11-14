@@ -43,7 +43,9 @@ mdls::json mdls::definition(const Document& doc, const json& params) {
 		auto begin = doc.fromIndex(s.range.begin);
 		if (!begin)
 			begin = doc.toIndex(s.range.begin);
-		const mdl::SourceRange range{*begin, {begin->line, begin->column + (s.range.end.column - s.range.begin.column)}};
+		const mdl::SourceRange range{
+				*begin, {begin->line, begin->column + (s.range.end.column - s.range.begin.column)}
+		};
 		return {{"uri", doc.uri}, {"range", toProtocol(lines, range)}};
 	}
 	// In another file: its columns are converted with that file's text.

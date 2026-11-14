@@ -137,10 +137,9 @@ static std::ostream& operator<<(std::ostream& os, const mdl::Diagnostic::Line& c
 	// 123 | ...some code...
 	// Optionally with ellipses if trimming was needed to fit the terminal:
 	// 123 | <...some code...>
-	os << termcolor::bright_grey << gutter << termcolor::reset
-			  << FmtElipsis{.symbol = '<', .enabled = leftTrimmed}
-			  << visible.substr(leftTrimmed, visible.size() - (leftTrimmed + rightTrimmed))
-			  << FmtElipsis{.symbol = '>', .enabled = rightTrimmed} << "\n";
+	os << termcolor::bright_grey << gutter << termcolor::reset << FmtElipsis{.symbol = '<', .enabled = leftTrimmed}
+	   << visible.substr(leftTrimmed, visible.size() - (leftTrimmed + rightTrimmed))
+	   << FmtElipsis{.symbol = '>', .enabled = rightTrimmed} << "\n";
 
 	if (ctxt.markWidth != 0) {
 		size_t caretPos = ctxt.markBegin - windowStart + leftTrimmed;
@@ -149,8 +148,7 @@ static std::ostream& operator<<(std::ostream& os, const mdl::Diagnostic::Line& c
 
 		size_t numCarets = std::min(ctxt.markWidth, usableWidth - caretPos);
 		os << termcolor::bright_grey << std::string(gutterWidth - 2, ' ') << "| " << termcolor::reset
-				  << std::string(caretPos, ' ') << termcolor::red << std::string(numCarets, '^') << termcolor::reset
-				  << "\n";
+		   << std::string(caretPos, ' ') << termcolor::red << std::string(numCarets, '^') << termcolor::reset << "\n";
 	}
 	return os;
 }

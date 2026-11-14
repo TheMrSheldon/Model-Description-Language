@@ -1,8 +1,8 @@
 #ifndef MDL_PASSES_SHAPES_HPP
 #define MDL_PASSES_SHAPES_HPP
 
-#include "../computegraphv2/datatype.hpp"
 #include "../computegraphv2/builtins.hpp"
+#include "../computegraphv2/datatype.hpp"
 #include "../computegraphv2/node.hpp"
 
 #include <cstdint>
@@ -126,7 +126,8 @@ namespace mdl::shapes {
 	 * product, or shapes that do not broadcast).
 	 * @return a description of the mismatch, or std::nullopt.
 	 */
-	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+	std::optional<std::string>
+	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
 
 	/**
 	 * @brief The float type of float results of non-float values (e.g. the mean of integers, or `x.mask` of an integer
@@ -137,10 +138,9 @@ namespace mdl::shapes {
 	/** @brief A type for messages, e.g. `float[..., 768]`. */
 	std::string str(const DataType& type);
 
-	std::expected<Shapes, std::string> infer(
-			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
-			const std::unordered_map<const Node*, Shape>& known = {}
-	);
+	std::expected<Shapes, std::string>
+	infer(const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
+		  const std::unordered_map<const Node*, Shape>& known = {});
 
 } // namespace mdl::shapes
 

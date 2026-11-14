@@ -42,7 +42,8 @@ namespace mdl::autodiff {
 			const Node& unary(FIDs id, const Node& a) { return op(id, {a}); }
 			const Node& transposed(const Node& a) {
 				// (a^T)^T = a (e.g. the gradient of `x @ W.T()` with respect to x is `g @ W`)
-				if (const auto* inv = std::get_if<InvocationNode>(&a); inv && inv->id == FIDs::PERMUTE && isSwapLastTwo(*inv))
+				if (const auto* inv = std::get_if<InvocationNode>(&a);
+					inv && inv->id == FIDs::PERMUTE && isSwapLastTwo(*inv))
 					return inv->arguments[0].get();
 				return op(FIDs::PERMUTE, {a, graph.addConstNode(Atomic{std::vector<int>{-1, -2}})});
 			}
@@ -50,7 +51,8 @@ namespace mdl::autodiff {
 			/** @brief `x[... k -> (...) k]`: merges all dimensions but the last one. */
 			const Node* flattenLeading(const Node& x) {
 				// With exact shapes: reshape to [-2 (inferred), k] (the type of x may be imprecise).
-				if (const shapes::Shape* s = shapes ? shapes->shapeOf(x) : nullptr; s && !s->empty() && s->back().isConstant()) {
+				if (const shapes::Shape* s = shapes ? shapes->shapeOf(x) : nullptr;
+					s && !s->empty() && s->back().isConstant()) {
 					const int k = static_cast<int>(s->back().factor);
 					return &op(FIDs::RESHAPE, {x, graph.addConstNode(Atomic{-2}), graph.addConstNode(Atomic{k})});
 				}
@@ -60,9 +62,7 @@ namespace mdl::autodiff {
 				auto result = apply(graph, x, lhs, rhs, {});
 				return result ? &result->get() : nullptr;
 			}
-			const Node& matmul(const Node& a, const Node& b) {
-				return op(FIDs::TENSOR_DOT, {a, b});
-			}
+			const Node& matmul(const Node& a, const Node& b) { return op(FIDs::TENSOR_DOT, {a, b}); }
 
 			/** @brief Sums @p g to the shape of @p like (undoes broadcasting); identity if the shapes are equal. */
 			const Node& unbroadcast(const Node& g, const Node& like) {
@@ -74,7 +74,8 @@ namespace mdl::autodiff {
 						return g;
 					return op(FIDs::COLLAPSE_SUM_LIKE, {g, like});
 				}
-				if (auto a = shapes::shapeOfType(getDataType(g)), b = shapes::shapeOfType(getDataType(like)); a && b && *a == *b)
+				if (auto a = shapes::shapeOfType(getDataType(g)), b = shapes::shapeOfType(getDataType(like));
+					a && b && *a == *b)
 					return g;
 				return op(FIDs::COLLAPSE_SUM_LIKE, {g, like});
 			}
@@ -95,9 +96,7 @@ namespace mdl::autodiff {
 				return op(FIDs::CAST, {g, graph.addConstNode(Atomic{static_cast<int>(*to)})});
 			}
 
-			const Node& zerosLike(const Node& like) {
-				return op(FIDs::BROADCAST_LIKE, {constant(0.0), like});
-			}
+			const Node& zerosLike(const Node& like) { return op(FIDs::BROADCAST_LIKE, {constant(0.0), like}); }
 
 			/** @brief The exact shape of @p node, if shapes are available. */
 			const shapes::Shape* shapeOf(const Node& node) { return shapes ? shapes->shapeOf(node) : nullptr; }
@@ -114,7 +113,6 @@ namespace mdl::autodiff {
 				const auto* perm = c ? std::get_if<std::vector<int>>(&c->value) : nullptr;
 				return perm != nullptr && *perm == std::vector<int>{-1, -2};
 			}
-
 		};
 
 		/** @brief The size of the last dimension of @p type as a node (for the gradient of mean), if known. */
@@ -133,7 +131,8 @@ namespace mdl::autodiff {
 		/**
 		 * @brief The gradient contribution of the output gradient @p g of @p node to its argument @p arg.
 		 */
-		const Node& rule(Builder& b, Computegraph& graph, const Node& node, const InvocationNode& inv, size_t arg, const Node& g) {
+		const Node&
+		rule(Builder& b, Computegraph& graph, const Node& node, const InvocationNode& inv, size_t arg, const Node& g) {
 			const Node& x = inv.arguments[0].get();
 			const Node* other = inv.arguments.size() > 1 ? &inv.arguments[1].get() : nullptr;
 			switch (inv.id) {
@@ -213,7 +212,9 @@ namespace mdl::autodiff {
 			case FIDs::RSQRT: // d x^(-1/2) = -1/2 x^(-3/2) = -1/2 y^3
 				return b.mul(b.mul(g, b.constant(-0.5)), b.mul(node, b.mul(node, node)));
 			case FIDs::ERF: // 2/sqrt(pi) exp(-x^2)
-				return b.mul(b.mul(g, b.constant(2.0 / std::sqrt(std::numbers::pi))), b.unary(FIDs::EXP, b.neg(b.mul(x, x))));
+				return b.mul(
+						b.mul(g, b.constant(2.0 / std::sqrt(std::numbers::pi))), b.unary(FIDs::EXP, b.neg(b.mul(x, x)))
+				);
 			case FIDs::TANH:
 				return b.mul(g, b.sub(b.constant(1.0), b.mul(node, node)));
 			case FIDs::SIN:
@@ -240,8 +241,7 @@ namespace mdl::autodiff {
 				return b.op(FIDs::PERMUTE, {g, *other});
 			case FIDs::WHERE: { // the gradient goes to the selected operand
 				const Node& zero = b.constant(0.0);
-				const Node& selected = arg == 1 ? b.op(FIDs::WHERE, {x, g, zero})
-												: b.op(FIDs::WHERE, {x, zero, g});
+				const Node& selected = arg == 1 ? b.op(FIDs::WHERE, {x, g, zero}) : b.op(FIDs::WHERE, {x, zero, g});
 				return b.unbroadcast(selected, inv.arguments[arg].get());
 			}
 			case FIDs::SELECT: // the gradient goes to the selected position
@@ -255,7 +255,10 @@ namespace mdl::autodiff {
 			case FIDs::CAST: // the gradient in the argument's type
 				return b.castLike(g, x);
 			case FIDs::STACK: // the slice of the stacked tensor
-				return b.op(FIDs::SELECT, {g, graph.addConstNode(Atomic{0}), graph.addConstNode(Atomic{static_cast<int>(arg)})});
+				return b.op(
+						FIDs::SELECT,
+						{g, graph.addConstNode(Atomic{0}), graph.addConstNode(Atomic{static_cast<int>(arg)})}
+				);
 			default:
 				throw NoGradientRule{inv.id};
 			}
@@ -327,10 +330,10 @@ namespace mdl::autodiff {
 						return std::find(call->inputs.begin(), call->inputs.end(), out) != call->inputs.end();
 					}))
 					continue;
-				const bool better = !best ||
-						(call->module != nullptr
-								 ? best->call->module == nullptr || call->path.size() < best->call->path.size()
-								 : best->call->module == nullptr);
+				const bool better =
+						!best || (call->module != nullptr
+										  ? best->call->module == nullptr || call->path.size() < best->call->path.size()
+										  : best->call->module == nullptr);
 				if (better)
 					best = CustomCall{call, gradient};
 			}
@@ -358,7 +361,9 @@ namespace mdl::autodiff {
 			const FunctionDecl& gradient = *custom.gradient;
 			const auto where = std::format(
 					"custom gradient '{}' of '{}'", gradient.name,
-					call.module == nullptr ? call.function : call.path.empty() ? call.scope : call.path
+					call.module == nullptr ? call.function
+					: call.path.empty()	   ? call.scope
+										   : call.path
 			);
 			if (gradient.parameters.size() != call.inputs.size() + call.outputs.size())
 				return std::unexpected(std::format(
@@ -426,10 +431,9 @@ namespace mdl::autodiff {
 		return func.outputs.size();
 	}
 
-	std::expected<FunctionDecl, std::string> vjp(
-			Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
-			const Options& options
-	) {
+	std::expected<FunctionDecl, std::string>
+	vjp(Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
+		const Options& options) {
 		// Topological order (post-order) of all nodes reachable from the outputs. A module call with a custom gradient
 		// is one step: its outputs are not differentiated through, but its inputs and weights are visited.
 		struct Step {
@@ -450,7 +454,8 @@ namespace mdl::autodiff {
 					visit(*input);
 				if (custom->call->module != nullptr)
 					for (const auto& path : weightPaths(*custom->call->module))
-						if (const Node* w = graph.findParameterNode(custom->call->scope, custom->call->weightPath(path)))
+						if (const Node* w =
+									graph.findParameterNode(custom->call->scope, custom->call->weightPath(path)))
 							visit(*w);
 				steps.push_back(Step{.node = nullptr, .custom = custom});
 				return;
@@ -559,8 +564,10 @@ namespace mdl::autodiff {
 		try {
 			for (auto it = steps.rbegin(); it != steps.rend(); ++it) {
 				if (it->custom) {
-					if (auto ok = applyCustomGradient(graph, b, *it->custom, callWeights(*it->custom->call), adjoint,
-													  dependsOnTarget, accumulate);
+					if (auto ok = applyCustomGradient(
+								graph, b, *it->custom, callWeights(*it->custom->call), adjoint, dependsOnTarget,
+								accumulate
+						);
 						!ok)
 						return std::unexpected(func.name + ": " + ok.error());
 					continue;
@@ -613,11 +620,12 @@ namespace mdl::autodiff {
 		return grad;
 	}
 
-	std::expected<Split, std::string> split(
-			Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint
-	) {
+	std::expected<Split, std::string>
+	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint) {
 		if (vjp.parameters.size() < numOutputs || vjp.outputs.size() < numOutputs)
-			return std::unexpected(vjp.name + ": not a gradient function with " + std::to_string(numOutputs) + " output(s)");
+			return std::unexpected(
+					vjp.name + ": not a gradient function with " + std::to_string(numOutputs) + " output(s)"
+			);
 		const size_t numInputs = vjp.parameters.size() - numOutputs;
 		std::unordered_set<const void*> cotangents, inputs;
 		for (size_t i = 0; i < vjp.parameters.size(); ++i)
@@ -908,7 +916,7 @@ namespace mdl::autodiff {
 			return true;
 		});
 
-		auto typeOf =[](const Node& node) -> std::variant<PrimitiveType, TensorType> {
+		auto typeOf = [](const Node& node) -> std::variant<PrimitiveType, TensorType> {
 			const DataType& type = getDataType(node);
 			if (const auto* t = std::get_if<TensorType>(&type))
 				return *t;

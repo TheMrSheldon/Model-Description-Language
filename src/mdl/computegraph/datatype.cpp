@@ -95,14 +95,15 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 			const Node& rhs = graph.addInputNode(ttype, "rhs");
 			const Node& out = graph.addInvocationNode(id, {std::cref(lhs), std::cref(rhs)});
 			m.emplace(
-					std::move(opName), FunctionDecl{
-											   .name = opName,
-											   .templateParameters = {},
-											   .parameters =
-													   {{"lhs", std::cref(std::get<InputNode>(lhs))},
-														{"rhs", std::cref(std::get<InputNode>(rhs))}},
-											   .outputs = {std::cref(out)},
-									   }
+					std::move(opName),
+					FunctionDecl{
+							.name = opName,
+							.templateParameters = {},
+							.parameters =
+									{{"lhs", std::cref(std::get<InputNode>(lhs))},
+									 {"rhs", std::cref(std::get<InputNode>(rhs))}},
+							.outputs = {std::cref(out)},
+					}
 			);
 		};
 
@@ -118,12 +119,13 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
 			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, {std::cref(self), std::cref(permNode)});
 			m.emplace(
-					"T", FunctionDecl{
-								 .name = "T",
-								 .templateParameters = {},
-								 .parameters = {{"self", std::cref(std::get<InputNode>(self))}},
-								 .outputs = {std::cref(out)},
-						 }
+					"T",
+					FunctionDecl{
+							.name = "T",
+							.templateParameters = {},
+							.parameters = {{"self", std::cref(std::get<InputNode>(self))}},
+							.outputs = {std::cref(out)},
+					}
 			);
 		}
 

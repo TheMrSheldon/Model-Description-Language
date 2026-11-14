@@ -86,14 +86,12 @@ const Node& Computegraph::addInvocationNode(FunctionIDs func, std::vector<NodeRe
 	}
 
 	bool constevalable = std::all_of(args.begin(), args.end(), isCompiletimeEvalable);
-	const Node& node = nodes.emplace_back(
-			InvocationNode{
-					.type = std::move(dtype),
-					.constevalable = constevalable,
-					.id = func,
-					.arguments = std::move(args),
-			}
-	);
+	const Node& node = nodes.emplace_back(InvocationNode{
+			.type = std::move(dtype),
+			.constevalable = constevalable,
+			.id = func,
+			.arguments = std::move(args),
+	});
 	interned.emplace(std::move(key), &node);
 	return node;
 }

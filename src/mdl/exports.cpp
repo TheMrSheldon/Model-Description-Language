@@ -6,9 +6,9 @@
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
-#include <mdl/utils/overload.hpp>
 #include <mdl/passes/masking.hpp>
 #include <mdl/passes/shapes.hpp>
+#include <mdl/utils/overload.hpp>
 
 #include <algorithm>
 #include <format>
@@ -80,7 +80,9 @@ static TensorSignature makeSignature(
 									overloaded{
 											[](unsigned u) -> int64_t { return u; },
 											[](Elipsis) -> int64_t { return -1; },
-											[&](const Node* n) -> int64_t { return evalConstant(*n, argvals).value_or(-1); },
+											[&](const Node* n) -> int64_t {
+												return evalConstant(*n, argvals).value_or(-1);
+											},
 									},
 									dim
 							));
@@ -98,8 +100,9 @@ static TensorSignature makeSignature(
  * a ConstNode for scalars, an AggregateInstance for structs, and an ArrayInstance for arrays (YAML lists); std::nullopt
  * if a value is missing.
  */
-static std::optional<Object>
-hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std::string& path, const ArgVals& argvals) {
+static std::optional<Object> hyperparameterValue(
+		const CompilationUnit& unit, const DataType& type, const std::string& path, const ArgVals& argvals
+) {
 	if (std::holds_alternative<PrimitiveType>(type)) {
 		auto value = argvals.lookupScalar(path);
 		if (!value)
@@ -130,7 +133,9 @@ hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std
 		if (!size)
 			return std::nullopt;
 		if (*size != array->size)
-			throw std::runtime_error(std::format("{} is an array of {} values, but {} are given", path, array->size, *size));
+			throw std::runtime_error(
+					std::format("{} is an array of {} values, but {} are given", path, array->size, *size)
+			);
 		ArrayInstance instance;
 		for (size_t i = 0; i < *size; ++i) {
 			auto element = hyperparameterValue(unit, *array->element, path + "." + std::to_string(i), argvals);
@@ -178,7 +183,7 @@ static void quantizeWeights(
 	struct Pattern {
 		std::string text;
 		PathPatterns alone;
-		bool exact;				   ///< a path without wildcards
+		bool exact;					///< a path without wildcards
 		bool selectsMatrix = false; ///< whether it selects a matrix used by the exported functions
 	};
 	std::vector<PathPatterns> selections;
@@ -230,17 +235,19 @@ static void quantizeWeights(
 		}
 		std::vector<int64_t> dims;
 		for (const auto& d : type->shape) {
-				std::optional<int64_t> v;
-				if (const auto* u = std::get_if<unsigned>(&d))
-					v = *u;
-				else if (const auto* n = std::get_if<const Node*>(&d))
-					v = evalConstant(**n, argvals);
-				if (!v)
-					break;
-				dims.push_back(*v);
-			}
+			std::optional<int64_t> v;
+			if (const auto* u = std::get_if<unsigned>(&d))
+				v = *u;
+			else if (const auto* n = std::get_if<const Node*>(&d))
+				v = evalConstant(**n, argvals);
+			if (!v)
+				break;
+			dims.push_back(*v);
+		}
 		if (dims.size() != 2)
-			throw std::runtime_error(std::format("{}.{}: only weights with constant shapes can be quantized", moduleName, path));
+			throw std::runtime_error(
+					std::format("{}.{}: only weights with constant shapes can be quantized", moduleName, path)
+			);
 		const int64_t N = dims[0], K = dims[1];
 		const bool int4 = rule->format != QuantFormat::int8;
 		const int64_t group = rule->group == 0 ? K : rule->group;
@@ -264,20 +271,18 @@ static void quantizeWeights(
 		parts.insert(names.begin(), names.end());
 		quantized.emplace(path, std::format("format {}, group {}", std::to_underlying(rule->format), group));
 		replacements.emplace(
-				node->second,
-				&graph.addInvocationNode(
-						builtins::FunctionIDs::DEQUANT,
-						{q, scales, *zeros, graph.addConstNode(Atomic{static_cast<int>(rule->format)}),
-						 graph.addConstNode(Atomic{static_cast<int>(group)})}
-				)
+				node->second, &graph.addInvocationNode(
+									  builtins::FunctionIDs::DEQUANT,
+									  {q, scales, *zeros, graph.addConstNode(Atomic{static_cast<int>(rule->format)}),
+									   graph.addConstNode(Atomic{static_cast<int>(group)})}
+							  )
 		);
 	}
 	for (const auto& pattern : patterns)
 		if (!pattern.selectsMatrix)
-			log::getLogger("compiler")->warn(
-					"{}: the quantization pattern '{}' selects no weight matrix used by the exported functions",
-					moduleName, pattern.text
-			);
+			log::getLogger("compiler")
+					->warn("{}: the quantization pattern '{}' selects no weight matrix used by the exported functions",
+						   moduleName, pattern.text);
 	if (replacements.empty())
 		return;
 	for (auto& [_, decl] : decls) {
@@ -312,7 +317,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 					continue; // the default
 				auto value = hyperparameterValue(unit, hn.get().type, moduleName + "." + pname, argvals);
 				if (!value)
-					throw std::runtime_error(std::format("{}.{}: the value does not match the type", moduleName, pname));
+					throw std::runtime_error(std::format("{}.{}: the value does not match the type", moduleName, pname)
+					);
 				values.emplace(pname, std::move(*value));
 			}
 			auto result = unit.instantiate(moduleName, values);
@@ -375,7 +381,9 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				for (const auto& dim : t->shape) {
 					if (std::holds_alternative<Elipsis>(dim)) {
 						for (unsigned k = 0; k < rank->second; ++k)
-							shape.push_back(shapes::Dim::symbol(ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(k)));
+							shape.push_back(
+									shapes::Dim::symbol(ellipsisRank == 1 ? std::string{"B"} : "B" + std::to_string(k))
+							);
 					} else if (const auto* u = std::get_if<unsigned>(&dim)) {
 						shape.push_back(shapes::Dim::constant(*u));
 					} else {
@@ -393,8 +401,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		auto hasEllipsis = [](const DataType& type) {
 			const auto* t = std::get_if<TensorType>(&type);
 			return t != nullptr && std::any_of(t->shape.begin(), t->shape.end(), [](const auto& d) {
-				return std::holds_alternative<Elipsis>(d);
-			});
+					   return std::holds_alternative<Elipsis>(d);
+				   });
 		};
 		auto isMasked = [](const DataType& type) {
 			const auto* t = std::get_if<TensorType>(&type);
@@ -403,9 +411,11 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		std::vector<std::string> maskedHere = masked; // requested, plus functions that declare masked parameters
 		for (const auto& [funcName, decl] : module->functions) {
 			decls.emplace(funcName, &decl);
-			if (std::any_of(decl.parameters.begin(), decl.parameters.end(), [&](const auto& p) {
-					return isMasked(p.second.get().type);
-				}) && std::find(maskedHere.begin(), maskedHere.end(), funcName) == maskedHere.end())
+			if (std::any_of(
+						decl.parameters.begin(), decl.parameters.end(),
+						[&](const auto& p) { return isMasked(p.second.get().type); }
+				) &&
+				std::find(maskedHere.begin(), maskedHere.end(), funcName) == maskedHere.end())
 				maskedHere.push_back(funcName);
 		}
 		for (const auto& name : maskedHere) {
@@ -449,7 +459,9 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			if (autodiff::numCotangents(original) > 0)
 				for (size_t i = 0; i < original.outputs.size(); ++i)
 					if (const shapes::Shape* s = oracle.shapeOf(original.outputs[i].get()))
-						cotangentShapes["d_" + (original.outputs.size() == 1 ? std::string{"output"} : "output" + std::to_string(i))] = *s;
+						cotangentShapes
+								["d_" + (original.outputs.size() == 1 ? std::string{"output"}
+																	  : "output" + std::to_string(i))] = *s;
 			autodiff::Options options = gradients.options;
 			options.shapes = &oracle;
 			options.frozen = quantizedParts;
@@ -457,7 +469,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				for (const auto& [weight, _] : quantizedFrom)
 					if (options.trainable.selects(weight) || options.trainable.selects(weight + ".qweight"))
 						throw std::runtime_error(std::format(
-								"{}: the weight {} is quantized and cannot be trained (exclude it with --trainable '!{}')",
+								"{}: the weight {} is quantized and cannot be trained (exclude it with --trainable "
+								"'!{}')",
 								moduleName, weight, weight
 						));
 			auto grad = autodiff::vjp(unit.graph(), original, order, options);
@@ -478,8 +491,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				reach(output.get());
 			std::vector<std::string> gradientOf;
 			for (const auto& path : order) {
-				const bool selected = !quantizedParts.contains(path) &&
-									  (gradients.options.trainable.empty() || gradients.options.trainable.selects(path));
+				const bool selected = !quantizedParts.contains(path) && (gradients.options.trainable.empty() ||
+																		 gradients.options.trainable.selects(path));
 				const bool used = std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
 					const auto* pn = std::get_if<ParameterNode>(n);
 					return pn != nullptr && pn->name == path;
@@ -495,13 +508,16 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			};
 			if (gradients.options.inputs)
 				for (const auto& [pname, input] : original.parameters)
-					if (std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
-							return std::get_if<InputNode>(n) == &input.get();
-						}) && floating(input.get().type))
+					if (std::any_of(
+								reachable.begin(), reachable.end(),
+								[&](const Node* n) { return std::get_if<InputNode>(n) == &input.get(); }
+						) &&
+						floating(input.get().type))
 						gradientOf.push_back(pname);
 
 			if (autodiff::numCotangents(original) == 0 || gradients.fused) {
-				functions.push_back({name, &vjp, std::nullopt, 0, original.outputs.size(), gradientOf, cotangentShapes});
+				functions.push_back({name, &vjp, std::nullopt, 0, original.outputs.size(), gradientOf, cotangentShapes}
+				);
 				continue;
 			}
 			const PathPatterns checkpoint{gradients.checkpoint};
@@ -611,11 +627,12 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			for (size_t i = 0; i < decl.outputs.size(); ++i) {
 				const auto& out = decl.outputs[i].get();
 				auto name = i < decl.outputNames.size() ? decl.outputNames[i]
-						  : decl.outputs.size() == 1  ? std::string{"output"}
-													  : "output" + std::to_string(i);
-				const DataType type = i < decl.returnTypes.size()
-											  ? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])
-											  : getDataType(out);
+							: decl.outputs.size() == 1	? std::string{"output"}
+														: "output" + std::to_string(i);
+				const DataType type =
+						i < decl.returnTypes.size()
+								? std::visit([](const auto& t) -> DataType { return t; }, decl.returnTypes[i])
+								: getDataType(out);
 				auto signature = makeSignature(std::move(name), type, &out, argvals, ellipsisRank);
 				if (const shapes::Shape* exact = inferred ? inferred->find(out) : nullptr) {
 					std::vector<int64_t> shape;
@@ -627,18 +644,21 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 						auto ellipsis = std::find_if(declared->shape.begin(), declared->shape.end(), [](const auto& d) {
 							return std::holds_alternative<Elipsis>(d);
 						});
-						const size_t trailing = static_cast<size_t>(declared->shape.end() - ellipsis) - (ellipsis != declared->shape.end());
+						const size_t trailing = static_cast<size_t>(declared->shape.end() - ellipsis) -
+												(ellipsis != declared->shape.end());
 						const size_t fixed = ellipsis == declared->shape.end() ? declared->shape.size() : trailing;
 						const auto& expected = signature.shape;
-						bool ok = ellipsis == declared->shape.end() ? shape.size() == expected.size() : shape.size() >= fixed;
+						bool ok = ellipsis == declared->shape.end() ? shape.size() == expected.size()
+																	: shape.size() >= fixed;
 						for (size_t k = 1; ok && k <= fixed; ++k) {
 							const int64_t want = expected[expected.size() - k], have = shape[shape.size() - k];
 							ok = want < 0 || have < 0 || want == have;
 						}
 						if (!ok)
 							throw std::runtime_error(std::format(
-									"{}.{}: output {} has the shape [{}], which does not match its declared type", moduleName,
-									funcName, i, [&] {
+									"{}.{}: output {} has the shape [{}], which does not match its declared type",
+									moduleName, funcName, i,
+									[&] {
 										std::string str;
 										for (const auto& d : *exact)
 											str += (str.empty() ? "" : ", ") + d.str();
@@ -650,7 +670,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				}
 				fn.outputs.push_back(std::move(signature));
 			}
-			for (size_t i = function.firstGradient, k = 0; i < fn.outputs.size() && k < function.gradientOf.size(); ++i, ++k) {
+			for (size_t i = function.firstGradient, k = 0; i < fn.outputs.size() && k < function.gradientOf.size();
+				 ++i, ++k) {
 				fn.outputs[i].accumulate = gradients.accumulate;
 				fn.outputs[i].gradientOf = function.gradientOf[k];
 			}
@@ -665,6 +686,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 	}
 	for (const auto& name : gradients.functions)
 		if (!differentiated.contains(name))
-			throw std::runtime_error(std::format("no compiled module has a member function '{}' to differentiate", name));
+			throw std::runtime_error(std::format("no compiled module has a member function '{}' to differentiate", name)
+			);
 	return exports;
 }

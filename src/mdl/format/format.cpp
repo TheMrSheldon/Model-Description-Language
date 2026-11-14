@@ -13,8 +13,8 @@
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
 #include <format>
+#include <fstream>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -29,7 +29,7 @@ namespace {
 		size_t index; ///< in the token stream
 		size_t type;
 		std::string text;
-		size_t column;				 ///< in the source (code points)
+		size_t column;			   ///< in the source (code points)
 		size_t newlinesBefore = 0; ///< line breaks in the whitespace before it
 		bool comment = false, lineComment = false;
 	};
@@ -94,7 +94,8 @@ namespace {
 			} else if (auto* ctx = dynamic_cast<mdlParser::Module_defContext*>(tree)) {
 				std::vector<antlr4::ParserRuleContext*> members;
 				for (auto* child : ctx->children)
-					if (dynamic_cast<mdlParser::VardeclContext*>(child) || dynamic_cast<mdlParser::FuncdefContext*>(child))
+					if (dynamic_cast<mdlParser::VardeclContext*>(child) ||
+						dynamic_cast<mdlParser::FuncdefContext*>(child))
 						members.push_back(static_cast<antlr4::ParserRuleContext*>(child));
 				block(ctx, members);
 			} else if (auto* ctx = dynamic_cast<mdlParser::FuncdefContext*>(tree)) {
@@ -282,7 +283,8 @@ namespace {
 						newline = true;
 						// A line inside a statement (e.g. after a comment within an expression) is a continuation.
 						continuation =
-								!(pr.breakBefore || pr.keepBreakBefore || pr.blockClose || (tok.comment && beforeItem(i)));
+								!(pr.breakBefore || pr.keepBreakBefore || pr.blockClose ||
+								  (tok.comment && beforeItem(i)));
 					}
 				}
 				if (newline) {
@@ -436,7 +438,8 @@ namespace {
 					auto lines = wrapTokens({tokens.begin(), tokens.begin() + k}, indent, contIndent);
 					// The body one level deeper than the function (like a block body).
 					auto body = wrapTokens(
-							{tokens.begin() + k, tokens.end()}, indent + std::string(options.indentWidth, ' '), contIndent
+							{tokens.begin() + k, tokens.end()}, indent + std::string(options.indentWidth, ' '),
+							contIndent
 					);
 					lines.insert(lines.end(), body.begin(), body.end());
 					return lines;
@@ -452,7 +455,9 @@ namespace {
 						result.push_back(k);
 				return result;
 			};
-			auto breaks = candidates([&](size_t k) { return toks[tokens[k - 1]].text == "," && !props(tokens[k - 1]).einops; });
+			auto breaks = candidates([&](size_t k) {
+				return toks[tokens[k - 1]].text == "," && !props(tokens[k - 1]).einops;
+			});
 			if (breaks.empty())
 				breaks = candidates([&](size_t k) {
 					const auto& t = toks[tokens[k]].text;
@@ -530,7 +535,8 @@ namespace {
 			std::string text = t->getText();
 			if (isComment(t->getType())) {
 				std::erase_if(text, [](unsigned char ch) { return std::isspace(ch) != 0 || ch == '*' || ch == '/'; });
-				if (t->getType() == mdlLexer::LINECOMMENT && !result.empty() && result.back().first == mdlLexer::LINECOMMENT) {
+				if (t->getType() == mdlLexer::LINECOMMENT && !result.empty() &&
+					result.back().first == mdlLexer::LINECOMMENT) {
 					result.back().second += text;
 					continue;
 				}
@@ -588,12 +594,14 @@ namespace {
 		std::string file;
 		std::vector<mdl::Diagnostic>& out;
 
-		void check(antlr4::tree::TerminalNode* node, mdl::format::Naming mdl::format::NamingOptions::*kind, const char* what) {
+		void
+		check(antlr4::tree::TerminalNode* node, mdl::format::Naming mdl::format::NamingOptions::* kind,
+			  const char* what) {
 			if (node != nullptr)
 				check(node->getSymbol(), kind, what);
 		}
 
-		void check(antlr4::Token* t, mdl::format::Naming mdl::format::NamingOptions::*kind, const char* what) {
+		void check(antlr4::Token* t, mdl::format::Naming mdl::format::NamingOptions::* kind, const char* what) {
 			const auto convention = naming.*kind;
 			if (t == nullptr || mdl::format::follows(t->getText(), convention))
 				return;
@@ -602,7 +610,9 @@ namespace {
 					.severity = mdl::Severity::warning,
 					.file = file,
 					.range = {{line, column}, {line, column + t->getText().size()}},
-					.message = std::format("The {} name {} is not {}", what, t->getText(), mdl::format::namingName(convention)),
+					.message = std::format(
+							"The {} name {} is not {}", what, t->getText(), mdl::format::namingName(convention)
+					),
 					.hint = std::format("rename it to `{}`", mdl::format::convert(t->getText(), convention)),
 					.flag = "naming",
 			});
@@ -772,9 +782,9 @@ mdl::format::format(std::string_view source, const FormatOptions& options, std::
 	std::string text = formatter.run();
 	if (significantTokens(text) != significantTokens(source)) {
 		result.text = std::string{source};
-		result.diagnostics.push_back(
-				Diagnostic{.file = std::string{sourcename}, .message = "internal error: formatting would change the code"}
-		);
+		result.diagnostics.push_back(Diagnostic{
+				.file = std::string{sourcename}, .message = "internal error: formatting would change the code"
+		});
 		return result;
 	}
 	result.text = std::move(text);
@@ -827,8 +837,9 @@ std::expected<mdl::format::FormatOptions, std::string> mdl::format::loadStyle(co
 		}
 		if (auto n = namingKeys.find(key); n != namingKeys.end()) {
 			bool known = false;
-			for (auto convention : {Naming::any, Naming::snakeCase, Naming::camelCase, Naming::pascalCase, Naming::allCaps,
-									Naming::lowercase})
+			for (auto convention :
+				 {Naming::any, Naming::snakeCase, Naming::camelCase, Naming::pascalCase, Naming::allCaps,
+				  Naming::lowercase})
 				if (value == namingName(convention)) {
 					options.naming.*(n->second) = convention;
 					known = true;

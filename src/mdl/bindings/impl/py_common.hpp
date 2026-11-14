@@ -43,7 +43,9 @@ namespace mdl::bindings {
 		virtual std::string toFfiArg(const std::string& expr) const { return expr; }
 
 		/** @brief Additional methods of the class of @p module (e.g. autograd integration). */
-		virtual void classExtras(std::ostream& /*out*/, const std::string& /*module*/, const std::vector<ExportedFunction>& /*exports*/) const {}
+		virtual void classExtras(
+				std::ostream& /*out*/, const std::string& /*module*/, const std::vector<ExportedFunction>& /*exports*/
+		) const {}
 
 		/** @brief Additional code at the end of the file. */
 		virtual void fileExtras(std::ostream& /*out*/, const std::vector<ExportedFunction>& /*exports*/) const {}
@@ -78,7 +80,8 @@ inline void mdl::bindings::PyBindingGenerator::generate(
 		out << ")\n\n"
 			<< "    def __init__(self, library, weights: dict[str, " << tensorType() << "]) -> None:\n"
 			<< "        \"\"\"\n"
-			<< "        :param library: path of the compiled shared library or a module loaded with tvm_ffi.load_module.\n"
+			<< "        :param library: path of the compiled shared library or a module loaded with "
+			   "tvm_ffi.load_module.\n"
 			<< "        :param weights: the weights by fully qualified path (see weight_paths).\n"
 			<< "        \"\"\"\n"
 			<< "        self._mod = tvm_ffi.load_module(library) if isinstance(library, str) else library\n"
@@ -103,7 +106,8 @@ inline void mdl::bindings::PyBindingGenerator::generate(
 				out << "\n    def " << context->name << "_size(self, *dims: int) -> int:\n"
 					<< "        \"\"\"Size in bytes of the context buffer for the given " << context->ellipsisRank
 					<< " dimension(s) of `...` (a buffer for the largest\n"
-					<< "        dimensions can be reused for all smaller ones; its data must be aligned to 64 bytes).\"\"\"\n"
+					<< "        dimensions can be reused for all smaller ones; its data must be aligned to 64 "
+					   "bytes).\"\"\"\n"
 					<< "        return self._mod[\"" << context->sizeSymbol << "\"](*dims)\n";
 
 			out << "\n    def " << fn.function << "(self";
@@ -119,7 +123,8 @@ inline void mdl::bindings::PyBindingGenerator::generate(
 				out << (i > 0 ? ", " : "") << outputs[i]->name << ": " << detail::shapeStr(*outputs[i]);
 			out << ")";
 			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
-				out << ".\n        The gradients are added to the given tensors (accumulation): zero them before the first step";
+				out << ".\n        The gradients are added to the given tensors (accumulation): zero them before the "
+					   "first step";
 			if (context)
 				out << ".\n        `ctx` is the context buffer (1-D uint8, see " << context->name << "_size)";
 			out << ".\"\"\"\n"

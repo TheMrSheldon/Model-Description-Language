@@ -10,14 +10,18 @@ size_t SemanticIndex::define(Symbol symbol) {
 	const auto key = std::tuple{symbol.file, symbol.range.begin.line, symbol.range.begin.column};
 	if (auto it = symbolAt_.find(key); it != symbolAt_.end()) {
 		symbols_[it->second].types.insert(symbol.types.begin(), symbol.types.end());
-		reference(Reference{.file = symbol.file, .range = symbol.range, .symbol = it->second, .types = symbol.types, .members = {}});
+		reference(Reference{
+				.file = symbol.file, .range = symbol.range, .symbol = it->second, .types = symbol.types, .members = {}
+		});
 		return it->second;
 	}
 	symbols_.push_back(std::move(symbol));
 	symbolAt_.emplace(key, symbols_.size() - 1);
 	// The declaration's name is also a reference (hover, go to definition).
 	const auto& s = symbols_.back();
-	reference(Reference{.file = s.file, .range = s.range, .symbol = symbols_.size() - 1, .types = s.types, .members = {}});
+	reference(
+			Reference{.file = s.file, .range = s.range, .symbol = symbols_.size() - 1, .types = s.types, .members = {}}
+	);
 	return symbols_.size() - 1;
 }
 
@@ -46,8 +50,8 @@ const Reference* SemanticIndex::referenceAt(std::string_view file, SourcePositio
 std::vector<const Symbol*> SemanticIndex::visibleAt(std::string_view file, SourcePosition position) const {
 	std::vector<const Symbol*> local, global;
 	for (const auto& s : symbols_) {
-		if (s.container.empty() && (s.kind == SymbolKind::module || s.kind == SymbolKind::structure ||
-									 s.kind == SymbolKind::function)) {
+		if (s.container.empty() &&
+			(s.kind == SymbolKind::module || s.kind == SymbolKind::structure || s.kind == SymbolKind::function)) {
 			global.push_back(&s);
 			continue;
 		}
@@ -60,7 +64,9 @@ std::vector<const Symbol*> SemanticIndex::visibleAt(std::string_view file, Sourc
 		local.push_back(&s);
 	}
 	// Innermost (latest starting scope) first.
-	std::stable_sort(local.begin(), local.end(), [](const Symbol* a, const Symbol* b) { return a->scope.begin > b->scope.begin; });
+	std::stable_sort(local.begin(), local.end(), [](const Symbol* a, const Symbol* b) {
+		return a->scope.begin > b->scope.begin;
+	});
 	local.insert(local.end(), global.begin(), global.end());
 	return local;
 }

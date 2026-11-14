@@ -51,7 +51,9 @@ namespace mdls {
 		/** @brief The code-point column of UTF-16 column @p column on @p line. */
 		size_t fromUtf16(size_t line, size_t column) const;
 		/** @brief The UTF-16 length of @p count code points starting at code-point @p column on @p line. */
-		size_t utf16Length(size_t line, size_t column, size_t count) const { return toUtf16(line, column + count) - toUtf16(line, column); }
+		size_t utf16Length(size_t line, size_t column, size_t count) const {
+			return toUtf16(line, column + count) - toUtf16(line, column);
+		}
 		std::string_view line(size_t line) const;
 
 	private:

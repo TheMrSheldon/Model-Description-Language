@@ -53,27 +53,29 @@ namespace mdl::format {
 
 	/** @brief The style options (file `.mdl-format`, see loadStyle()). */
 	struct FormatOptions {
-		unsigned indentWidth = 4;	///< spaces per indentation level (continuation lines get twice as many)
-		unsigned columnLimit = 120; ///< longer lines are wrapped (after commas, else before binary operators)
-		unsigned maxEmptyLines = 1; ///< blank lines kept between definitions and statements
+		unsigned indentWidth = 4;	 ///< spaces per indentation level (continuation lines get twice as many)
+		unsigned columnLimit = 120;	 ///< longer lines are wrapped (after commas, else before binary operators)
+		unsigned maxEmptyLines = 1;	 ///< blank lines kept between definitions and statements
 		bool reflowComments = false; ///< comment lines longer than the column limit are broken between words
 		NamingOptions naming;
 	};
 
 	struct FormatResult {
-		std::string text;					  ///< the formatted source (the input if it cannot be formatted)
+		std::string text; ///< the formatted source (the input if it cannot be formatted)
 		/** @brief Syntax errors (a file with syntax errors is not formatted) and naming warnings (flag `naming`). */
 		std::vector<Diagnostic> diagnostics;
 		bool ok = false;
 	};
 
 	/** @brief Formats the source code @p source (named @p sourcename in diagnostics). */
-	FormatResult format(std::string_view source, const FormatOptions& options = {}, std::string_view sourcename = "<stdin>");
+	FormatResult
+	format(std::string_view source, const FormatOptions& options = {}, std::string_view sourcename = "<stdin>");
 
 	/**
 	 * @brief The naming warnings of @p source (empty if it has syntax errors); format() reports them as well.
 	 */
-	std::vector<Diagnostic> checkNaming(std::string_view source, const NamingOptions& naming, std::string_view sourcename = "<stdin>");
+	std::vector<Diagnostic>
+	checkNaming(std::string_view source, const NamingOptions& naming, std::string_view sourcename = "<stdin>");
 
 	/**
 	 * @brief Reads a style file: `Key: value` lines (a flat YAML map; `#` starts a comment). Keys: `IndentWidth`,

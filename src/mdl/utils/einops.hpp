@@ -10,24 +10,24 @@
 
 namespace mdl::einops {
 
-enum class AtomKind { Named, Anon, Ellipsis, Literal, Chunk };
+	enum class AtomKind { Named, Anon, Ellipsis, Literal, Chunk };
 
-struct Atom {
-	AtomKind kind;
-	std::string name; ///< for Named
-	int64_t value;    ///< for Literal (size) or Chunk (chunk size N in /N)
-};
+	struct Atom {
+		AtomKind kind;
+		std::string name; ///< for Named
+		int64_t value;	  ///< for Literal (size) or Chunk (chunk size N in /N)
+	};
 
-/// A spec item: a single atom (ungrouped) or a merged group (atoms in parens).
-struct SpecItem {
-	bool is_group;           ///< true → enclosed in parentheses
-	std::vector<Atom> atoms; ///< atoms inside (exactly 1 for ungrouped items)
-};
+	/// A spec item: a single atom (ungrouped) or a merged group (atoms in parens).
+	struct SpecItem {
+		bool is_group;			 ///< true → enclosed in parentheses
+		std::vector<Atom> atoms; ///< atoms inside (exactly 1 for ungrouped items)
+	};
 
-/// Parsed left- or right-hand side of an einops expression.
-using Spec = std::vector<SpecItem>;
+	/// Parsed left- or right-hand side of an einops expression.
+	using Spec = std::vector<SpecItem>;
 
-/**
+	/**
  * @brief Apply an einops rearrangement to a tensor in the compute graph.
  *
  * Emits PERMUTE, EXPAND, and/or RESHAPE InvocationNodes as needed to transform
@@ -45,11 +45,8 @@ using Spec = std::vector<SpecItem>;
  * @param dimBindings Named dimension → size node (from einops key=value pairs).
  * @return The result node, or an error message describing what went wrong.
  */
-std::expected<std::reference_wrapper<const Node>, std::string> apply(
-		Computegraph& graph,
-		const Node& input,
-		const Spec& lhs,
-		const Spec& rhs,
-		const std::map<std::string, const Node*>& dimBindings);
+	std::expected<std::reference_wrapper<const Node>, std::string>
+	apply(Computegraph& graph, const Node& input, const Spec& lhs, const Spec& rhs,
+		  const std::map<std::string, const Node*>& dimBindings);
 
 } // namespace mdl::einops

@@ -35,7 +35,8 @@ int main(int argc, char* argv[]) {
 	app.add_flag("-i,--in-place", inPlace, "Format the files in place.");
 	app.add_flag(
 			"--check,--dry-run", check,
-			"Only check: report the files that are not formatted or break the naming rules of the style, and exit with 1 "
+			"Only check: report the files that are not formatted or break the naming rules of the style, and exit with "
+			"1 "
 			"if there are any."
 	);
 	app.add_option("--style-file", styleFile, "The style file (default: the closest .mdl-format of each file).")
@@ -55,8 +56,8 @@ int main(int argc, char* argv[]) {
 		return *style;
 	};
 
-	auto formatOne = [&](const std::string& source, const std::string& name, const std::filesystem::path& stylePath)
-			-> std::optional<mdl::format::FormatResult> {
+	auto formatOne = [&](const std::string& source, const std::string& name,
+						 const std::filesystem::path& stylePath) -> std::optional<mdl::format::FormatResult> {
 		auto style = styleFor(stylePath);
 		if (!style)
 			return std::nullopt;
@@ -76,8 +77,10 @@ int main(int argc, char* argv[]) {
 			return 1;
 		}
 		if (check)
-			return result->text == source && std::none_of(result->diagnostics.begin(), result->diagnostics.end(),
-													   [](const auto& d) { return d.flag == "naming"; })
+			return result->text == source && std::none_of(
+													 result->diagnostics.begin(), result->diagnostics.end(),
+													 [](const auto& d) { return d.flag == "naming"; }
+											 )
 						   ? 0
 						   : 1;
 		std::cout << result->text;
@@ -97,9 +100,10 @@ int main(int argc, char* argv[]) {
 			status = 1;
 			continue;
 		}
-		const bool namingWarnings = std::any_of(result->diagnostics.begin(), result->diagnostics.end(), [](const auto& d) {
-			return d.flag == "naming";
-		});
+		const bool namingWarnings =
+				std::any_of(result->diagnostics.begin(), result->diagnostics.end(), [](const auto& d) {
+					return d.flag == "naming";
+				});
 		if (check) {
 			if (result->text != *source) {
 				std::cerr << file.string() << ": not formatted\n";

@@ -62,7 +62,7 @@ namespace mdl::builtins {
 		TAKE,			  /**< (table [V, ...], ids int[...]): the rows table[ids] ([..., ...]), e.g. embeddings */
 		SCATTER_ADD_ROWS, /**< (g [..., ...], ids int[...], like [V, ...]): zeros like `like`, plus g's rows added at ids
 							 (the adjoint of TAKE) */
-		ONE_HOT_LIKE,	  /**< (labels int[...], like [..., C]): 1.0 at labels, 0.0 elsewhere (like's shape; C classes) */
+		ONE_HOT_LIKE, /**< (labels int[...], like [..., C]): 1.0 at labels, 0.0 elsewhere (like's shape; C classes) */
 		/** Selection **/
 		WHERE, /**< (cond bool[...], a, b): a where cond, b elsewhere (all three broadcast) */
 		/** Masked tensors (resolved by the masking pass; backends never see them) **/
@@ -88,9 +88,9 @@ namespace mdl::builtins {
 	 * W[n, k] = scales[k/group, n] * (q[n, k] - zeros[k/group, n]) (the layout of GPTQ checkpoints and of oneDNN).
 	 */
 	enum class QuantFormat : int {
-		int8 = 1,		 ///< signed 8 bits, symmetric (no zeros)
-		int4 = 2,		 ///< signed 4 bits (-8..7), symmetric (no zeros)
-		int4Asym = 3,	 ///< unsigned 4 bits (0..15) with zeros
+		int8 = 1,	  ///< signed 8 bits, symmetric (no zeros)
+		int4 = 2,	  ///< signed 4 bits (-8..7), symmetric (no zeros)
+		int4Asym = 3, ///< unsigned 4 bits (0..15) with zeros
 	};
 
 	/** @brief Marks the position of the ellipsis group in a PERMUTE permutation (see FunctionIDs::PERMUTE). */

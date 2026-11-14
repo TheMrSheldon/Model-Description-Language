@@ -21,7 +21,11 @@ int mdls::Server::run() {
 		if (!message)
 			break;
 		if (message->is_discarded()) {
-			writeMessage(out, {{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", ParseError}, {"message", "invalid JSON"}}}});
+			writeMessage(
+					out,
+					{{"jsonrpc", "2.0"}, {"id", nullptr}, {"error", {{"code", ParseError}, {"message", "invalid JSON"}}}
+					}
+			);
 			continue;
 		}
 		handle(*message);
@@ -127,7 +131,7 @@ mdls::json mdls::Server::initialize(const json& params) {
 			for (const auto& dir : options["importDirs"])
 				parseOptions.importDirs.emplace_back(dir.get<std::string>());
 		const std::string type = options.value("float", "f32");
-		parseOptions.defaultFloat = type == "bf16"	 ? mdl::PrimitiveType::bfloat16
+		parseOptions.defaultFloat = type == "bf16"	? mdl::PrimitiveType::bfloat16
 									: type == "f16" ? mdl::PrimitiveType::float16
 													: mdl::PrimitiveType::float32;
 	}
@@ -195,9 +199,10 @@ void mdls::Server::analyze(Document& document) {
 	auto result = mdl::parser::analyze(stream, document.sourceName(), options);
 	document.sources = result.unit.sources;
 	// Keep the last index that has the document's definitions (the text may not parse while it is being typed).
-	const bool translated = std::any_of(result.index->references().begin(), result.index->references().end(), [&](const auto& r) {
-		return r.file == document.sourceName();
-	});
+	const bool translated =
+			std::any_of(result.index->references().begin(), result.index->references().end(), [&](const auto& r) {
+				return r.file == document.sourceName();
+			});
 	if (translated || document.index == nullptr) {
 		document.index = result.index;
 		document.indexText = document.text;
@@ -215,7 +220,9 @@ void mdls::Server::analyze(Document& document) {
 			continue; // in an imported file
 		json diagnostic{
 				{"range", toProtocol(lines, d.range)},
-				{"severity", d.severity == mdl::Severity::error ? 1 : d.severity == mdl::Severity::warning ? 2 : 3},
+				{"severity", d.severity == mdl::Severity::error		? 1
+							 : d.severity == mdl::Severity::warning ? 2
+																	: 3},
 				{"source", "mdls"},
 				{"message", d.hint.empty() ? d.message : d.message + "\nhint: " + d.hint},
 		};
@@ -240,7 +247,8 @@ std::optional<mdl::format::FormatOptions> mdls::Server::styleOf(const Document& 
 		auto loaded = mdl::format::loadStyle(*file);
 		if (!loaded)
 			logLine(loaded.error());
-		it = styles.insert_or_assign(*file, CachedStyle{modified, loaded ? std::optional{*loaded} : std::nullopt}).first;
+		it = styles.insert_or_assign(*file, CachedStyle{modified, loaded ? std::optional{*loaded} : std::nullopt})
+					 .first;
 	}
 	return it->second.style;
 }

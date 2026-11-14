@@ -32,11 +32,11 @@ namespace mdl::analysis {
 		std::string name;
 		SymbolKind kind;
 		std::string file;
-		SourceRange range;		   ///< of the name
-		std::string container;	   ///< the enclosing module or struct (empty for global definitions)
-		std::string detail;		   ///< the declaration as written, e.g. `W: float[outdim, indim]`
-		std::string documentation; ///< from the doc comment before it (Markdown)
-		SourceRange scope;		   ///< where it is visible (for globals: the whole file)
+		SourceRange range;			 ///< of the name
+		std::string container;		 ///< the enclosing module or struct (empty for global definitions)
+		std::string detail;			 ///< the declaration as written, e.g. `W: float[outdim, indim]`
+		std::string documentation;	 ///< from the doc comment before it (Markdown)
+		SourceRange scope;			 ///< where it is visible (for globals: the whole file)
 		std::set<std::string> types; ///< the types it has (one per distinct elaboration, e.g. symbolic and concrete)
 	};
 

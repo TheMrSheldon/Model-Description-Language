@@ -31,16 +31,14 @@ namespace std {
 } // namespace std
 
 std::string std::to_string(const PrimitiveType& prim) {
-	static std::string_view names[]{
-			[std::to_underlying(PrimitiveType::error)] = "<error>",
-			[std::to_underlying(PrimitiveType::float32)] = "float32",
-			[std::to_underlying(PrimitiveType::integer)] = "int",
-			[std::to_underlying(PrimitiveType::uint)] = "uint",
-			[std::to_underlying(PrimitiveType::boolean)] = "bool",
-			[std::to_underlying(PrimitiveType::float16)] = "float16",
-			[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16",
-			[std::to_underlying(PrimitiveType::int8)] = "int8"
-	};
+	static std::string_view names[]{[std::to_underlying(PrimitiveType::error)] = "<error>",
+									[std::to_underlying(PrimitiveType::float32)] = "float32",
+									[std::to_underlying(PrimitiveType::integer)] = "int",
+									[std::to_underlying(PrimitiveType::uint)] = "uint",
+									[std::to_underlying(PrimitiveType::boolean)] = "bool",
+									[std::to_underlying(PrimitiveType::float16)] = "float16",
+									[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16",
+									[std::to_underlying(PrimitiveType::int8)] = "int8"};
 	return std::string{names[std::to_underlying(prim)]};
 }
 std::string std::to_string(const AggregateType& agg) { return "Aggregate Type"; /** \todo implement **/ }

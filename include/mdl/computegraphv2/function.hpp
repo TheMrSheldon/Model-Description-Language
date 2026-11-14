@@ -58,7 +58,8 @@ namespace mdl {
 							invocationArgs.push_back(std::cref(static_cast<const Node&>(std::get<I>(argTuple))));
 						}
 					}(),
-					...);
+					...
+			);
 		}(std::make_index_sequence<N>{});
 
 		auto outputsOrErr = graph.addInvocationNode(decl, std::move(invocationArgs));

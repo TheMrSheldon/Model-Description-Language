@@ -21,17 +21,17 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <thread>
-#include <map>
-#include <optional>
-#include <vector>
-#include <mutex>
-#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace {
 	using dnnl::memory;
@@ -114,7 +114,9 @@ namespace {
 	__attribute__((target("f16c,avx"))) void halfToFloatF16C(const uint16_t* src, float* dst, int64_t n) {
 #pragma omp parallel for schedule(static)
 		for (int64_t i = 0; i < n / 8; ++i)
-			_mm256_storeu_ps(dst + 8 * i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 8 * i))));
+			_mm256_storeu_ps(
+					dst + 8 * i, _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src + 8 * i)))
+			);
 		for (int64_t i = n / 8 * 8; i < n; ++i)
 			dst[i] = _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(src[i])));
 	}
@@ -124,10 +126,12 @@ namespace {
 #pragma omp parallel for schedule(static)
 		for (int64_t i = 0; i < n / 8; ++i)
 			_mm_storeu_si128(
-					reinterpret_cast<__m128i*>(dst + 8 * i), _mm256_cvtps_ph(_mm256_loadu_ps(src + 8 * i), _MM_FROUND_TO_NEAREST_INT)
+					reinterpret_cast<__m128i*>(dst + 8 * i),
+					_mm256_cvtps_ph(_mm256_loadu_ps(src + 8 * i), _MM_FROUND_TO_NEAREST_INT)
 			);
 		for (int64_t i = n / 8 * 8; i < n; ++i)
-			dst[i] = static_cast<uint16_t>(_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT)));
+			dst[i] = static_cast<uint16_t>(_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT)
+			));
 	}
 
 	bool hasF16C() {
@@ -210,12 +214,12 @@ namespace {
 		}
 	};
 
-	void matmul(
-			dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
-			const void* addend, int activation, float alpha
-	) {
+	void
+	matmul(dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
+		   const void* addend, int activation, float alpha) {
 		using Key = std::tuple<
-				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool, int, float>;
+				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool,
+				int, float>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const memory::desc srcMd(a.dims, t, a.strides), wMd(b.dims, t, b.strides), dstMd(d.dims, t, d.strides);
 		const memory::dim N = d.dims.back();
@@ -302,7 +306,9 @@ namespace {
 		const memory::desc zerosMd({groups, N}, dt::u8, memory::format_tag::ab);
 		const memory::desc biasMd({1, N}, t, memory::format_tag::ab);
 
-		using Key = std::tuple<int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int, float>;
+		using Key = std::tuple<
+				int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int,
+				float>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), format, group, M, K, N, aM, aK, dM, dN, zeros != nullptr, bias != nullptr,
@@ -342,7 +348,8 @@ namespace {
 		if (!prim) { // dequantize W (in float32), then an ordinary matrix product with B = W^T
 			thread_local Scratch scratch;
 			thread_local std::vector<uint16_t> narrow;
-			const float* s32 = t == dt::f32 ? static_cast<const float*>(scales) : widened(scratch, 0, t, scales, groups * N);
+			const float* s32 =
+					t == dt::f32 ? static_cast<const float*>(scales) : widened(scratch, 0, t, scales, groups * N);
 			float* w = scratch.get(1, N * K);
 #pragma omp parallel for schedule(static)
 			for (int64_t n = 0; n < N; ++n)
@@ -382,7 +389,9 @@ namespace {
 				{DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, memory(scalesMd, engine(), const_cast<void*>(scales))},
 		};
 		if (zeros != nullptr)
-			args.emplace(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, memory(zerosMd, engine(), const_cast<int8_t*>(zeros)));
+			args.emplace(
+					DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, memory(zerosMd, engine(), const_cast<int8_t*>(zeros))
+			);
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
 		if (addend != nullptr)
@@ -401,16 +410,18 @@ namespace {
 		using Key = std::tuple<int, int64_t, int64_t>;
 		static PrimitiveCache<Key, std::optional<dnnl::softmax_forward>> cache;
 		const memory::desc md({outer, axis}, t, memory::format_tag::nc);
-		const auto& prim = cache.get(Key{static_cast<int>(t), outer, axis}, [&]() -> std::optional<dnnl::softmax_forward> {
-			auto create = [&] {
-				return dnnl::softmax_forward::primitive_desc(
-						engine(), dnnl::prop_kind::forward_inference, dnnl::algorithm::softmax_accurate, md, md, 1
-				);
-			};
-			if (t != dt::f32 && !implemented(create))
-				return std::nullopt;
-			return dnnl::softmax_forward(create());
-		});
+		const auto& prim =
+				cache.get(Key{static_cast<int>(t), outer, axis}, [&]() -> std::optional<dnnl::softmax_forward> {
+					auto create = [&] {
+						return dnnl::softmax_forward::primitive_desc(
+								engine(), dnnl::prop_kind::forward_inference, dnnl::algorithm::softmax_accurate, md, md,
+								1
+						);
+					};
+					if (t != dt::f32 && !implemented(create))
+						return std::nullopt;
+					return dnnl::softmax_forward(create());
+				});
 		if (!prim) {
 			thread_local Scratch scratch;
 			float* x = widened(scratch, 0, t, src, outer * axis);
@@ -419,7 +430,8 @@ namespace {
 			return;
 		}
 		prim->execute(
-				stream(), {{DNNL_ARG_SRC, memory(md, engine(), const_cast<void*>(src))}, {DNNL_ARG_DST, memory(md, engine(), dst)}}
+				stream(), {{DNNL_ARG_SRC, memory(md, engine(), const_cast<void*>(src))},
+						   {DNNL_ARG_DST, memory(md, engine(), dst)}}
 		);
 		stream().wait();
 	}
@@ -431,7 +443,8 @@ namespace {
 		const auto& prim = cache.get(Key{static_cast<int>(t), n}, [&]() -> std::optional<dnnl::eltwise_forward> {
 			auto create = [&] {
 				return dnnl::eltwise_forward::primitive_desc(
-						engine(), dnnl::prop_kind::forward_inference, dnnl::algorithm::eltwise_gelu_erf, md, md, 0.f, 0.f
+						engine(), dnnl::prop_kind::forward_inference, dnnl::algorithm::eltwise_gelu_erf, md, md, 0.f,
+						0.f
 				);
 			};
 			if (t != dt::f32 && !implemented(create))
@@ -446,7 +459,8 @@ namespace {
 			return;
 		}
 		prim->execute(
-				stream(), {{DNNL_ARG_SRC, memory(md, engine(), const_cast<void*>(src))}, {DNNL_ARG_DST, memory(md, engine(), dst)}}
+				stream(), {{DNNL_ARG_SRC, memory(md, engine(), const_cast<void*>(src))},
+						   {DNNL_ARG_DST, memory(md, engine(), dst)}}
 		);
 		stream().wait();
 	}
@@ -507,7 +521,8 @@ namespace {
 	}
 
 	void layerNorm(
-			dt t, void* dst, const void* src, const void* scale, const void* shift, int64_t rows, int64_t channels, float eps
+			dt t, void* dst, const void* src, const void* scale, const void* shift, int64_t rows, int64_t channels,
+			float eps
 	) {
 		using Key = std::tuple<int, int64_t, int64_t, float>;
 		static PrimitiveCache<Key, std::optional<dnnl::layer_normalization_forward>> cache;
@@ -515,7 +530,8 @@ namespace {
 		const memory::desc statMd({rows}, dt::f32, memory::format_tag::a);
 		const memory::desc vecMd({channels}, t, memory::format_tag::a);
 		const auto& prim = cache.get(
-				Key{static_cast<int>(t), rows, channels, eps}, [&]() -> std::optional<dnnl::layer_normalization_forward> {
+				Key{static_cast<int>(t), rows, channels, eps},
+				[&]() -> std::optional<dnnl::layer_normalization_forward> {
 					auto create = [&] {
 						return dnnl::layer_normalization_forward::primitive_desc(
 								engine(), dnnl::prop_kind::forward_inference, md, md, statMd, eps,
@@ -559,25 +575,25 @@ namespace {
 
 #define MDL_MATMUL(suffix, type, dtype)                                                                                \
 	extern "C" int mdl_matmul_##suffix(                                                                                \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,      \
-			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,    \
+			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,       \
+			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,     \
 			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
 			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
 			/* A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not  \
-			   with a bias along N, or a broadcast B, which would become the left operand). */                         \
-			const bool broadcastB = (b0 > 1 && b_s0 == 0) || (b1 > 1 && b_s1 == 0);                                   \
+			   with a bias along N, or a broadcast B, which would become the left operand). */  \
+			const bool broadcastB = (b0 > 1 && b_s0 == 0) || (b1 > 1 && b_s1 == 0);                                    \
 			if (d_sM == 1 && d_sN != 1 && !has_bias && !broadcastB) {                                                  \
 				const int64_t aM = a_sM, aK = a_sK, bK = b_sK, bN = b_sN;                                              \
-				std::swap(A, B), std::swap(M, N), std::swap(a_s0, b_s0), std::swap(a_s1, b_s1);                         \
+				std::swap(A, B), std::swap(M, N), std::swap(a_s0, b_s0), std::swap(a_s1, b_s1);                        \
 				a_sM = bN, a_sK = bK, b_sK = aK, b_sN = aM;                                                            \
 				std::swap(d_sM, d_sN);                                                                                 \
 			}                                                                                                          \
 			/* Batch dimensions of size 1 are left out (oneDNN's brgemm computes wrong results for some strided   \
-			   layouts with them); B's broadcast batch dimensions (stride 0) have size 1 for oneDNN. */                  \
+			   layouts with them); B's broadcast batch dimensions (stride 0) have size 1 for oneDNN. */    \
 			View a{{}, {}}, b{{}, {}}, d{{}, {}};                                                                      \
-			const int64_t sizes[2] = {b0, b1}, as[2] = {a_s0, a_s1}, bs[2] = {b_s0, b_s1}, ds[2] = {d_s0, d_s1};      \
+			const int64_t sizes[2] = {b0, b1}, as[2] = {a_s0, a_s1}, bs[2] = {b_s0, b_s1}, ds[2] = {d_s0, d_s1};       \
 			for (int i = 0; i < 2; ++i) {                                                                              \
 				if (sizes[i] == 1)                                                                                     \
 					continue;                                                                                          \
@@ -593,31 +609,33 @@ namespace {
 		});                                                                                                            \
 	}                                                                                                                  \
 	extern "C" int mdl_matmul_q_##suffix(                                                                              \
-			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,    \
-			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,       \
-			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,           \
+			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,     \
+			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,        \
+			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,            \
 			int32_t activation, float alpha                                                                            \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
-			matmulQuantized(dtype, dst, A, q, scales, has_zeros ? zeros : nullptr, format, group,                      \
-							has_bias ? bias : nullptr, M, K, N, a_sM, a_sK, d_sM, d_sN, has_addend ? addend : nullptr, \
-							activation, alpha);                                                                        \
+			matmulQuantized(                                                                                           \
+					dtype, dst, A, q, scales, has_zeros ? zeros : nullptr, format, group, has_bias ? bias : nullptr,   \
+					M, K, N, a_sM, a_sK, d_sM, d_sN, has_addend ? addend : nullptr, activation, alpha                  \
+			);                                                                                                         \
 		});                                                                                                            \
 	}                                                                                                                  \
-	extern "C" int mdl_softmax_##suffix(type* dst, const type* src, int64_t outer, int64_t axis) {                    \
+	extern "C" int mdl_softmax_##suffix(type* dst, const type* src, int64_t outer, int64_t axis) {                     \
 		return guarded([&] { softmax(dtype, dst, src, outer, axis); });                                                \
 	}                                                                                                                  \
-	extern "C" int mdl_gelu_##suffix(type* dst, const type* src, int64_t n) {                                         \
+	extern "C" int mdl_gelu_##suffix(type* dst, const type* src, int64_t n) {                                          \
 		return guarded([&] { gelu(dtype, dst, src, n); });                                                             \
 	}                                                                                                                  \
-	extern "C" int mdl_gelu_backward_##suffix(type* dx, const type* x, const type* dy, int64_t n) {                   \
+	extern "C" int mdl_gelu_backward_##suffix(type* dx, const type* x, const type* dy, int64_t n) {                    \
 		return guarded([&] { geluBackward(dtype, dx, x, dy, n); });                                                    \
 	}                                                                                                                  \
-	extern "C" int mdl_sum_rows_##suffix(type* dst, const type* src, int64_t M, int64_t N) {                          \
+	extern "C" int mdl_sum_rows_##suffix(type* dst, const type* src, int64_t M, int64_t N) {                           \
 		return guarded([&] { sumRows(dtype, dst, src, M, N); });                                                       \
 	}                                                                                                                  \
 	extern "C" int mdl_layer_norm_##suffix(                                                                            \
-			type* dst, const type* src, const type* scale, const type* shift, int64_t rows, int64_t channels, float eps \
+			type* dst, const type* src, const type* scale, const type* shift, int64_t rows, int64_t channels,          \
+			float eps                                                                                                  \
 	) {                                                                                                                \
 		return guarded([&] { layerNorm(dtype, dst, src, scale, shift, rows, channels, eps); });                        \
 	}

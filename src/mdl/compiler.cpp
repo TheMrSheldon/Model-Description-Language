@@ -9,10 +9,8 @@
 #include <mdl/exports.hpp>
 
 void mdl::compileToFile(
-		const std::vector<mdl::ExportedFunction>& exports,
-		const std::filesystem::path& output,
-		const mdl::ArgVals& argvals,
-		const mdl::CompileOptions& opts
+		const std::vector<mdl::ExportedFunction>& exports, const std::filesystem::path& output,
+		const mdl::ArgVals& argvals, const mdl::CompileOptions& opts
 ) {
 #ifdef MDL_IREE_ENABLED
 	if (opts.backend == mdl::Backend::Iree) {

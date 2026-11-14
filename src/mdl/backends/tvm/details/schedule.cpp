@@ -87,8 +87,9 @@ namespace mdl::backend::tvm {
 
 		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
 			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
-			Schedule sch = Schedule::Concrete(mod, /*seed=*/0, /*debug_mask=*/0,
-											  ::tvm::s_tir::ScheduleErrorRenderLevel::kNone);
+			Schedule sch = Schedule::Concrete(
+					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
+			);
 			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
 			// Fused kernels consist of one block per operation: inline the elementwise producers into their consumers,
 			// so that intermediates are not materialized (one pass over the data instead of one per operation).
