@@ -329,7 +329,8 @@ stored quantized (int8/int4); this is a build setting and does not change the mo
   `-a`. Addition is assumed by the optimizer to be commutative and associative.
 - Transpose of the last two dimensions: `W.T()`.
 - Indexing like NumPy: `h[..., 0, :]` (integers select and remove an axis, `:` keeps one, `...` stands for the axes
-  that are not listed); indices are compile-time integers.
+  that are not listed); these indices are compile-time integers. An integer tensor as the only index selects rows:
+  `table[ids]` with `table: float[num, dim]` and `ids: int[...]` is `float[..., dim]` (e.g. an embedding lookup).
 - Einops: `x[... (h d) -> h ... d | h=heads]` (see [einops.md](einops.md)).
 - Compile-time conditional: `cond ? a : b`.
 - Float conversion: `float32(x)`, `bfloat16(x)`, `float16(x)`, `float(x)`.

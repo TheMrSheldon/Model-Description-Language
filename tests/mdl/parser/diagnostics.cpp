@@ -211,3 +211,28 @@ TEST_CASE("sizes that may differ are warnings, and errors in strict mode", "[par
 	CHECK(correct.ok);
 	CHECK(correct.diagnostics.empty());
 }
+
+TEST_CASE("an integer tensor index selects rows", "[parser][diagnostics]") {
+	auto ok = analyzeSource(R"(
+		module Embedding[num: uint, dim: uint] {
+			table: float[num, dim]
+			float[..., dim] forward(ids: int[...]) => table[ids];
+		}
+		module Net[] {
+			e: Embedding[10, 4]
+			float[..., 4] forward(ids: int[...]) => e(ids);
+		})");
+	CHECK(ok.ok);
+	CHECK(ok.diagnostics.empty());
+
+	auto floatIndex = analyzeSource("module M[] { t: float[3, 4] float[..., 4] f(x: float[...]) => t[x]; }");
+	REQUIRE(floatIndex.diagnostics.size() == 1);
+	CHECK(floatIndex.diagnostics[0].message == "A tensor index must be an integer tensor, but it is float32[...]");
+
+	auto mixed = analyzeSource("module M[] { t: float[3, 4] float[...] f(ids: int[...]) => t[ids, 0]; }");
+	REQUIRE(mixed.diagnostics.size() == 1);
+	CHECK(mixed.diagnostics[0].message == "An integer tensor index selects rows: it must be the only index (`table[ids]`)");
+
+	auto removed = analyzeSource("module M[] { t: float[3, 4] float[..., 4] f(ids: int[...]) => __builtin_take(t, ids); }");
+	CHECK_FALSE(removed.ok); // the builtin's name is gone: indexing is the way to select rows
+}

@@ -2749,6 +2749,30 @@ namespace mdl {
 			const auto* node = std::get_if<const Node*>(&base);
 			if (node == nullptr || !std::holds_alternative<TensorType>(mdl::getDataType(**node)))
 				return error(ctx->base->start, "Only arrays and tensors can be indexed");
+
+			// An integer tensor as the index selects rows: `table[ids]` is [..ids.., rest of table] (like NumPy).
+			for (size_t i = 0; i < ctx->indices.size(); ++i) {
+				auto* value = dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[i]);
+				if (value == nullptr)
+					continue;
+				const Node* index = asNode(value->expr()->accept(this), value->expr()->start);
+				const auto* indexType = std::get_if<TensorType>(&getDataType(*index));
+				if (indexType == nullptr)
+					continue; // a compile-time integer (below)
+				if (indexType->type != PrimitiveType::integer && indexType->type != PrimitiveType::uint)
+					return error(
+							value->start, std::format(
+												  "A tensor index must be an integer tensor, but it is {}",
+												  shapes::str(getDataType(*index))
+										  )
+					);
+				if (ctx->indices.size() != 1)
+					return error(
+							value->start, "An integer tensor index selects rows: it must be the only index "
+										  "(`table[ids]`)"
+					);
+				return &graph().addInvocationNode(builtins::FunctionIDs::TAKE, {std::cref(**node), std::cref(*index)});
+			}
 			std::vector<std::pair<int, int>> leading, trailing; // (axis, index); trailing axes count from the end
 			std::optional<size_t> ellipsis;
 			for (size_t i = 0; i < ctx->indices.size(); ++i) {
