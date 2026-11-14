@@ -1,6 +1,7 @@
 #include <mdl/computegraphv2/builtins.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
 #include <mdl/computegraphv2/node.hpp>
+#include <mdl/passes/shapes.hpp>
 #include <mdl/utils/einops.hpp>
 
 #include <algorithm>
@@ -682,4 +683,23 @@ std::expected<std::reference_wrapper<const Node>, std::string> mdl::einops::appl
 		return std::unexpected(afterRemerge.error());
 
 	return std::cref(**afterRemerge);
+}
+
+std::map<std::string, std::string> mdl::einops::axisSizes(
+		const Node& input, const Spec& lhs, const Spec& rhs, const std::map<std::string, const Node*>& dimBindings
+) {
+	std::map<std::string, std::string> result;
+	const auto* type = std::get_if<TensorType>(&getDataType(input));
+	if (type == nullptr)
+		return result;
+	auto sizes = buildDimSizes(lhs, rhs, *type, dimBindings);
+	if (!sizes)
+		return result;
+	for (const auto& [name, size] : *sizes) {
+		if (const auto* n = std::get_if<int64_t>(&size))
+			result[name] = std::to_string(*n);
+		else if (const auto* node = std::get_if<const Node*>(&size); node && *node != nullptr)
+			result[name] = mdl::shapes::Dim::of(**node).str();
+	}
+	return result;
 }

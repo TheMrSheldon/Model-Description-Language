@@ -288,3 +288,134 @@ TEST_CASE("mdls shows the documentation of imported files and goes to them", "[m
 	CHECK((*response(messages, 3))["result"]["uri"].get<std::string>().ends_with("/std/nn.dlm"));
 	CHECK((*response(messages, 4))["result"].size() > 3); // all files of std
 }
+
+namespace {
+	const std::string features = R"(import std;
+struct Conf { dims: struct { model: uint heads: uint } }
+/** @brief Attention. @param conf the sizes */
+module Att[conf: Conf] {
+    proj: Linear[conf.dims.model, conf.dims.model]
+    W: float[conf.dims.model, conf.dims.model]
+    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
+        auto q = proj(x) @ W;
+        auto split = q[... (h d) -> h ... d | h=conf.dims.heads];
+        return split[h ... d -> ... (h d)];
+    }
+}
+module Net[] {
+    l: Linear[8, 3, true]
+    w: bfloat16[8]
+    float[..., 3] forward(x: float[..., 8]) => l(x * w);
+}
+)";
+
+	json range(int fromLine, int toLine) {
+		return {{"start", {{"line", fromLine}, {"character", 0}}}, {"end", {{"line", toLine}, {"character", 0}}}};
+	}
+} // namespace
+
+TEST_CASE("mdls shows signatures of calls and instantiations", "[mdls]") {
+	auto messages = session({open(features), request(1, "textDocument/signatureHelp", 4, 33)});
+	const auto& help = (*response(messages, 1))["result"];
+	REQUIRE(help["signatures"].size() == 1);
+	CHECK(help["signatures"][0]["label"] == "module Linear[indim: uint, outdim: uint, bias: bool = true]");
+	CHECK(help["activeParameter"] == 1); // after the first comma
+	CHECK(help["signatures"][0]["parameters"].size() == 3);
+}
+
+TEST_CASE("mdls shows inferred types, axis sizes, and hyperparameter names inline", "[mdls]") {
+	auto request_ = request(1, "textDocument/inlayHint");
+	request_["params"]["range"] = range(0, 30);
+	auto messages = session({open(features), request_});
+	std::set<std::string> labels;
+	for (const auto& hint : (*response(messages, 1))["result"])
+		labels.insert(hint["label"].get<std::string>());
+	CHECK(labels.contains(": float32[..., conf.dims.model]")); // auto q
+	CHECK(labels.contains("=conf.dims.heads"));				   // the axis h
+	CHECK(labels.contains("indim:"));						   // Linear[8, ...]
+	CHECK(labels.contains("outdim:"));
+}
+
+TEST_CASE("mdls hovers auto, einops axes, and weights", "[mdls]") {
+	auto messages = session({open(features), request(1, "textDocument/hover", 7, 9), request(2, "textDocument/hover", 8, 28),
+							 request(3, "textDocument/hover", 7, 28)});
+	const std::string autoHover = (*response(messages, 1))["result"]["contents"]["value"];
+	CHECK(autoHover.find("auto q: float32[..., conf.dims.model]") != std::string::npos);
+	const std::string axis = (*response(messages, 2))["result"]["contents"]["value"];
+	CHECK(axis == "*einops axis* `h`: size `conf.dims.heads`");
+	const std::string weight = (*response(messages, 3))["result"]["contents"]["value"];
+	CHECK(weight.find("Weight: `W`") != std::string::npos);
+}
+
+TEST_CASE("mdls finds references, highlights, and renames", "[mdls]") {
+	auto references = request(1, "textDocument/references", 7, 13);
+	references["params"]["context"] = {{"includeDeclaration", true}};
+	auto renaming = request(2, "textDocument/rename", 7, 13);
+	renaming["params"]["newName"] = "query";
+	auto library = request(3, "textDocument/prepareRename", 4, 12); // Linear (std)
+	auto messages = session({open(features), references, renaming, library,
+							 request(4, "textDocument/documentHighlight", 8, 28)});
+	CHECK((*response(messages, 1))["result"].size() == 2); // q's declaration and use
+	const auto& edits = (*response(messages, 2))["result"]["changes"][uri];
+	REQUIRE(edits.size() == 2);
+	CHECK(edits[0]["newText"] == "query");
+	CHECK((*response(messages, 3)).contains("error")); // definitions of std are not renamed
+	CHECK((*response(messages, 4))["result"].size() == 3); // h on both sides of `->` and in the binding
+}
+
+TEST_CASE("mdls offers quick fixes", "[mdls]") {
+	auto actions = request(1, "textDocument/codeAction");
+	actions["params"]["range"] = range(13, 16);
+	actions["params"]["context"] = {{"diagnostics", json::array()}};
+	auto imports = request(2, "textDocument/codeAction");
+	imports["params"]["range"] = range(0, 2);
+	imports["params"]["context"] = {{"diagnostics", json::array()}};
+	auto messages = session({open(features), actions});
+	std::set<std::string> titles;
+	for (const auto& a : (*response(messages, 1))["result"])
+		titles.insert(a["title"].get<std::string>());
+	CHECK(titles == std::set<std::string>{"Write `.bias=true`", "Convert to float32"});
+
+	auto missing = session({open("float[...] f(x: float[...]) => softmax(x);\n"), imports});
+	const auto& add = (*response(missing, 2))["result"];
+	REQUIRE(add.size() == 1);
+	CHECK(add[0]["title"] == "Import std.activations");
+}
+
+TEST_CASE("mdls goes to struct members, folds, and formats ranges", "[mdls]") {
+	auto formatRange = request(3, "textDocument/rangeFormatting");
+	formatRange["params"]["range"] = range(1, 2);
+	auto messages = session({open(features), request(1, "textDocument/definition", 4, 28),
+							 request(2, "textDocument/foldingRange")});
+	CHECK((*response(messages, 1))["result"]["range"]["start"] == json{{"line", 1}, {"character", 29}}); // dims
+	CHECK((*response(messages, 2))["result"].size() >= 3);
+
+	auto formatted = session({open("module A[]{W:float[3]}\nmodule B[]{W:float[3]}\n"), formatRange});
+	const auto& edits = (*response(formatted, 3))["result"];
+	REQUIRE(edits.size() == 1);
+	CHECK(edits[0]["range"]["start"]["line"] == 0); // the changed lines (both modules change)
+}
+
+TEST_CASE("mdls highlights Doxygen commands and their arguments in doc comments", "[mdls]") {
+	const std::string text = "/**\n * @brief Uses \\p x and \\f$x^2\\f$ (see \\cite layernorm).\n * @param[in] x the input"
+							 "\n * \\ref Linear, mail@example.com\n */\nfloat[...] f(x: float[...]) => x;\n";
+	const auto tokens = mdls::semanticTokens(text);
+	const auto& types = mdls::semanticTokenTypes();
+	auto at = [&](size_t line, size_t column) -> std::pair<std::string, size_t> {
+		for (const auto& t : tokens)
+			if (t.line == line && t.column == column)
+				return {types[t.type], t.length};
+		return {"", 0};
+	};
+	CHECK(at(1, 3) == std::pair<std::string, size_t>{"keyword", 6});	// @brief
+	CHECK(at(1, 15) == std::pair<std::string, size_t>{"keyword", 2});	// \p
+	CHECK(at(1, 18) == std::pair<std::string, size_t>{"parameter", 1}); // x
+	CHECK(at(1, 24) == std::pair<std::string, size_t>{"string", 9});	// \f$x^2\f$
+	CHECK(at(1, 45) == std::pair<std::string, size_t>{"label", 9});		// layernorm
+	CHECK(at(2, 3) == std::pair<std::string, size_t>{"keyword", 6});	// @param
+	CHECK(at(2, 14) == std::pair<std::string, size_t>{"parameter", 1}); // x (after [in])
+	CHECK(at(3, 8) == std::pair<std::string, size_t>{"label", 6});		// Linear
+	CHECK(at(3, 19).first.empty());									// mail@example.com is no command
+	const auto& modifiers = mdls::semanticTokenModifiers();
+	CHECK(std::find(modifiers.begin(), modifiers.end(), "documentation") != modifiers.end());
+}

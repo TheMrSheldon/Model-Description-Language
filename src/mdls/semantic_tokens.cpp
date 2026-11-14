@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <map>
+#include <regex>
 #include <set>
 
 using antlr4::mdlLexer;
@@ -24,8 +25,11 @@ namespace {
 		Method,
 		Decorator,
 		Axis,
+		Keyword, ///< (only in doc comments: the commands)
+		Label,	 ///< (only in doc comments: targets of `\ref`, `\see`, keys of `\cite`)
+		String,	 ///< (only in doc comments: math)
 	};
-	enum Modifier : unsigned { Declaration = 1, Readonly = 2, DefaultLibrary = 4 };
+	enum Modifier : unsigned { Declaration = 1, Readonly = 2, DefaultLibrary = 4, Documentation = 8 };
 
 	const std::set<std::string> primitiveTypes{"float", "float32", "float16", "bfloat16", "int", "uint", "bool"};
 
@@ -254,16 +258,107 @@ namespace {
 	};
 } // namespace
 
+namespace {
+	/**
+	 * @brief The Doxygen commands of a doc comment (`/** *\/`, `///`) and their arguments: commands as keywords,
+	 * parameter names (`@param x`, `\p x`) as parameters, targets of `\ref`, `\see`, `\sa` and keys of `\cite` as
+	 * labels, math as strings (all with the modifier `documentation`).
+	 */
+	void docCommentTokens(const antlr4::Token& token, std::vector<mdls::SemanticToken>& out) {
+		const std::string text = token.getText();
+		if (!(text.starts_with("/**") || text.starts_with("/*!") || text.starts_with("///") || text.starts_with("//!")))
+			return;
+		// Positions: line and code-point column of each byte offset.
+		auto points = [](std::string_view v) {
+			return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; }));
+		};
+		auto position = [&](size_t offset) {
+			const size_t lineStart = text.rfind('\n', offset == 0 ? 0 : offset - 1);
+			const size_t newlines = std::count(text.begin(), text.begin() + offset, '\n');
+			const size_t line = token.getLine() - 1 + newlines;
+			const size_t column =
+					newlines == 0 ? token.getCharPositionInLine() + points(std::string_view{text}.substr(0, offset))
+								  : points(std::string_view{text}.substr(lineStart + 1, offset - lineStart - 1));
+			return std::pair{line, column};
+		};
+		auto emit = [&](size_t offset, size_t length, unsigned type) {
+			// (one line at a time: tokens do not span lines)
+			while (length > 0) {
+				const size_t newline = text.find('\n', offset);
+				const size_t piece = newline == std::string::npos ? length : std::min(length, newline - offset);
+				const auto [line, column] = position(offset);
+				if (piece > 0)
+					out.push_back(
+							{line, column, points(std::string_view{text}.substr(offset, piece)), type, Documentation}
+					);
+				if (piece == length)
+					break;
+				length -= piece + 1;
+				offset = newline + 1;
+			}
+		};
+		// The word after offset @p from (skipping spaces); its offset and length (0 if none).
+		auto word = [&](size_t from) -> std::pair<size_t, size_t> {
+			size_t begin = text.find_first_not_of(" \t", from);
+			if (begin == std::string::npos || text[begin] == '\n')
+				return {from, 0};
+			size_t end = begin;
+			while (end < text.size() && (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_' ||
+										 text[end] == '.' || text[end] == ':' || text[end] == '-'))
+				++end;
+			while (end > begin && (text[end - 1] == '.' || text[end - 1] == ':'))
+				--end; // (sentence punctuation)
+			return {begin, end - begin};
+		};
+		const std::regex command{R"([@\\](f[$(\[{]|[a-zA-Z]+))"};
+		for (std::sregex_iterator it{text.begin(), text.end(), command}, end; it != end; ++it) {
+			const size_t at = static_cast<size_t>(it->position());
+			if (at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '\\'))
+				continue; // (e.g. an e-mail address)
+			const std::string name = (*it)[1];
+			if (name.starts_with("f")) {
+				// Math up to the matching end (`\f$`, `\f)`, `\f]`, `\f}`).
+				if (name.size() == 2) {
+					const char close = name[1] == '$' ? '$' : name[1] == '(' ? ')' : name[1] == '[' ? ']' : '}';
+					size_t stop = at + 3;
+					while ((stop = text.find(std::string{"f"} + close, stop)) != std::string::npos &&
+						   !(stop > 0 && (text[stop - 1] == '\\' || text[stop - 1] == '@')))
+						++stop;
+					if (stop != std::string::npos) {
+						emit(at, stop + 2 - at, String);
+						continue;
+					}
+				}
+			}
+			emit(at, it->length(), Keyword);
+			const size_t after = at + static_cast<size_t>(it->length());
+			if (name == "param" || name == "tparam") {
+				size_t from = after;
+				if (from < text.size() && text[from] == '[') // `@param[in]`
+					from = text.find(']', from) == std::string::npos ? from : text.find(']', from) + 1;
+				if (auto [begin, length] = word(from); length > 0)
+					emit(begin, length, Parameter);
+			} else if (name == "p") {
+				if (auto [begin, length] = word(after); length > 0)
+					emit(begin, length, Parameter);
+			} else if (name == "ref" || name == "cite" || name == "see" || name == "sa") {
+				if (auto [begin, length] = word(after); length > 0)
+					emit(begin, length, Label);
+			}
+		}
+	}
+} // namespace
+
 const std::vector<std::string>& mdls::semanticTokenTypes() {
 	static const std::vector<std::string> types{
-			"namespace", "type",	 "class",	 "struct", "typeParameter", "parameter",
-			"variable",	 "property", "function", "method", "decorator",		"axis",
+			"namespace", "type",   "class",		"struct", "typeParameter", "parameter", "variable", "property",
+			"function",	 "method", "decorator", "axis",	  "keyword",	   "label",		"string",
 	};
 	return types;
 }
 
 const std::vector<std::string>& mdls::semanticTokenModifiers() {
-	static const std::vector<std::string> modifiers{"declaration", "readonly", "defaultLibrary"};
+	static const std::vector<std::string> modifiers{"declaration", "readonly", "defaultLibrary", "documentation"};
 	return modifiers;
 }
 
@@ -277,6 +372,9 @@ std::vector<mdls::SemanticToken> mdls::semanticTokens(std::string_view text) {
 	Classifier classifier;
 	classifier.program(parser.program());
 	auto tokens = std::move(classifier.tokens);
+	for (auto* t : stream.getTokens())
+		if (t->getType() == mdlLexer::BLOCKCOMMENT || t->getType() == mdlLexer::LINECOMMENT)
+			docCommentTokens(*t, tokens);
 	std::sort(tokens.begin(), tokens.end(), [](const auto& a, const auto& b) {
 		return std::pair{a.line, a.column} < std::pair{b.line, b.column};
 	});

@@ -285,8 +285,55 @@ namespace mdl {
 				if (auto type = objectType(*value); !type.empty())
 					r.types.insert(type);
 				r.members = objectMembers(*value);
+				if (auto path = weightPath(*value))
+					r.weights.insert(*path);
 			}
 			index()->reference(std::move(r));
+		}
+
+		/** @brief The full path of the weight @p value (e.g. `layers.3.weightQuery.W`), if it is one. */
+		static std::optional<std::string> weightPath(const Object& value) {
+			const auto* node = std::get_if<const Node*>(&value);
+			const auto* weight = node ? std::get_if<ParameterNode>(*node) : nullptr;
+			if (weight == nullptr || weight->name.empty() || std::holds_alternative<BoundModuleType>(weight->type))
+				return std::nullopt;
+			return weight->name;
+		}
+
+		/** @brief A key of the structure of @p type (to find the struct a value of the type belongs to). */
+		static std::string aggregateKey(const AggregateType& type) {
+			std::string key = "{";
+			for (const auto& [name, member] : type.members) {
+				key += name + ":";
+				if (const auto* nested = std::get_if<AggregateType>(&member))
+					key += aggregateKey(*nested);
+				else
+					key += typeString(member);
+				key += ";";
+			}
+			return key + "}";
+		}
+
+		/** @brief The struct (or `struct.member` for inline struct types) of each struct type (for the index). */
+		std::map<std::string, std::string> structContainers;
+
+		/** @brief Defines the members of the struct type @p ctxMembers in the index (recursively for inline structs). */
+		void defineStructMembers(
+				const std::vector<mdlParser::VardeclContext*>& vars, const AggregateType& type,
+				const std::string& container, antlr4::ParserRuleContext* scope
+		) {
+			structContainers.try_emplace(aggregateKey(type), container);
+			for (auto* var : vars) {
+				if (!var->IDENT() || !type.members.contains(var->IDENT()->getText()))
+					continue;
+				const auto& member = type.members.at(var->IDENT()->getText());
+				define(var->IDENT()->getSymbol(), analysis::SymbolKind::member, sourceText(var), var, rangeOf(scope),
+					   {typeString(member)}, container);
+				const auto* nested = std::get_if<AggregateType>(&member);
+				auto* anon = dynamic_cast<mdlParser::AnonTypeContext*>(var->type());
+				if (nested != nullptr && anon != nullptr)
+					defineStructMembers(anon->vardecl(), *nested, container + "." + var->IDENT()->getText(), scope);
+			}
 		}
 
 		/** @brief The range of the whole file of @p ctx (the scope of global definitions). */
@@ -757,10 +804,8 @@ namespace mdl {
 						ctx->IDENT()->getSymbol(), analysis::SymbolKind::structure, "struct " + name, ctx, fileScope()
 				);
 			}
-			for (auto* var : ctx->vardecl())
-				if (var->IDENT() && s.members.contains(var->IDENT()->getText()))
-					define(var->IDENT()->getSymbol(), analysis::SymbolKind::member, sourceText(var), var, rangeOf(ctx),
-						   {typeString(s.members.at(var->IDENT()->getText()))}, name);
+			if (index() != nullptr)
+				defineStructMembers(ctx->vardecl(), s, name, ctx);
 			return std::make_pair(name, s);
 		}
 
@@ -1233,6 +1278,15 @@ namespace mdl {
 			return omitted;
 		}
 
+		/** @brief A fix that replaces @p range by the code of a hint ``write `code` `` (none for other hints). */
+		static std::vector<Diagnostic::Fix> hintFix(const std::string& hint, SourceRange range) {
+			const auto open = hint.find('`'), close = hint.rfind('`');
+			if (!hint.starts_with("write `") || close == open)
+				return {};
+			const std::string code = hint.substr(open + 1, close - open - 1);
+			return {{.title = "Write `" + code + "`", .edits = {{range, code}}}};
+		}
+
 		/** @brief The source line of @p tok with the token marked (for diagnostics). */
 		std::vector<PrettyErrorListener::ContextLine> tokenContext(antlr4::Token* tok) const {
 			return {
@@ -1416,7 +1470,8 @@ namespace mdl {
 									  ),
 									  .markBegin = arg->start->getCharPositionInLine(),
 									  .markWidth = arg->stop->getStopIndex() - arg->start->getStartIndex() + 1}},
-									arg->start->getLine(), arg->start->getCharPositionInLine(), e.message, e.hint
+									arg->start->getLine(), arg->start->getCharPositionInLine(), e.message, e.hint, "",
+									hintFix(e.hint, rangeOf(arg))
 							);
 						} else {
 							errorlistener->semanticError(
@@ -1906,7 +1961,15 @@ namespace mdl {
 			auto result = accessExpression(ctx, base);
 			if (index() != nullptr && ctx->IDENT() != nullptr) {
 				analysis::Reference r{.file = currentFile(), .range = rangeOf(ctx->IDENT()->getSymbol())};
-				// The member's definition: in the module of the instance.
+				// The member's definition: in the struct of the value, or in the module of the instance.
+				if (const auto* agg = base ? std::get_if<AggregateInstance>(&*base) : nullptr)
+					if (auto it = structContainers.find(aggregateKey(agg->getType())); it != structContainers.end())
+						for (size_t i = 0; i < index()->symbols().size(); ++i) {
+							const auto& s = index()->symbols()[i];
+							if (s.kind == analysis::SymbolKind::member && s.container == it->second &&
+								s.name == ctx->IDENT()->getText())
+								r.symbol = i;
+						}
 				const auto* node = base ? std::get_if<const Node*>(&*base) : nullptr;
 				const auto* bound = node ? std::get_if<BoundModuleType>(&getDataType(**node)) : nullptr;
 				if (bound != nullptr && bound->definition.templ) {
@@ -1924,11 +1987,15 @@ namespace mdl {
 					Object value = std::any_cast<Object>(result);
 					r.types.insert(objectType(value));
 					r.members = objectMembers(value);
+					if (auto path = weightPath(value))
+						r.weights.insert(*path);
 				} catch (const std::bad_any_cast&) {
 					if (const auto* n = std::any_cast<const Node*>(&result);
 						n && !std::holds_alternative<ErrorNode>(**n)) {
 						r.types.insert(objectType(Object{*n}));
 						r.members = objectMembers(Object{*n});
+						if (auto path = weightPath(Object{*n}))
+							r.weights.insert(*path);
 					}
 				}
 				r.types.erase(std::string{});
@@ -2108,6 +2175,25 @@ namespace mdl {
 			}
 
 			auto result = mdl::einops::apply(graph(), *inputNode, lhs, rhs, bindings);
+			if (result && index() != nullptr) {
+				// The sizes of the axes (for hovers and inlay hints).
+				const auto sizes = mdl::einops::axisSizes(*inputNode, lhs, rhs, bindings);
+				auto record = [&](antlr4::Token* tok) {
+					if (auto it = sizes.find(tok->getText()); it != sizes.end())
+						index()->addAxis(
+								{.file = currentFile(),
+								 .range = rangeOf(tok),
+								 .name = tok->getText(),
+								 .sizes = {it->second}}
+						);
+				};
+				for (auto* spec : einopsCtx->einops_spec_full())
+					for (auto* atom : spec->einops_atom())
+						if (atom->IDENT())
+							record(atom->IDENT()->getSymbol());
+				for (auto* kv : einopsCtx->keyvalue())
+					record(kv->IDENT()->getSymbol());
+			}
 			if (!result) {
 				auto* tok = ctx->start;
 				errorlistener->semanticError(
@@ -2183,8 +2269,10 @@ namespace mdl {
 		 * ParseOptions::floatWidening and floatNarrowing); reports it at @p tok as configured.
 		 * @return the (converted) value, or nullptr if the conversion is an error (reported).
 		 */
-		const Node*
-		implicitConversion(const Node& x, PrimitiveType target, antlr4::Token* tok, const std::string& what) {
+		const Node* implicitConversion(
+				const Node& x, PrimitiveType target, antlr4::Token* tok, const std::string& what,
+				antlr4::ParserRuleContext* operand = nullptr
+		) {
 			const auto from = floatTensorType(x);
 			if (!from || *from == target)
 				return &x;
@@ -2193,6 +2281,17 @@ namespace mdl {
 			const std::string flag = widening ? "float-widening" : "float-narrowing";
 			if (level != parser::DiagnosticLevel::ignored) {
 				const bool error = level == parser::DiagnosticLevel::error;
+				// The fix: the operand wrapped in the conversion (`float32(x)`).
+				std::vector<Diagnostic::Fix> fixes;
+				if (operand != nullptr && operand->start != nullptr && operand->stop != nullptr) {
+					const auto range = rangeOf(operand);
+					fixes.push_back(Diagnostic::Fix{
+							.title = std::format("Convert to {}", std::to_string(target)),
+							.edits =
+									{{{range.begin, range.begin}, std::to_string(target) + "("},
+									 {{range.end, range.end}, ")"}},
+					});
+				}
 				errorlistener->semanticError(
 						error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
 						tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(),
@@ -2200,7 +2299,8 @@ namespace mdl {
 								"{}: implicit {} from {} to {}", what, widening ? "widening" : "narrowing",
 								std::to_string(*from), std::to_string(target)
 						),
-						error ? std::format("convert explicitly, e.g. `{}(x)`", std::to_string(target)) : "", flag
+						error ? std::format("convert explicitly, e.g. `{}(x)`", std::to_string(target)) : "", flag,
+						std::move(fixes)
 				);
 				if (error)
 					return nullptr;
@@ -2340,7 +2440,7 @@ namespace mdl {
 					continue;
 				const Node* converted = implicitConversion(
 						args[i].get(), param->type, ctx->args[i]->start,
-						std::format("Argument {} of {}", i + 1, callee.name)
+						std::format("Argument {} of {}", i + 1, callee.name), ctx->args[i]
 				);
 				if (converted == nullptr)
 					return &graph().addErrorNode();
@@ -2468,8 +2568,8 @@ namespace mdl {
 			// Operands of different float types: both to the wider type (float32 for bfloat16 with float16), if allowed.
 			if (auto l = floatTensorType(*left), r = floatTensorType(*right); l && r && *l != *r) {
 				const std::string what = std::format("Operator {}", ctx->bop->getText());
-				left = implicitConversion(*left, PrimitiveType::float32, ctx->bop, what);
-				right = implicitConversion(*right, PrimitiveType::float32, ctx->bop, what);
+				left = implicitConversion(*left, PrimitiveType::float32, ctx->bop, what, ctx->left);
+				right = implicitConversion(*right, PrimitiveType::float32, ctx->bop, what, ctx->right);
 				if (left == nullptr || right == nullptr)
 					return &graph().addErrorNode();
 			}
@@ -2713,7 +2813,9 @@ namespace mdl {
 			}
 			const TensorType type = slotType(*tensor);
 			if (isFloat(type.type))
-				value = implicitConversion(*value, type.type, ctx->value->start, std::format("Slot {}[{}]", name, i));
+				value = implicitConversion(
+						*value, type.type, ctx->value->start, std::format("Slot {}[{}]", name, i), ctx->value
+				);
 			if (value == nullptr) {
 				tensor->slots[i] = &graph().addErrorNode(); // (reported)
 				return std::nullopt;

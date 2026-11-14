@@ -39,6 +39,11 @@ namespace mdls {
 			std::optional<mdl::format::FormatOptions> style; ///< std::nullopt if invalid
 		};
 		std::map<std::filesystem::path, CachedStyle> styles;
+		/** @brief The module of each definition of the standard library (computed once, for import quick fixes). */
+		std::optional<std::map<std::string, std::string>> stdNames;
+		const std::map<std::string, std::string>& standardLibraryNames();
+		/** @brief The texts of the open documents by path (for edits in other files). */
+		std::map<std::string, std::string> openTexts() const;
 
 		void handle(const json& message);
 		json handleRequest(const std::string& method, const json& params);

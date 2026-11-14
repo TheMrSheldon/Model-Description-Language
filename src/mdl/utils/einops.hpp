@@ -49,4 +49,12 @@ namespace mdl::einops {
 	apply(Computegraph& graph, const Node& input, const Spec& lhs, const Spec& rhs,
 		  const std::map<std::string, const Node*>& dimBindings);
 
+	/**
+	 * @brief The sizes of the named axes of an einops pattern for @p input (as for apply()), as text: a number, or a
+	 * compile-time expression (e.g. `heads` in a module checked without hyperparameter values).
+	 */
+	std::map<std::string, std::string> axisSizes(
+			const Node& input, const Spec& lhs, const Spec& rhs, const std::map<std::string, const Node*>& dimBindings
+	);
+
 } // namespace mdl::einops

@@ -19,3 +19,28 @@ mdls::formatting(const Document& doc, const json& params, const std::optional<md
 	};
 	return json::array({{{"range", range}, {"newText", result.text}}});
 }
+
+mdls::json
+mdls::rangeFormatting(const Document& doc, const json& params, const std::optional<mdl::format::FormatOptions>& style) {
+	// The document is formatted as a whole; the changed lines are replaced if they overlap the requested range.
+	const json edits = formatting(doc, params, style);
+	if (edits.empty())
+		return edits;
+	const std::string formatted = edits[0]["newText"];
+	const LineIndex before{doc.text}, after{formatted};
+	const size_t n = before.lineCount(), m = after.lineCount();
+	size_t prefix = 0;
+	while (prefix < n && prefix < m && before.line(prefix) == after.line(prefix))
+		++prefix;
+	size_t suffix = 0;
+	while (suffix < n - prefix && suffix < m - prefix && before.line(n - 1 - suffix) == after.line(m - 1 - suffix))
+		++suffix;
+	const size_t first = params.at("range").at("start").at("line"), last = params.at("range").at("end").at("line");
+	if (last < prefix || first >= n - suffix)
+		return json::array(); // the changes are outside of the range
+	std::string text;
+	for (size_t i = prefix; i < m - suffix; ++i)
+		text += std::string{after.line(i)} + "\n";
+	const json start{{"line", prefix}, {"character", 0}}, end{{"line", n - suffix}, {"character", 0}};
+	return json::array({{{"range", {{"start", start}, {"end", end}}}, {"newText", text}}});
+}
