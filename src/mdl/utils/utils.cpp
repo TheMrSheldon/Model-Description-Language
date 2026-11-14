@@ -31,15 +31,25 @@ namespace std {
 } // namespace std
 
 std::string std::to_string(const PrimitiveType& prim) {
-	static std::string_view names[]{[std::to_underlying(PrimitiveType::error)] = "<error>",
-									[std::to_underlying(PrimitiveType::float32)] = "float32",
-									[std::to_underlying(PrimitiveType::integer)] = "int",
-									[std::to_underlying(PrimitiveType::uint)] = "uint",
-									[std::to_underlying(PrimitiveType::boolean)] = "bool",
-									[std::to_underlying(PrimitiveType::float16)] = "float16",
-									[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16",
-									[std::to_underlying(PrimitiveType::int8)] = "int8"};
-	return std::string{names[std::to_underlying(prim)]};
+	switch (prim) {
+	case PrimitiveType::error:
+		return "<error>";
+	case PrimitiveType::float32:
+		return "float32";
+	case PrimitiveType::integer:
+		return "int";
+	case PrimitiveType::uint:
+		return "uint";
+	case PrimitiveType::boolean:
+		return "bool";
+	case PrimitiveType::float16:
+		return "float16";
+	case PrimitiveType::bfloat16:
+		return "bfloat16";
+	case PrimitiveType::int8:
+		return "int8";
+	}
+	return "<error>";
 }
 std::string std::to_string(const AggregateType& agg) { return "Aggregate Type"; /** \todo implement **/ }
 std::string std::to_string(const TensorType& tensortype) {

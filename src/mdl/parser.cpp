@@ -1413,7 +1413,7 @@ namespace mdl {
 			} else {
 				assert(false); // this case should not exist
 			}
-			assert(false);
+			std::unreachable();
 		}
 
 		virtual std::any visitConstant(mdlParser::ConstantContext* ctx) override {
@@ -1424,6 +1424,7 @@ namespace mdl {
 			if (ctx->BOOL() != nullptr)
 				return mdl::Atomic(ctx->BOOL()->getText() == "true");
 			assert(false); // Invalid case
+			std::unreachable();
 		}
 
 		virtual std::any visitVardecl(mdlParser::VardeclContext* ctx) override {
