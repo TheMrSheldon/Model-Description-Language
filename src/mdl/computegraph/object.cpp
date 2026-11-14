@@ -1,5 +1,21 @@
 #include <mdl/computegraphv2/object.hpp>
 
+mdl::AggregateInstance::AggregateInstance(AggregateType type, std::vector<Object> members)
+		: type(std::move(type)), members(std::move(members)) {}
+mdl::AggregateInstance::AggregateInstance(const AggregateInstance&) = default;
+mdl::AggregateInstance::AggregateInstance(AggregateInstance&&) noexcept = default;
+mdl::AggregateInstance& mdl::AggregateInstance::operator=(const AggregateInstance&) = default;
+mdl::AggregateInstance& mdl::AggregateInstance::operator=(AggregateInstance&&) noexcept = default;
+mdl::AggregateInstance::~AggregateInstance() = default;
+
+mdl::ModuleInstance::ModuleInstance(BoundModuleType type, std::vector<Object> params)
+		: type(std::move(type)), params(std::move(params)) {}
+mdl::ModuleInstance::ModuleInstance(const ModuleInstance&) = default;
+mdl::ModuleInstance::ModuleInstance(ModuleInstance&&) noexcept = default;
+mdl::ModuleInstance& mdl::ModuleInstance::operator=(const ModuleInstance&) = default;
+mdl::ModuleInstance& mdl::ModuleInstance::operator=(ModuleInstance&&) noexcept = default;
+mdl::ModuleInstance::~ModuleInstance() = default;
+
 using mdl::AggregateInstance;
 using mdl::AggregateType;
 using mdl::BoundModuleType;

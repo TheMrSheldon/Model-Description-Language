@@ -116,12 +116,14 @@ namespace mdl::bindings {
 				if (!o.packed)
 					outputs.push_back(&o);
 			// The runtime dimensions of `...`: the leading ones of the first input that has all of them.
+			auto dynamic = [](int64_t d) { return d < 0; };
+			auto hasAllDims = [&](const TensorSignature* t) {
+				return t->ellipsisRank < 0 && t->shape.size() >= rank &&
+					   std::all_of(t->shape.begin(), t->shape.begin() + rank, dynamic);
+			};
 			int dimsFrom = -1;
 			for (size_t i = 0; i < inputs.size() && dimsFrom < 0; ++i)
-				if (inputs[i]->ellipsisRank < 0 && inputs[i]->shape.size() >= rank &&
-					std::all_of(
-							inputs[i]->shape.begin(), inputs[i]->shape.begin() + rank, [](int64_t d) { return d < 0; }
-					))
+				if (hasAllDims(inputs[i]))
 					dimsFrom = static_cast<int>(i);
 			auto shapeExpr = [](const TensorSignature& t) {
 				std::string s = "(";

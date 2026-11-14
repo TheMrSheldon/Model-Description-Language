@@ -5,6 +5,9 @@ on:
 
 jobs:
   tests:
+    # The compiler (TVM with LLVM, oneDNN) and all tests, including the examples. Linux only: TVM needs an LLVM
+    # installation that the macOS and Windows runners do not provide; the frontend and the tooling are tested on all
+    # platforms by the tooling job. A Release build (TVM in Debug with coverage takes hours).
     name: Test (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -12,56 +15,20 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-latest
-            arch: x86_64
           - name: Linux aarch64
             os: ubuntu-24.04-arm
-            arch: aarch64
-          - name: macOS arm64
-            os: macos-latest
-            arch: arm64
-          - name: Windows x86_64
-            os: windows-latest
-            arch: x86_64
-            cmake_extra_args: -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -G "MinGW Makefiles"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
-      - name: Install Tools
-        uses: aminya/setup-cpp@v1
-        with:
-          gcc: true
-          cmake: true
-          gcovr: true
-          ninja: true
-          setup-cpp: false
-      - name: Install OpenBLAS (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y libopenblas-dev
-      - name: Install LLVM (macOS; TVM's code generation)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix llvm)" >> "$GITHUB_ENV"
-      - name: Allow Long Paths (Windows; TVM's submodules)
-        if: runner.os == 'Windows'
-        run: git config --system core.longpaths true
+      - name: Install LLVM and Ninja
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev ninja-build
       - name: Configure CMake
-        run: cmake -B ./build --preset=conf-dev "-DCMAKE_CXX_FLAGS=--coverage" "-DCMAKE_C_FLAGS=--coverage" "-DCMAKE_EXE_LINKER_FLAGS=--coverage" ${{ matrix.cmake_extra_args }}
+        run: cmake -B ./build --preset=conf-release-static-deps -G Ninja
       - name: Build
-        run: cmake --build ./build
+        run: cmake --build ./build --parallel
       - name: Run Tests
-        run: ctest --test-dir ./build --output-on-failure
-      - name: Generate Coverage Report
-        run: gcovr --root . --xml coverage.xml --filter 'src/' --filter 'include/'
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage.xml
-          token: ${{ secrets.CODECOV_TOKEN }}
-          flags: ${{ matrix.arch }}
-          name: ${{ matrix.name }}
-          fail_ci_if_error: true
+        run: ctest --test-dir ./build --output-on-failure --parallel 4
 
   tooling:
     # The frontend and the tooling (mdl-format, mdls) without the compiler: no TVM/LLVM/oneDNN, so it builds with each
@@ -80,6 +47,8 @@ jobs:
           - name: Windows x86_64 (MSVC)
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_GENERATOR: Ninja
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
@@ -88,12 +57,34 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - name: Install Ninja (if missing)
+        shell: bash
+        run: command -v ninja || pipx install ninja || python3 -m pip install ninja || python -m pip install ninja
+      - name: Set Up MSVC (Windows; Ninja uses the compiler of the environment)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Configure CMake
         run: cmake -B ./build --preset=conf-tooling
       - name: Build
         run: cmake --build ./build --config Release --parallel
       - name: Run Tests
         run: ctest --test-dir ./build --build-config Release --output-on-failure
+      - name: Coverage of the Frontend and the Tooling (Linux x86_64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: |
+          pip install gcovr
+          cmake -B ./coverage --preset=conf-tooling -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_CXX_FLAGS=--coverage" "-DCMAKE_C_FLAGS=--coverage" "-DCMAKE_EXE_LINKER_FLAGS=--coverage"
+          cmake --build ./coverage --parallel
+          ctest --test-dir ./coverage --output-on-failure
+          gcovr --root . --object-directory ./coverage --xml coverage.xml --filter 'src/' --filter 'include/'
+      - name: Upload Coverage to Codecov (Linux x86_64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          name: frontend
+          fail_ci_if_error: true
       - name: Check the Format of the .dlm Files
         if: runner.os == 'Linux' && runner.arch == 'X64'
         run: ./build/src/commands/mdl-format --check $(git ls-files '*.dlm')
@@ -110,11 +101,17 @@ jobs:
           setup-cpp: false
       - name: Checkout Repository
         uses: actions/checkout@v6
-      - name: Configure CMake
-        run: cmake -B ./build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Configure CMake (frontend and tooling; the sources need the generated parser)
+        run: |
+          cmake -B ./build --preset=conf-tooling -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          cmake --build ./build --target mdl_frontend --parallel
       - name: Run Clang-Tidy
         working-directory: ${{github.workspace}}
-        run: clang-tidy -p ./build/compile_commands.json $(find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$')
+        # The translation units of the frontend and the tooling (headers are checked through them; TVM's are not).
+        run: |
+          clang-tidy -quiet -p ./build/compile_commands.json $(find src/mdls src/mdl/analysis src/mdl/computegraph \
+            src/mdl/format src/mdl/parser src/mdl/utils src/commands/mdl-format.cpp src/commands/mdls.cpp \
+            src/mdl/parser.cpp src/mdl/diagnostics.cpp src/mdl/namespace.cpp src/mdl/passes/shapes.cpp -name '*.cpp')
 
   format-checks:
     name: Check C++ code format
