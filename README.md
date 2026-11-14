@@ -30,7 +30,25 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
   `--ellipsis-rank NAME=K` gives the input `NAME` only the leading `K` of them (e.g. `labels=1`: labels `[batch]` next
   to token ids `[batch, seq]`). Outputs get their shapes from shape inference (e.g. pooled `[batch, dim]`).
+- `--float f32|bf16|f16` sets the type that `float` stands for (see [Precision](#precision-and-quantization)).
 - `-i DIR` adds import search paths; the standard library (`std/`) is always available.
+
+The language is described in [docs/language-spec.md](docs/language-spec.md).
+
+### Build configuration
+The argument-values file can also hold the build settings, with named builds for e.g. inference and training; options
+on the command line take precedence (see [docs/build-config.md](docs/build-config.md)):
+```yaml
+args:
+  FFN: { indim: 8, outdim: 3 }
+build:
+  ellipsis-rank: 2
+builds:
+  train: { grad: [forward], trainable: ["W"] }
+```
+```bash
+mdlc model.dlm -a model.yml --build train -o model_train.o --binding cpp=model_train.hpp
+```
 
 The object file exports one function per member function (`__tvm_ffi_<Module>__<function>`, TVM FFI calling
 convention: inputs, weights, preallocated outputs). Link it against `mdl_runtime` (TVM runtime) and, with the oneDNN
@@ -120,6 +138,21 @@ Tensors are indexed like in NumPy: `h[..., 0, :]` is the first position of each 
 ([examples/02_transformer](examples/02_transformer/)) contains the full model with pooler, sequence classification,
 and its training objective, all checked against Hugging Face (with padding).
 
+## Precision and quantization
+Models are written with `float`; `--float bf16` (or `f16`) compiles the same model for 16-bit activations and weights,
+while explicit `float32` tensors stay float32. Conversions between float types are explicit (`float32(x)`); implicit
+ones can be allowed as warnings (`-Wfloat-widening`, `-Wfloat-narrowing`).
+
+`--quantize` stores weight matrices as int8 or int4 (grouped scales, optionally zero points); the model is unchanged:
+```bash
+mdlc model.dlm -a model.yml --quantize 'int4:128=encoder.**' -o model.o --binding cpp=model.hpp
+```
+A weight `W` becomes `W.qweight`, `W.scales` (and `W.zeros`) in the ABI (the GPTQ/AWQ layout); quantized weights are
+frozen. With the oneDNN kernels, linear layers read the compressed weights directly, which speeds up calls with few
+tokens (BERT-base with 8 tokens: 10.2 → 5.4 ms in float32). `mdl::runtime::loadWeights` can quantize a float
+checkpoint while loading. See [docs/build-config.md](docs/build-config.md#quantization) and
+[examples/09_quantization](examples/09_quantization/).
+
 ## CMake
 ```cmake
 include(MDL)
@@ -144,9 +177,4 @@ static_assert(mdl::models::FFN::hyperparameters.outdim == 3);
 ```
 
 ## Roadmap
-See the issues/plan: performance work on the TVM backend, loops (`for` with loop-carried variables), gradients as a
-computegraph transform (trainable weights selected by gitignore-style patterns), ragged tensors, and low-bit
-quantization.
-
-# TODO:
-- Torch/AOTInductor backend(?)
+Open work is listed in [TODO.md](TODO.md).
