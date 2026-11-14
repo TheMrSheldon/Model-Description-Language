@@ -5,6 +5,12 @@ void PrettyErrorListener::report(
 		const std::string& msg, const std::string& hint, const std::string& flag,
 		std::vector<mdl::Diagnostic::Fix> fixes, bool syntax
 ) {
+	if (level == ErrorLevel::Error)
+		encountered.push_back(
+				{.file = file, .range = {{offendingLine, offendingCol}, {offendingLine, offendingCol}}, .message = msg}
+		);
+	if (muted)
+		return;
 	if (!reported.emplace(offendingLine, offendingCol, msg).second)
 		return; // the same code elaborated again (e.g. another instantiation of a module)
 	if (level == ErrorLevel::Error)

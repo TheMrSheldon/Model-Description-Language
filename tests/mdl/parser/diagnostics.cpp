@@ -42,7 +42,8 @@ TEST_CASE("a range spans the marked expression", "[parser][diagnostics]") {
 			float[..., 3] forward(x: float[..., 4]) => first(x);
 		})");
 	REQUIRE(result.diagnostics.size() == 1);
-	CHECK(result.diagnostics[0].message == "Argument 1 of forward is float32[..., 4], but the parameter x is float32[..., 2]");
+	CHECK(result.diagnostics[0].message ==
+		  "Argument 1 of forward is float32[..., 4], but the parameter x is float32[..., 2]");
 	CHECK(where(result.diagnostics[0]) == "5:53-53");
 }
 
@@ -113,7 +114,8 @@ TEST_CASE("analyze keeps the compilation unit when there are errors", "[parser][
 }
 
 TEST_CASE("sources can come from a reader (unsaved editor buffers)", "[parser][diagnostics]") {
-	const auto dir = std::filesystem::temp_directory_path() / "mdl-overlay-test"; // never written: only read via readFile
+	const auto dir =
+			std::filesystem::temp_directory_path() / "mdl-overlay-test"; // never written: only read via readFile
 	parser::ParseOptions options;
 	options.sourceDir = dir;
 	options.readFile = [&](const std::filesystem::path& file) -> std::optional<std::string> {
@@ -123,7 +125,9 @@ TEST_CASE("sources can come from a reader (unsaved editor buffers)", "[parser][d
 	};
 	// Imports must exist on disk to be found; the reader provides their contents.
 	std::filesystem::create_directories(dir);
-	{ std::ofstream{dir / "helpers.dlm"} << "this is not valid"; }
+	{
+		std::ofstream{dir / "helpers.dlm"} << "this is not valid";
+	}
 	auto result = analyzeSource("import helpers;\nfloat[...] f(x: float[...]) => twice(x);", options);
 	std::filesystem::remove_all(dir);
 	CHECK(result.ok);
@@ -164,7 +168,8 @@ TEST_CASE("modules with hyperparameters are checked symbolically", "[parser][dia
 TEST_CASE("the symbolic analysis reports no errors in the repository's models", "[parser][diagnostics]") {
 	size_t count = 0;
 	for (const char* dir : {"std", "examples"})
-		for (const auto& entry : std::filesystem::recursive_directory_iterator(std::filesystem::path{MDL_SOURCE_DIR} / dir)) {
+		for (const auto& entry :
+			 std::filesystem::recursive_directory_iterator(std::filesystem::path{MDL_SOURCE_DIR} / dir)) {
 			if (entry.path().extension() != ".dlm")
 				continue;
 			auto result = parser::analyze(entry.path());
@@ -188,26 +193,28 @@ TEST_CASE("sizes that may differ are warnings, and errors in strict mode", "[par
 	CHECK(lenient.ok);
 	REQUIRE(lenient.diagnostics.size() == 2);
 	CHECK(lenient.diagnostics[0].severity == Severity::warning);
-	CHECK(lenient.diagnostics[0].flag == "possible-mismatch");
+	CHECK(lenient.diagnostics[0].flag == "permits-illegal-instantiation");
 	CHECK(lenient.diagnostics[0].message ==
 		  "Operator @: the inner dimensions of the matrix product may differ ([input, output] @ [input])");
 	CHECK(lenient.diagnostics[1].message == "Operator +: cannot broadcast [input] and [output] (the sizes may differ)");
 
 	parser::ParseOptions strict;
-	strict.possibleMismatch = parser::DiagnosticLevel::error;
+	strict.permitsIllegalInstantiation = parser::DiagnosticLevel::error;
 	auto strictResult = analyzeSource(code, strict);
 	CHECK_FALSE(strictResult.ok);
 	REQUIRE(strictResult.diagnostics.size() == 2);
 	CHECK(strictResult.diagnostics[0].severity == Severity::error);
 
 	// Correct generic code has no warnings (x @ W.T() is [..., output]).
-	auto correct = analyzeSource(R"(
+	auto correct = analyzeSource(
+			R"(
 		module Test[input: uint, output: uint] {
 			W: float[output, input]
 			b: float[output]
 			float[..., output] forward(x: float[..., input]) => x @ W.T() + b;
 		})",
-								 strict);
+			strict
+	);
 	CHECK(correct.ok);
 	CHECK(correct.diagnostics.empty());
 }
@@ -231,8 +238,10 @@ TEST_CASE("an integer tensor index selects rows", "[parser][diagnostics]") {
 
 	auto mixed = analyzeSource("module M[] { t: float[3, 4] float[...] f(ids: int[...]) => t[ids, 0]; }");
 	REQUIRE(mixed.diagnostics.size() == 1);
-	CHECK(mixed.diagnostics[0].message == "An integer tensor index selects rows: it must be the only index (`table[ids]`)");
+	CHECK(mixed.diagnostics[0].message ==
+		  "An integer tensor index selects rows: it must be the only index (`table[ids]`)");
 
-	auto removed = analyzeSource("module M[] { t: float[3, 4] float[..., 4] f(ids: int[...]) => __builtin_take(t, ids); }");
+	auto removed =
+			analyzeSource("module M[] { t: float[3, 4] float[..., 4] f(ids: int[...]) => __builtin_take(t, ids); }");
 	CHECK_FALSE(removed.ok); // the builtin's name is gone: indexing is the way to select rows
 }

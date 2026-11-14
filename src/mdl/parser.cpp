@@ -80,12 +80,28 @@ namespace mdl {
 		std::vector<std::filesystem::path> sources;
 		/** @brief Expanded module instances by template and hyperparameter values. */
 		std::map<std::pair<const ModuleTemplate*, std::string>, ModuleType> instances;
+		/** @brief The errors (line, column, message) of modules checked with symbolic values (see genericErrors). */
+		std::map<const ModuleTemplate*, std::set<std::tuple<size_t, size_t, std::string>>> genericErrorsOf;
+		/**
+		 * @brief After instantiate() failed: the error that only this instance has (not the module for all values,
+		 * e.g. a member that @conditional removes), for the place where it is instantiated; empty if none.
+		 */
+		std::string instanceError;
 		/** @brief The error listener of the file that is currently translated. */
 		PrettyErrorListener* errorlistener = nullptr;
 		/** @brief Whether modules with hyperparameters are checked with symbolic values (see analyzeGeneric()). */
 		bool checkGenericModules = false;
 		/** @brief Whether a module is being elaborated with symbolic hyperparameter values. */
 		bool symbolicMode = false;
+		/** @brief A member with `@conditional(c)` and a symbolic `c` (see checkConditionalMember). */
+		struct ConditionalMember {
+			std::string condition;	///< `c` as written
+			const Namespace* scope; ///< of the module instance (a local of the same name hides the member)
+		};
+		/** @brief (module, member) -> its condition. */
+		std::map<std::pair<std::string, std::string>, ConditionalMember> conditionalMembers;
+		/** @brief The symbolic conditions that hold where the code is elaborated (the first branch of `c ? a : b`). */
+		std::vector<std::string> assumedConditions;
 		/** @brief The token streams of the translated files (by source name), e.g. for doc comments. */
 		std::map<std::string, antlr4::CommonTokenStream*> tokenStreams;
 		/** @brief The module being instantiated (for the index), empty outside of modules. */
@@ -1185,14 +1201,22 @@ namespace mdl {
 			m.instanceName = t.name;
 			if (!values.empty()) {
 				m.instanceName += "[";
-				for (size_t i = 0; i < values.size(); ++i)
-					m.instanceName += (i > 0 ? ", " : "") + valueName(values[i]);
+				for (size_t i = 0; i < values.size(); ++i) {
+					std::string v = valueName(values[i]);
+					if (i < def.typeargs.size() && (v == "0" || v == "1")) {
+						const auto* p = std::get_if<PrimitiveType>(&def.typeargs[i].second.get().type);
+						if (p != nullptr && *p == PrimitiveType::boolean)
+							v = v == "1" ? "true" : "false";
+					}
+					m.instanceName += (i > 0 ? ", " : "") + v;
+				}
 				m.instanceName += "]";
 			}
 			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i)
 				flattenHyperparameter(def.typeargs[i].first, values[i], m.hyperparameterValues);
 
 			const size_t errorsBefore = t.errors->getNumErrors();
+			const size_t encounteredBefore = t.errors->getNumEncountered();
 			const std::string outerScope = std::exchange(scope, key);
 			auto* outerErrors = std::exchange(errorlistener, t.errors);
 			nsstack.push(t.scope->createSubnamespace());
@@ -1236,13 +1260,59 @@ namespace mdl {
 			errorlistener = outerErrors;
 			scope = outerScope;
 			currentModule = outerModule;
-			const size_t newErrors = t.errors->getNumErrors() - errorsBefore;
-			numErrors += newErrors;
-			if (newErrors > 0)
-				return std::unexpected(std::format("{} error(s) while instantiating {}", newErrors, key));
+			numErrors += t.errors->getNumErrors() - errorsBefore;
+			if (auto all = t.errors->errorsSince(encounteredBefore); !all.empty()) {
+				// Errors that only this instance has (e.g. a member that @conditional removes) are reported again
+				// where it is instantiated (also if they were reported before, by another use of the instance).
+				std::vector<mdl::Diagnostic> errors(all.begin(), all.end());
+				const auto& generic = genericErrors(def);
+				std::erase_if(errors, [&](const mdl::Diagnostic& e) {
+					return generic.contains({0, 0, ""}) ||
+						   generic.contains({e.range.begin.line, e.range.begin.column, e.message});
+				});
+				instanceError.clear();
+				if (!errors.empty()) {
+					const auto& first = errors.front();
+					instanceError = std::format(
+							"{} has an error: {} ({}:{}:{}){}", m.instanceName, first.message,
+							std::filesystem::path(first.file).filename().string(), first.range.begin.line,
+							first.range.begin.column + 1,
+							errors.size() > 1 ? std::format(" and {} more", errors.size() - 1) : ""
+					);
+				}
+				return std::unexpected(std::format("{} error(s) while instantiating {}", all.size(), key));
+			}
 			if (index() != nullptr)
 				recordLayout(t, m, key);
 			return std::cref(instances.emplace(std::pair{&t, key}, std::move(m)).first->second);
+		}
+
+		/**
+		 * @brief The errors of the module @p def for all values of its hyperparameters: found by checking it with
+		 * symbolic values (once, without reporting). All errors of a module without hyperparameters are generic.
+		 */
+		const std::set<std::tuple<size_t, size_t, std::string>>& genericErrors(const ModuleType& def) {
+			const ModuleTemplate* t = def.templ.get();
+			if (auto it = genericErrorsOf.find(t); it != genericErrorsOf.end())
+				return it->second;
+			auto& result = genericErrorsOf[t]; // (empty while it is computed: recursive instantiations)
+			std::vector<Object> values;
+			for (const auto& [pname, hn] : def.typeargs)
+				if (auto value = symbolicValue(hn.get().type, pname))
+					values.push_back(std::move(*value));
+			if (def.typeargs.empty() || values.size() != def.typeargs.size()) {
+				result.emplace(0, 0, ""); // marks "all generic" (see below)
+				return result;
+			}
+			const size_t before = t->errors->getNumEncountered();
+			const bool wasMuted = t->errors->setMuted(true);
+			const bool outer = std::exchange(symbolicMode, true);
+			(void)instantiate(def, values);
+			symbolicMode = outer;
+			t->errors->setMuted(wasMuted);
+			for (const auto& e : t->errors->errorsSince(before))
+				result.emplace(e.range.begin.line, e.range.begin.column, e.message);
+			return result;
 		}
 
 		/** @brief Records the weights of the instance @p m of the module @p t in the index (parameter counts). */
@@ -1328,8 +1398,14 @@ namespace mdl {
 						 const Node* cond = v.asNode(a->args[0]->accept(&v), a->args[0]->start);
 						 auto value = foldConstant(*cond);
 						 const auto* i = value ? std::get_if<int>(&*value) : nullptr;
-						 if (i == nullptr && v.isSymbolic(*cond))
-							 return std::nullopt; // symbolic analysis: the member may exist
+						 if (i == nullptr && v.isSymbolic(*cond)) {
+							 // Symbolic analysis: the member may exist; its uses are checked (see checkConditionalMember).
+							 if (auto* var = dynamic_cast<mdlParser::VardeclContext*>(a->parent))
+								 v.conditionalMembers[{v.currentModule, var->IDENT()->getText()}] = {
+										 a->args[0]->getText(), &v.currentNamespace()
+								 };
+							 return std::nullopt;
+						 }
 						 if (i == nullptr) {
 							 if (!std::holds_alternative<ErrorNode>(*cond))
 								 v.errorlistener->semanticError(
@@ -1387,16 +1463,41 @@ namespace mdl {
 		}
 
 		/**
-		 * @brief Reports a possible mismatch (`-Wpossible-mismatch`, an error with `--strict`): sizes that are different
+		 * @brief Reports a possible mismatch (`-Wpermits-illegal-instantiation`, an error with `--strict`): sizes that are different
 		 * compile-time expressions (e.g. the hyperparameters `input` and `output`), which may differ in an instance.
 		 */
 		void reportPossibleMismatch(antlr4::Token* tok, const std::string& message) {
-			if (options.possibleMismatch == parser::DiagnosticLevel::ignored)
+			if (options.permitsIllegalInstantiation == parser::DiagnosticLevel::ignored)
 				return;
-			const bool error = options.possibleMismatch == parser::DiagnosticLevel::error;
+			const bool error = options.permitsIllegalInstantiation == parser::DiagnosticLevel::error;
 			errorlistener->semanticError(
 					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
-					tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(), message, "", "possible-mismatch"
+					tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(), message, "",
+					"permits-illegal-instantiation"
+			);
+		}
+
+		/**
+		 * @brief Reports a use of a member with `@conditional(c)` (symbolic `c`) where `c` is not known to hold
+		 * (`-Wpermits-illegal-instantiation`): the instances where `c` is false have an error there.
+		 */
+		void checkConditionalMember(antlr4::Token* tok) {
+			auto it = conditionalMembers.find({currentModule, tok->getText()});
+			if (it == conditionalMembers.end() ||
+				options.permitsIllegalInstantiation == parser::DiagnosticLevel::ignored ||
+				std::ranges::contains(assumedConditions, it->second.condition) ||
+				currentNamespace().definedIn(tok->getText()) != it->second.scope)
+				return;
+			const std::string& condition = it->second.condition;
+			const bool error = options.permitsIllegalInstantiation == parser::DiagnosticLevel::error;
+			errorlistener->semanticError(
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+					tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(),
+					std::format(
+							"{} does not exist in instances where {} is false (@conditional({}))", tok->getText(),
+							condition, condition
+					),
+					std::format("use it in `{} ? ... : ...`", condition), "permits-illegal-instantiation"
 			);
 		}
 
@@ -1571,6 +1672,18 @@ namespace mdl {
 						return DataType{PrimitiveType::error};
 					}
 					auto instance = instantiate(*mod, *values);
+					if (!instance && !instanceError.empty()) {
+						errorlistener->semanticError(
+								PrettyErrorListener::ErrorLevel::Error,
+								{{.number = ctx->start->getLine(),
+								  .text = errorlistener->getline(
+										  *ctx->start->getInputStream(), 0, ctx->start->getStartIndex()
+								  ),
+								  .markBegin = ctx->start->getCharPositionInLine(),
+								  .markWidth = ctx->stop->getStopIndex() - ctx->start->getStartIndex() + 1}},
+								ctx->start->getLine(), ctx->start->getCharPositionInLine(), instanceError
+						);
+					}
 					if (!instance)
 						return DataType{PrimitiveType::error};
 					return DataType{BoundModuleType{.definition = instance.value().get(), .hyperparamValues = {}}};
@@ -2026,6 +2139,8 @@ namespace mdl {
 				);
 				return static_cast<const Node*>(&graph().addErrorNode());
 			}
+			if (symbolicMode)
+				checkConditionalMember(ctx->IDENT()->getSymbol());
 			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
 			if (!value.has_value()) {
 				auto* sym = ctx->IDENT()->getSymbol();
@@ -2757,8 +2872,11 @@ namespace mdl {
 			const auto* i = value ? std::get_if<int>(&*value) : nullptr;
 			const auto* d = value ? std::get_if<double>(&*value) : nullptr;
 			if (i == nullptr && d == nullptr && isSymbolic(*cond)) {
-				// Symbolic analysis: both branches are checked; the first one is the value.
+				// Symbolic analysis: both branches are checked; the first one is the value. The first branch may
+				// use the members that exist if the condition holds (@conditional).
+				assumedConditions.push_back(ctx->cond->getText());
 				auto result = ctx->then->accept(this);
+				assumedConditions.pop_back();
 				ctx->otherwise->accept(this);
 				return result;
 			}

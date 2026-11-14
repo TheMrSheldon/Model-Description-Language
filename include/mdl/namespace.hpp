@@ -91,6 +91,13 @@ namespace mdl {
 			return parent != nullptr ? parent->symbol(name) : std::nullopt;
 		}
 
+		/** @brief The namespace (this or a parent) that defines @p name, if any. */
+		const Namespace* definedIn(std::string_view name) const {
+			if (definesLocally(name))
+				return this;
+			return parent != nullptr ? parent->definedIn(name) : nullptr;
+		}
+
 		/** @brief Whether an object or type named @p name is defined in this namespace itself (not in a parent). */
 		bool definesLocally(std::string_view name) const {
 			return objects.contains(std::string{name}) || types.contains(std::string{name});

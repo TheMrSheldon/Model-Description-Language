@@ -150,8 +150,9 @@ void mdls::Server::applySettings(const json& settings) {
 			parseOptions.importDirs.emplace_back(dir.get<std::string>());
 	}
 	if (options.contains("strict")) // what may be wrong (e.g. sizes that may differ) is an error
-		parseOptions.possibleMismatch = options.value("strict", false) ? mdl::parser::DiagnosticLevel::error
-																	   : mdl::parser::DiagnosticLevel::warning;
+		parseOptions.permitsIllegalInstantiation = options.value("strict", false)
+														   ? mdl::parser::DiagnosticLevel::error
+														   : mdl::parser::DiagnosticLevel::warning;
 	if (options.contains("float")) {
 		const std::string type = options.value("float", "f32");
 		parseOptions.defaultFloat = type == "bf16"	? mdl::PrimitiveType::bfloat16
