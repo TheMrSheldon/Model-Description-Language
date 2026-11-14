@@ -10,7 +10,7 @@ include(GNUInstallDirs)
 # Dependencies of the frontend and the tooling
 ##########################################################################################
 # ANTLR4 (parser generator: the jar at build time, the C++ runtime)
-set(ANTLR_VERSION 4.13.1)
+set(ANTLR_VERSION 4.13.2) # 4.13.1 misses <chrono> for MSVC
 FetchContent_Declare(antlrjar URL https://www.antlr.org/download/antlr-${ANTLR_VERSION}-complete.jar DOWNLOAD_NO_EXTRACT TRUE)
 FetchContent_MakeAvailable(antlrjar)
 set(ANTLR_EXECUTABLE ${antlrjar_SOURCE_DIR}/antlr-${ANTLR_VERSION}-complete.jar)

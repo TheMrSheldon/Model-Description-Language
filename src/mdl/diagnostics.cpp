@@ -1,6 +1,8 @@
 // Printing of diagnostics for a terminal (see mdl::printDiagnostic).
 #include <mdl/diagnostics.hpp>
 
+#include <cstdint> // (termcolor uses uint8_t without including it)
+
 #include <termcolor/termcolor.hpp>
 
 #include <cstddef>
