@@ -111,6 +111,19 @@ namespace mdl {
 	};
 
 	/**
+	 * @brief Which weights are quantized and how (`mdlc --quantize`): weights whose paths @p weights selects. A weight
+	 * W [N, K] (2-D, e.g. of a linear layer) becomes the weights `W.qweight`, `W.scales`, and (asymmetric) `W.zeros`
+	 * (see builtins::QuantFormat); W itself is their dequantization. Quantized weights are frozen (not trainable).
+	 * @details Only matrices are quantized: patterns that select modules skip their other weights (biases, norms). A
+	 * pattern that selects no matrix is a warning; a pattern that is the exact path of another weight is an error.
+	 */
+	struct QuantizationRule {
+		builtins::QuantFormat format = builtins::QuantFormat::int8;
+		unsigned group = 0; ///< values of K per scale; 0: all of K (one scale per output, the default of int8)
+		std::vector<std::string> weights; ///< patterns over weight paths (see PathPatterns); at least one not negated
+	};
+
+	/**
 	 * @param masked member functions that become masked functions (see mdl::masking::apply): they take an additional
 	 * input `mask: bool[...]` (true: valid), and masked elements in the last dimension of `...` (e.g. padding) do not
 	 * influence the valid results. Masking is applied before differentiation.
@@ -118,7 +131,7 @@ namespace mdl {
 	std::vector<ExportedFunction> exportedFunctions(
 			const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1,
 			const GradientRequest& gradients = {}, const std::vector<std::string>& masked = {},
-			const std::map<std::string, unsigned>& inputRanks = {}
+			const std::map<std::string, unsigned>& inputRanks = {}, const std::vector<QuantizationRule>& quantize = {}
 	);
 
 	/**

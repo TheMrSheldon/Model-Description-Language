@@ -31,6 +31,14 @@ namespace mdl::backend::tvm {
 			double alpha, bool transA = false
 	);
 
+	/**
+	 * @brief Creates a call of the backend operator `mdl.dequant`: the float weight of a quantized one (see
+	 * builtins::QuantFormat; @p zeros is PrimValue(0) for symmetric formats).
+	 */
+	::tvm::relax::Expr makeDequant(
+			::tvm::relax::Expr q, ::tvm::relax::Expr scales, ::tvm::relax::Expr zeros, int64_t format, int64_t group
+	);
+
 	/** @brief Creates a call of the backend operator `mdl.gelu_backward`: dy * GELU'(x) (exact GELU). */
 	::tvm::relax::Expr makeGeluBackward(::tvm::relax::Expr x, ::tvm::relax::Expr dy);
 

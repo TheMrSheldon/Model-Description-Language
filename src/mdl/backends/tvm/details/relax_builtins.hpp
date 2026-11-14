@@ -2,6 +2,8 @@
 
 #include <mdl/computegraphv2/builtins.hpp>
 
+#include "./legalize.hpp"
+
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/expr.h>
@@ -541,7 +543,7 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
     },
     /** CAST — converted to the node's element type by the translation (see translateRelax) **/
     [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
-    /** STACK — each tensor as [1, ...], concatenated along the first dimension **/
+    /** STACK — each tensor as [1, ...], concatenated along the first dimension (see below) **/
     [](auto& bb, auto ts) -> ::tvm::relax::Expr {
         ::tvm::ffi::Array<::tvm::relax::Expr> parts;
         for (const auto& t : ts) {
@@ -551,6 +553,12 @@ inline const auto relaxFunctions = std::to_array<RelaxTranslateFunc>({
             parts.push_back(emitAs(bb, callRelaxOp("relax.op.reshape", t, ::tvm::relax::ShapeExpr(shape)), "slot"));
         }
         return callRelaxOp("relax.op.concat", ::tvm::relax::Tuple(parts), ::tvm::ffi::Optional<int64_t>(0));
+    },
+    /** DEQUANT — the backend operator mdl.dequant (format and group stay integer PrimValues) **/
+    [](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
+        const int64_t format = extractPrim(ts[3]).template as<::tvm::IntImmNode>()->value;
+        const int64_t group = extractPrim(ts[4]).template as<::tvm::IntImmNode>()->value;
+        return makeDequant(ts[0], ts[1], ts[2], format, group);
     },
 });
 

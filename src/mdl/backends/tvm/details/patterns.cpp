@@ -295,7 +295,8 @@ namespace mdl::backend::tvm {
 		/** (a @ op(B)) / c → mdl.matmul with alpha = 1/c (e.g. the attention scale 1/sqrt(d)). */
 		PatternEntry makeScaledMatmul() {
 			auto product = IsOp("mdl.matmul")(
-					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard()
+					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(),
+					Wildcard(), Wildcard(), Wildcard()
 			);
 			auto c = Wildcard();
 			DFPattern pattern = IsOp("relax.divide")(product, c);

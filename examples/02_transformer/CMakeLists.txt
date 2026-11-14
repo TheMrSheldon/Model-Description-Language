@@ -61,6 +61,19 @@ target_compile_definitions(02_transformer_cls PRIVATE
 	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_cls.safetensors")
 add_test(NAME example_02_transformer_cls COMMAND 02_transformer_cls)
 
+# Quantized weight matrices (int8, and int4 in groups of 16), quantized from the float checkpoint while loading: the
+# logits within the quantization error of Hugging Face's (relative to the largest logit).
+foreach(format int8 int4)
+	mdl_add_model(bert_cls_${format}_model SOURCE model.dlm CONFIG model_cls_tiny.yml BUILD ${format})
+	add_executable(02_transformer_cls_${format} cls_check.cpp)
+	target_link_libraries(02_transformer_cls_${format} PRIVATE bert_cls_${format}_model)
+	add_test(NAME example_02_transformer_cls_${format} COMMAND 02_transformer_cls_${format})
+endforeach()
+target_compile_definitions(02_transformer_cls_int8 PRIVATE MDL_QUANTIZED=0.1
+	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_cls.safetensors")
+target_compile_definitions(02_transformer_cls_int4 PRIVATE MDL_QUANTIZED=0.5
+	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_cls.safetensors")
+
 # Training the classifier: the objective `loss(ids, types, positions, labels)` as a masked gradient build, with labels
 # [batch] next to the ids [batch, seq]; its value against Hugging Face's loss and its gradients against finite
 # differences.

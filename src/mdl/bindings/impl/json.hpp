@@ -59,6 +59,8 @@ namespace mdl::bindings::detail {
 			return "\"float16\"";
 		case PrimitiveType::bfloat16:
 			return "\"bfloat16\"";
+		case PrimitiveType::int8:
+			return "\"int8\"";
 		case PrimitiveType::integer:
 			return "\"int32\"";
 		case PrimitiveType::uint:

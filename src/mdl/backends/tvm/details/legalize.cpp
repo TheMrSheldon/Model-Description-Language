@@ -1,5 +1,7 @@
 #include "./legalize.hpp"
 
+#include <mdl/computegraphv2/builtins.hpp>
+
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/relax/attrs/datatype.h>
@@ -444,10 +446,72 @@ namespace mdl::backend::tvm {
 			return true;
 		}
 
+		/** @brief A quantized operand: the arguments of mdl.dequant besides the quantized values (see QuantFormat). */
+		struct Quantized {
+			Expr scales;
+			std::optional<Expr> zeros;
+			mdl::builtins::QuantFormat format;
+			int64_t group;
+
+			bool packed() const { return format != mdl::builtins::QuantFormat::int8; }
+		};
+
+		/** @brief The dequantization of q (see mdl.dequant): W [N, K] in the scales' type. */
+		te::Tensor dequantCompute(TECall& te, const Expr& qArg, const Quantized& quant) {
+			using mdl::builtins::QuantFormat;
+			auto q = te.tensor(qArg, "q");
+			auto scales = te.tensor(quant.scales, "scales");
+			std::optional<te::Tensor> z;
+			if (quant.zeros)
+				z = te.tensor(*quant.zeros, "zeros");
+			const auto f32 = ::tvm::DataType::Float(32), i32 = ::tvm::DataType::Int(32);
+			const int64_t group = quant.group;
+			const auto format = quant.format;
+			Array<PrimExpr> shape{q->shape[0], quant.packed() ? q->shape[1] * 2 : q->shape[1]};
+			return te::compute(
+					shape,
+					[&](const Array<tirx::Var>& i) {
+						const PrimExpr n = i[0], k = i[1];
+						const PrimExpr g = ::tvm::floordiv(k, ::tvm::IntImm(k.dtype(), group));
+						PrimExpr value;
+						if (format == QuantFormat::int8) {
+							value = ::tvm::cast(i32, q(Array<PrimExpr>{n, k}));
+						} else {
+							const PrimExpr two = ::tvm::IntImm(k.dtype(), 2);
+							const PrimExpr byte = ::tvm::cast(i32, q(Array<PrimExpr>{n, ::tvm::floordiv(k, two)})) & 0xFF;
+							const PrimExpr nibble = ::tvm::tirx::Select(
+									::tvm::floormod(k, two) == ::tvm::IntImm(k.dtype(), 0), byte & 0xF, (byte >> 4) & 0xF
+							);
+							value = format == QuantFormat::int4 ? ::tvm::tirx::Select(nibble >= 8, nibble - 16, nibble) // signed
+																: nibble;
+						}
+						if (z)
+							value = value - ::tvm::cast(i32, (*z)(Array<PrimExpr>{g, n}));
+						const PrimExpr scale = ::tvm::cast(f32, scales(Array<PrimExpr>{g, n}));
+						return ::tvm::cast(scales->dtype, ::tvm::cast(f32, value) * scale);
+					},
+					"T_dequant", topi::kElementWise
+			);
+		}
+
+		/** @brief The quantization of a mdl.matmul or mdl.dequant call from its arguments [first, first + 3). */
+		std::optional<Quantized> quantizedOf(const Call& call, size_t first) {
+			const Perm info = permOf(call->args[first + 2]); // [format, group] or empty
+			if (info.size() != 2)
+				return std::nullopt;
+			return Quantized{
+					call->args[first],
+					tensorInfo(call->args[first + 1]) ? std::optional<Expr>{call->args[first + 1]} : std::nullopt,
+					static_cast<mdl::builtins::QuantFormat>(info[0]), info[1]
+			};
+		}
+
 		/**
 		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, activation,
-		 * addend or PrimValue(0)). The operands are A = permute(a, perm_a) and B = permute(b, perm_b); the result is
-		 * permute(act(alpha * A @ B + bias), perm_out) + addend (the epilogue: e.g. GELU, a residual connection).
+		 * addend or PrimValue(0), scales, zeros, quant). The operands are A = permute(a, perm_a) and B = permute(b,
+		 * perm_b); the result is permute(act(alpha * A @ B + bias), perm_out) + addend (the epilogue: e.g. GELU, a
+		 * residual connection). If quant is [format, group], b holds quantized values and B is permute(dequant(b,
+		 * scales, zeros), perm_b) (see mdl.dequant); otherwise scales and zeros are PrimValue(0) and quant is empty.
 		 */
 		struct MatmulArgs {
 			Expr a, b;
@@ -456,6 +520,7 @@ namespace mdl::backend::tvm {
 			double alpha = 1.0;
 			int64_t activation = 0; ///< 0: none, 1: GELU (erf)
 			std::optional<Expr> addend;
+			std::optional<Quantized> quant;
 
 			MatmulArgs(Expr a, Expr b) : a(std::move(a)), b(std::move(b)) {}
 
@@ -464,11 +529,20 @@ namespace mdl::backend::tvm {
 					  bias(tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt),
 					  permA(permOf(call->args[3])), permB(permOf(call->args[4])), permOut(permOf(call->args[5])),
 					  alpha(floatValue(call->args[6])), activation(intValue(call->args[7])),
-					  addend(tensorInfo(call->args[8]) ? std::optional<Expr>{call->args[8]} : std::nullopt) {}
+					  addend(tensorInfo(call->args[8]) ? std::optional<Expr>{call->args[8]} : std::nullopt),
+					  quant(quantizedOf(call, 9)) {}
+
+			/** @brief The shape of B before perm_b (the dequantized shape [N, K] if b is quantized). */
+			Array<PrimExpr> bShape() const {
+				auto shape = shapeOf(b);
+				if (quant && quant->packed())
+					return Array<PrimExpr>{shape[0], shape[1] * 2};
+				return shape;
+			}
 
 			/** @brief The shape of A @ B (before perm_out): the broadcast batch dimensions, then [M, N]. */
 			Array<PrimExpr> productShape() const {
-				auto la = permuted(shapeOf(a), permA), lb = permuted(shapeOf(b), permB);
+				auto la = permuted(shapeOf(a), permA), lb = permuted(bShape(), permB);
 				const size_t ra = la.size(), rb = lb.size(), batchRank = std::max(ra, rb) - 2;
 				Array<PrimExpr> out;
 				for (size_t i = 0; i < batchRank; ++i) {
@@ -503,10 +577,10 @@ namespace mdl::backend::tvm {
 		 */
 		std::optional<Expr> matmulKernel(const BlockBuilder& bb, const MatmulArgs& m) {
 			const auto* ai = tensorInfo(m.a);
-			const auto* bi = tensorInfo(m.b);
+			const auto* bi = tensorInfo(m.quant ? m.quant->scales : m.b);
 			if (!ai || !bi || ai->dtype != bi->dtype || !kernelSuffix(ai->dtype))
 				return std::nullopt;
-			const auto as = shapeOf(m.a), bs = shapeOf(m.b);
+			const auto as = shapeOf(m.a), bs = m.bShape();
 			const auto la = permuted(as, m.permA), lb = permuted(bs, m.permB);
 			const auto sa = permuted(contiguousStrides(as), m.permA), sb = permuted(contiguousStrides(bs), m.permB);
 			const size_t ra = la.size(), rb = lb.size();
@@ -555,6 +629,27 @@ namespace mdl::backend::tvm {
 					batch.erase(batch.begin() + static_cast<std::ptrdiff_t>(i));
 				}
 			}
+			if (m.quant) {
+				// The quantized weights W [N, K] as B = W^T (a linear layer): a single GEMM with B[k, n] at n * K + k.
+				if (!batch.empty() || rb != 2 || !equal(bK, 1) || !equal(bN, K))
+					return std::nullopt;
+				ExternCall ext{bb, "mdl_matmul_q_" + *kernelSuffix(ai->dtype)};
+				auto pa = ext.input(m.a, "A");
+				auto pq = ext.input(m.b, "q");
+				auto pscales = ext.input(m.quant->scales, "scales");
+				PrimExpr pzeros = m.quant->zeros ? ext.input(*m.quant->zeros, "zeros") : pq; // ignored without zeros
+				PrimExpr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;
+				PrimExpr paddend = m.addend ? ext.input(*m.addend, "addend") : pa;
+				auto pout = ext.output(resultShape, ai->dtype);
+				auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
+				auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::DataType::Int(32), v); };
+				return ext.finish(
+						{pout, pa, pq, pscales, pzeros, i32(m.quant->zeros ? 1 : 0), i32(static_cast<int>(m.quant->format)),
+						 i64(::tvm::IntImm(::tvm::DataType::Int(64), m.quant->group)), pbias, i32(m.bias ? 1 : 0), i64(M),
+						 i64(K), i64(N), i64(aM), i64(aK), i64(oM), i64(oN), paddend, i32(m.addend ? 1 : 0),
+						 i32(m.activation), ::tvm::FloatImm(::tvm::DataType::Float(32), m.alpha)}
+				);
+			}
 			if (batch.size() > 2)
 				return std::nullopt;
 			while (batch.size() < 2) { // outer dimensions of size 1 (with the strides of a contiguous outer dimension)
@@ -581,7 +676,19 @@ namespace mdl::backend::tvm {
 			);
 		}
 
-		Expr matmulTE(const BlockBuilder& bb, const MatmulArgs& m) {
+		/** @brief @p m with a quantized b replaced by its dequantization (emitted as a kernel of its own). */
+		MatmulArgs dequantized(const BlockBuilder& bb, MatmulArgs m) {
+			if (!m.quant)
+				return m;
+			TECall te{bb, "dequant"};
+			auto w = dequantCompute(te, m.b, *m.quant);
+			m.b = bb->Emit(te.finish(w));
+			m.quant.reset();
+			return m;
+		}
+
+		Expr matmulTE(const BlockBuilder& bb, const MatmulArgs& quantized) {
+			const MatmulArgs m = dequantized(bb, quantized);
 			TECall te{bb, "matmul"};
 			auto ta = te.tensor(m.a, "A");
 			auto tb = te.tensor(m.b, "B");
@@ -628,10 +735,16 @@ namespace mdl::backend::tvm {
 			static const auto& op = ::tvm::Op::Get("mdl.matmul");
 			Expr bias = m.bias ? *m.bias : Expr(::tvm::relax::PrimValue::Int64(0));
 			Expr addend = m.addend ? *m.addend : Expr(::tvm::relax::PrimValue::Int64(0));
+			const Expr none = ::tvm::relax::PrimValue::Int64(0);
+			Expr scales = m.quant ? m.quant->scales : none;
+			Expr zeros = m.quant && m.quant->zeros ? *m.quant->zeros : none;
+			Expr quant = permExpr(
+					m.quant ? Perm{static_cast<int64_t>(m.quant->format), m.quant->group} : Perm{}
+			);
 			return Call(
 					op, {m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
 						 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), m.alpha)),
-						 ::tvm::relax::PrimValue::Int64(m.activation), addend}
+						 ::tvm::relax::PrimValue::Int64(m.activation), addend, scales, zeros, quant}
 			);
 		}
 
@@ -674,6 +787,18 @@ namespace mdl::backend::tvm {
 					};
 					fold(m.a, m.permA);
 					fold(m.b, m.permB);
+					// A dequantized operand: the kernel reads the quantized values (the dequantization becomes dead
+					// if no other operation uses it).
+					static const auto& dequant = ::tvm::Op::Get("mdl.dequant");
+					if (const ::tvm::relax::CallNode* d = m.quant ? nullptr : boundCall(m.b, dequant)) {
+						const Call dq = ::tvm::ffi::GetRef<Call>(d);
+						m.b = dq->args[0];
+						m.quant = Quantized{
+								dq->args[1], tensorInfo(dq->args[2]) ? std::optional<Expr>{dq->args[2]} : std::nullopt,
+								static_cast<mdl::builtins::QuantFormat>(intValue(dq->args[3])), intValue(dq->args[4])
+						};
+						changed = true;
+					}
 					return changed ? makeCall(m) : call;
 				}
 				static const auto& gelu = ::tvm::Op::Get("relax.nn.gelu");
@@ -767,6 +892,31 @@ namespace mdl::backend::tvm {
 		return makeCall(m);
 	}
 
+	Expr makeDequant(Expr q, Expr scales, Expr zeros, int64_t format, int64_t group) {
+		static const auto& op = ::tvm::Op::Get("mdl.dequant");
+		return Call(op, {std::move(q), std::move(scales), std::move(zeros), ::tvm::relax::PrimValue::Int64(format),
+						 ::tvm::relax::PrimValue::Int64(group)});
+	}
+
+	TVM_REGISTER_OP("mdl.dequant")
+			.set_num_inputs(5)
+			.add_argument("q", "Tensor", "The quantized values [N, K] int8 (int4: [N, K/2], two per byte).")
+			.add_argument("scales", "Tensor", "The scales [K/group, N] (float).")
+			.add_argument("zeros", "Tensor | PrimValue", "The zero points [K/group, N] int8, or PrimValue(0).")
+			.add_argument("format", "PrimValue", "The format (builtins::QuantFormat).")
+			.add_argument("group", "PrimValue", "The number of values of K per scale.")
+			.set_attr<::tvm::relax::FInferStructInfo>(
+					"FInferStructInfo",
+					[](const Call& call, const BlockBuilder&) -> ::tvm::relax::StructInfo {
+						auto q = shapeOf(call->args[0]);
+						const int64_t format = intValue(call->args[3]);
+						const bool packed = format != static_cast<int64_t>(mdl::builtins::QuantFormat::int8);
+						Array<PrimExpr> shape{q[0], packed ? q[1] * 2 : q[1]};
+						return TensorStructInfo(ShapeExpr(shape), tensorInfo(call->args[1])->dtype);
+					}
+			)
+			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
+
 	Expr makeGeluBackward(Expr x, Expr dy) {
 		static const auto& op = ::tvm::Op::Get("mdl.gelu_backward");
 		return Call(op, {std::move(x), std::move(dy)});
@@ -794,7 +944,7 @@ namespace mdl::backend::tvm {
 	}
 
 	TVM_REGISTER_OP("mdl.matmul")
-			.set_num_inputs(9)
+			.set_num_inputs(12)
 			.add_argument("a", "Tensor", "The left operand A = permute(a, perm_a): [..., M, K].")
 			.add_argument("b", "Tensor", "The right operand B = permute(b, perm_b): [K, N], possibly batched.")
 			.add_argument("bias", "Tensor | PrimValue", "The bias [N] or PrimValue(0) for no bias.")
@@ -804,6 +954,9 @@ namespace mdl::backend::tvm {
 			.add_argument("alpha", "PrimValue", "Scale applied to the product.")
 			.add_argument("activation", "PrimValue", "The activation of the epilogue: 0 none, 1 GELU (erf).")
 			.add_argument("addend", "Tensor | PrimValue", "A tensor of the result's shape added last, or PrimValue(0).")
+			.add_argument("scales", "Tensor | PrimValue", "If b is quantized: the scales of mdl.dequant, else PrimValue(0).")
+			.add_argument("zeros", "Tensor | PrimValue", "If b is quantized: the zero points or PrimValue(0).")
+			.add_argument("quant", "ShapeExpr", "If b is quantized: [format, group] of mdl.dequant, else empty.")
 			.set_attr<::tvm::relax::FInferStructInfo>("FInferStructInfo", inferMatmul)
 			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
 
@@ -941,9 +1094,13 @@ namespace mdl::backend::tvm {
 				}));
 		map.Set("mdl.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					MatmulArgs args{call};
-					if (vendor)
+					if (vendor) {
 						if (auto e = matmulKernel(bb, args))
 							return *e;
+						if (args.quant) // a layout the quantized kernel does not cover: dequantize first
+							if (auto e = matmulKernel(bb, args = dequantized(bb, args)))
+								return *e;
+					}
 					return matmulTE(bb, args);
 				}));
 
@@ -982,6 +1139,17 @@ namespace mdl::backend::tvm {
 							},
 							"T_gelu", topi::kElementWise
 					));
+				}));
+		map.Set("mdl.dequant", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
+					// W[n, k] = scales[k / group, n] * (q[n, k] - zeros[k / group, n]), in float32 (see QuantFormat).
+					const Quantized quant{
+							call->args[1],
+							tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt,
+							static_cast<mdl::builtins::QuantFormat>(intValue(call->args[3])), intValue(call->args[4])
+					};
+					TECall te{bb, "dequant"};
+					auto w = dequantCompute(te, call->args[0], quant);
+					return te.finish(w);
 				}));
 		map.Set("mdl.gelu_backward", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto &x = call->args[0], &dy = call->args[1];

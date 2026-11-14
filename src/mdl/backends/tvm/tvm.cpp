@@ -52,6 +52,8 @@ static ::tvm::runtime::DataType toTVMType(mdl::PrimitiveType p) {
 		return ::tvm::runtime::DataType::Float(16);
 	case mdl::PrimitiveType::bfloat16:
 		return ::tvm::runtime::DataType::BFloat(16);
+	case mdl::PrimitiveType::int8:
+		return ::tvm::runtime::DataType::Int(8);
 	case mdl::PrimitiveType::uint:
 		return ::tvm::runtime::DataType::UInt(32);
 	case mdl::PrimitiveType::integer:
@@ -360,7 +362,8 @@ static ::tvm::relax::Expr translateRelax(
 	// Python legalizations, and backend patterns rely on seeing the constant values.)
 	using FIDs = mdl::builtins::FunctionIDs;
 	bool isShapeOp = (node.id == FIDs::RESHAPE || node.id == FIDs::PERMUTE || node.id == FIDs::EXPAND ||
-					  node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE); // integer arguments stay integers
+					  node.id == FIDs::SELECT || node.id == FIDs::UNSELECT_LIKE ||
+					  node.id == FIDs::DEQUANT); // integer arguments stay integers
 	// The element type of the result: float constants are created in it (the operands have it already: conversions
 	// between float types are explicit CASTs).
 	const auto* tensorType = std::get_if<mdl::TensorType>(&node.type);

@@ -108,10 +108,14 @@ namespace mdl {
 		/**
 		 * @brief Rebuilds the subgraph of @p roots with the nodes in @p replacements replaced (e.g. by new inputs).
 		 * @details Nodes that do not depend on a replaced node are shared, not copied.
+		 * @param keepCalls whether the module calls (see ModuleCall) are recorded for the rebuilt nodes: true if the
+		 * replacements keep the calls units (e.g. a weight replaced by a computation of other weights), false if not
+		 * (e.g. values inside a call replaced by inputs).
 		 * @return the rebuilt roots (in the same order).
 		 */
 		Outputs substitute(
-				const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements
+				const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements,
+				bool keepCalls = false
 		);
 
 		/**

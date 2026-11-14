@@ -43,6 +43,27 @@ MDL_MATMUL_DECLARE(f16, uint16_t)
 #undef MDL_MATMUL_DECLARE
 
 /**
+ * @brief Matrix multiplication with quantized weights (a linear layer): `dst = act(alpha * A @ W^T + bias) + addend`
+ * with W [N, K] the dequantization of @p q: `W[n, k] = scales[k / group, n] * (q[n, k] - zeros[k / group, n])`.
+ * @details A[m, k] is at `A + m * a_sM + k * a_sK`, dst[m, n] (and addend[m, n]) at `dst + m * d_sM + n * d_sN`.
+ * @param q [N, K] int8 values (format 1), or [N, K/2] bytes of two 4-bit values (low nibble: even k), signed (format
+ * 2) or unsigned with zero points (format 3); see mdl::builtins::QuantFormat
+ * @param scales [K / group, N] in the element type of the kernel
+ * @param zeros [K / group, N] int8; only read if @p has_zeros is non-zero
+ */
+#define MDL_MATMUL_Q_DECLARE(suffix, type)                                                                             \
+	int mdl_matmul_q_##suffix(                                                                                         \
+			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,    \
+			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,       \
+			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,           \
+			int32_t activation, float alpha                                                                            \
+	);
+MDL_MATMUL_Q_DECLARE(f32, float)
+MDL_MATMUL_Q_DECLARE(bf16, uint16_t)
+MDL_MATMUL_Q_DECLARE(f16, uint16_t)
+#undef MDL_MATMUL_Q_DECLARE
+
+/**
  * @brief Profiling hooks: models compiled with `mdlc --profile` call these around every kernel call. The times are
  * summed per kernel kind and printed to stderr at program exit.
  */

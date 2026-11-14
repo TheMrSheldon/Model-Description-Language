@@ -300,7 +300,8 @@ std::expected<Computegraph::Outputs, std::string> Computegraph::addModuleInvocat
 }
 
 Computegraph::Outputs Computegraph::substitute(
-		const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements
+		const std::vector<NodeRef>& roots, const std::unordered_map<const Node*, const Node*>& replacements,
+		bool keepCalls
 ) {
 	Inliner inliner{*this};
 	for (const auto& [from, to] : replacements)
@@ -309,7 +310,8 @@ Computegraph::Outputs Computegraph::substitute(
 	result.reserve(roots.size());
 	for (const auto& root : roots)
 		result.push_back(std::cref(inliner.clone(root.get())));
-	// Module calls are not propagated: a call whose outputs were replaced (e.g. by inputs) is no longer a unit.
+	if (keepCalls)
+		inliner.propagateModuleCalls(nullptr); // same scopes and paths
 	return result;
 }
 

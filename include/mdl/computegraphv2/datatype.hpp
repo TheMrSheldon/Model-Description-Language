@@ -23,7 +23,8 @@ namespace mdl {
 		uint,	  /**< represents arbitrary unsigned integers. The precise datatype is compile-time configurable. */
 		boolean,  /**< represents booleans. */
 		float16,  /**< IEEE 754 half precision (`float16`) */
-		bfloat16  /**< bfloat16 (`bfloat16`): float32's exponent range with 8 bits of precision */
+		bfloat16, /**< bfloat16 (`bfloat16`): float32's exponent range with 8 bits of precision */
+		int8	  /**< 8-bit integers: the storage of quantized weights (see builtins::FunctionIDs::DEQUANT) */
 	};
 
 	/** @brief Whether @p type is a floating-point type. */
@@ -33,7 +34,9 @@ namespace mdl {
 
 	/** @brief The size of an element of @p type in bytes (booleans: 1). */
 	constexpr unsigned byteSize(PrimitiveType type) {
-		return type == PrimitiveType::float16 || type == PrimitiveType::bfloat16 ? 2 : type == PrimitiveType::boolean ? 1 : 4;
+		return type == PrimitiveType::float16 || type == PrimitiveType::bfloat16	   ? 2
+			   : type == PrimitiveType::boolean || type == PrimitiveType::int8 ? 1
+																			   : 4;
 	}
 
 	struct TensorType final {

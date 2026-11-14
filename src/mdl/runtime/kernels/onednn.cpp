@@ -278,6 +278,125 @@ namespace {
 		stream().wait();
 	}
 
+	/**
+	 * @brief dst = act(alpha * A @ W^T + bias) + addend with quantized W [N, K] (see mdl_matmul_q_f32): oneDNN's
+	 * weight decompression (the weights are dequantized inside the GEMM's inner loop, so they are read from memory in
+	 * their compressed size); where oneDNN does not implement a configuration, W is dequantized into a scratch buffer
+	 * first.
+	 */
+	void matmulQuantized(
+			dt t, void* dst, const void* A, const int8_t* q, const void* scales, const int8_t* zeros, int format,
+			int64_t group, const void* bias, int64_t M, int64_t K, int64_t N, int64_t aM, int64_t aK, int64_t dM,
+			int64_t dN, const void* addend, int activation, float alpha
+	) {
+		const bool int4 = format != 1;
+		const memory::dim groups = K / group;
+		const dt weightType = format == 1 ? dt::s8 : format == 2 ? dt::s4 : dt::u4;
+		const View a{{M, K}, {aM, aK}}, d{{M, N}, {dM, dN}};
+		const memory::desc srcMd(a.dims, t, a.strides), dstMd(d.dims, t, d.strides);
+		const memory::desc wMd({K, N}, weightType, memory::format_tag::ba); // W [N, K] row-major
+		// Scales: one per output (a single group), or [K / group, N].
+		const bool perOutput = groups == 1;
+		const memory::desc scalesMd = perOutput ? memory::desc({N}, t, memory::format_tag::a)
+												: memory::desc({groups, N}, t, memory::format_tag::ab);
+		const memory::desc zerosMd({groups, N}, dt::u8, memory::format_tag::ab);
+		const memory::desc biasMd({1, N}, t, memory::format_tag::ab);
+
+		using Key = std::tuple<int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int, float>;
+		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
+		const auto& prim = cache.get(
+				Key{static_cast<int>(t), format, group, M, K, N, aM, aK, dM, dN, zeros != nullptr, bias != nullptr,
+					addend != nullptr, activation, alpha},
+				[&]() -> std::optional<dnnl::matmul> {
+					dnnl::primitive_attr attr;
+					// Compute in the activations' type; apply_to_int: the integer weights are converted to it.
+					attr.set_fpmath_mode(
+							t == dt::f32	? dnnl::fpmath_mode::strict
+							: t == dt::bf16 ? dnnl::fpmath_mode::bf16
+											: dnnl::fpmath_mode::f16,
+							true
+					);
+					if (perOutput)
+						attr.set_scales(DNNL_ARG_WEIGHTS, 1 << 1, {}, t);
+					else
+						attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {group, 1}, t);
+					if (zeros != nullptr)
+						attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {group, 1}, dt::u8);
+					if (alpha != 1.0f)
+						attr.set_scales_mask(DNNL_ARG_SRC, 0);
+					dnnl::post_ops ops;
+					if (activation == 1)
+						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
+					if (addend != nullptr)
+						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
+					attr.set_post_ops(ops);
+					auto create = [&] {
+						return bias ? dnnl::matmul::primitive_desc(engine(), srcMd, wMd, biasMd, dstMd, attr)
+									: dnnl::matmul::primitive_desc(engine(), srcMd, wMd, dstMd, attr);
+					};
+					if (!implemented(create))
+						return std::nullopt;
+					return dnnl::matmul(create());
+				}
+		);
+		if (!prim) { // dequantize W (in float32), then an ordinary matrix product with B = W^T
+			thread_local Scratch scratch;
+			thread_local std::vector<uint16_t> narrow;
+			const float* s32 = t == dt::f32 ? static_cast<const float*>(scales) : widened(scratch, 0, t, scales, groups * N);
+			float* w = scratch.get(1, N * K);
+#pragma omp parallel for schedule(static)
+			for (int64_t n = 0; n < N; ++n)
+				for (int64_t k = 0; k < K; ++k) {
+					int v;
+					if (!int4) {
+						v = q[n * K + k];
+					} else {
+						const auto byte = static_cast<uint8_t>(q[n * (K / 2) + k / 2]);
+						v = k % 2 == 0 ? byte & 0xF : byte >> 4;
+						if (format == 2 && v >= 8)
+							v -= 16;
+					}
+					const int64_t g = k / group;
+					if (zeros != nullptr)
+						v -= zeros[g * N + n];
+					w[n * K + k] = static_cast<float>(v) * s32[g * N + n];
+				}
+			const void* weights = w;
+			if (t != dt::f32) {
+				narrow.resize(static_cast<size_t>(N * K));
+				convert(dt::f32, w, t, narrow.data(), N * K);
+				weights = narrow.data();
+			}
+			const View b{{K, N}, {1, K}};
+			matmul(t, dst, A, weights, bias, a, b, d, addend, activation, alpha);
+			return;
+		}
+
+		memory src(srcMd, engine(), const_cast<void*>(A));
+		memory wei(wMd, engine(), const_cast<int8_t*>(q));
+		memory out(dstMd, engine(), dst);
+		std::unordered_map<int, memory> args{
+				{DNNL_ARG_SRC, src},
+				{DNNL_ARG_WEIGHTS, wei},
+				{DNNL_ARG_DST, out},
+				{DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, memory(scalesMd, engine(), const_cast<void*>(scales))},
+		};
+		if (zeros != nullptr)
+			args.emplace(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS, memory(zerosMd, engine(), const_cast<int8_t*>(zeros)));
+		if (bias)
+			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
+		if (addend != nullptr)
+			args.emplace(
+					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
+					memory(dstMd, engine(), const_cast<void*>(addend))
+			);
+		float scale = alpha;
+		if (alpha != 1.0f)
+			args.emplace(DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, memory({{1}, dt::f32, {1}}, engine(), &scale));
+		prim->execute(stream(), args);
+		stream().wait();
+	}
+
 	void softmax(dt t, void* dst, const void* src, int64_t outer, int64_t axis) {
 		using Key = std::tuple<int, int64_t, int64_t>;
 		static PrimitiveCache<Key, std::optional<dnnl::softmax_forward>> cache;
@@ -471,6 +590,18 @@ namespace {
 			d.dims.insert(d.dims.end(), {M, N}), d.strides.insert(d.strides.end(), {d_sM, d_sN});                      \
 			matmul(dtype, dst, A, B, has_bias ? bias : nullptr, a, b, d, has_addend ? addend : nullptr, activation,    \
 				   alpha);                                                                                             \
+		});                                                                                                            \
+	}                                                                                                                  \
+	extern "C" int mdl_matmul_q_##suffix(                                                                              \
+			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,    \
+			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,       \
+			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,           \
+			int32_t activation, float alpha                                                                            \
+	) {                                                                                                                \
+		return guarded([&] {                                                                                           \
+			matmulQuantized(dtype, dst, A, q, scales, has_zeros ? zeros : nullptr, format, group,                      \
+							has_bias ? bias : nullptr, M, K, N, a_sM, a_sK, d_sM, d_sN, has_addend ? addend : nullptr, \
+							activation, alpha);                                                                        \
 		});                                                                                                            \
 	}                                                                                                                  \
 	extern "C" int mdl_softmax_##suffix(type* dst, const type* src, int64_t outer, int64_t axis) {                    \

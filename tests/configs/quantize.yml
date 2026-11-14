@@ -1,0 +1,10 @@
+args:
+  Project: { n: 32 }
+build:
+  quantize: [{ weights: ["**"], format: int4, group: 16 }]   # W (s is no matrix)
+builds:
+  train: { grad: [forward] }                                 # the gradient of s only: W is frozen
+  train-all: { grad: [forward], trainable: ["**"] }          # error: selects the quantized W
+  bad-group: { quantize: [{ weights: ["W"], format: int4, group: 12 }] }  # error: 12 does not divide 32
+  vector: { quantize: [{ weights: ["W", "s"], format: int8 }] }        # error: s is no matrix
+  typo: { quantize: [{ weights: ["W", "V"], format: int8 }] }          # warning: V selects no matrix

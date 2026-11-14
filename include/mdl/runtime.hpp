@@ -11,6 +11,7 @@
 #include <dlpack/dlpack.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cctype>
 #include <cmath>
@@ -22,6 +23,7 @@
 #include <map>
 #include <new>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -130,6 +132,8 @@ namespace mdl::runtime {
 			return {kDLFloat, 16, 1};
 		else if constexpr (std::is_same_v<T, int32_t>)
 			return {kDLInt, 32, 1};
+		else if constexpr (std::is_same_v<T, int8_t>)
+			return {kDLInt, 8, 1};
 		else if constexpr (std::is_same_v<T, uint8_t>)
 			return {kDLBool, 8, 1};
 		else
@@ -208,6 +212,8 @@ namespace mdl::runtime {
 	using BFloat16Tensor = BasicTensor<bfloat16>;
 	using Float16Tensor = BasicTensor<float16>;
 	using IntTensor = BasicTensor<int32_t>;
+	/** @brief Quantized weights (`W.qweight`, `W.zeros`; see `mdlc --quantize`). */
+	using Int8Tensor = BasicTensor<int8_t>;
 	/** @brief A boolean tensor, e.g. the mask of a masked function (1: valid, 0: masked). */
 	using MaskTensor = BasicTensor<uint8_t>;
 
@@ -228,6 +234,13 @@ namespace mdl::runtime {
 	/** @brief Whether loading may convert float weights to the model's float type (e.g. a float32 file for bfloat16). */
 	enum class FloatConversion { none, allowed };
 
+	/**
+	 * @brief Whether loading may quantize float weights for a model compiled with `mdlc --quantize`: a weight W that
+	 * the model expects as `W.qweight`, `W.scales` (and `W.zeros`) is computed from the float tensor `W` of the file
+	 * (round to nearest) if the file has no quantized parts of W.
+	 */
+	enum class Quantization { none, fromFloat };
+
 	namespace detail {
 		/** @brief The safetensors dtype of a DLPack data type (empty if unsupported). */
 		inline std::string safetensorsDtype(DLDataType t) {
@@ -241,6 +254,8 @@ namespace mdl::runtime {
 				return "F16";
 			if (t.code == kDLInt && t.bits == 32)
 				return "I32";
+			if (t.code == kDLInt && t.bits == 8)
+				return "I8";
 			if (t.code == kDLUInt && t.bits == 8)
 				return "U8";
 			if (t.code == kDLBool && t.bits == 8)
@@ -292,6 +307,86 @@ namespace mdl::runtime {
 					throw std::runtime_error("safetensors: read failed");
 			}
 		};
+
+		/** @brief Reads the float tensor @p e (F32, BF16, or F16) of @p file as float32 values. */
+		inline std::vector<float> readAsFloat(SafetensorsFile& file, const SafetensorsEntry& e) {
+			std::vector<char> raw(e.end - e.begin);
+			file.read(e, raw.data());
+			const size_t width = e.dtype == "F32" ? 4 : 2;
+			std::vector<float> values(raw.size() / width);
+			for (size_t i = 0; i < values.size(); ++i) {
+				if (width == 4) {
+					std::memcpy(&values[i], raw.data() + 4 * i, 4);
+					continue;
+				}
+				uint16_t bits;
+				std::memcpy(&bits, raw.data() + 2 * i, 2);
+				values[i] = e.dtype == "BF16" ? static_cast<float>(std::bit_cast<bfloat16>(bits))
+											  : static_cast<float>(std::bit_cast<float16>(bits));
+			}
+			return values;
+		}
+
+		/** @brief A float32 value rounded to the float type @p dtype ("F32", "BF16", "F16"). */
+		inline float roundTo(const std::string& dtype, float v) {
+			if (dtype == "BF16")
+				return static_cast<float>(bfloat16{v});
+			if (dtype == "F16")
+				return static_cast<float>(float16{v});
+			return v;
+		}
+
+		/**
+		 * @brief Round-to-nearest quantization of W [N, K] (see mdl::builtins::QuantFormat): q [N, K] int8 (int8) or
+		 * [N, K/2] packed nibbles (int4: low nibble = even k), scales [K/group, N] and (asymmetric) zeros [K/group, N].
+		 * @param scaleDtype the type the scales are stored in (they are rounded to it before quantizing).
+		 */
+		struct Quantized {
+			std::vector<int8_t> q;
+			std::vector<float> scales;
+			std::vector<int8_t> zeros;
+		};
+		inline Quantized quantize(
+				const std::vector<float>& w, int64_t N, int64_t K, int64_t group, bool int4, bool asymmetric,
+				const std::string& scaleDtype
+		) {
+			const int64_t groups = K / group;
+			Quantized r{std::vector<int8_t>(N * (int4 ? K / 2 : K)), std::vector<float>(groups * N), {}};
+			if (asymmetric)
+				r.zeros.resize(groups * N);
+			const float qmax = int4 ? 7.0f : 127.0f;
+			for (int64_t n = 0; n < N; ++n)
+				for (int64_t g = 0; g < groups; ++g) {
+					const float* row = w.data() + n * K + g * group;
+					float lo = 0.0f, hi = 0.0f, amax = 0.0f;
+					for (int64_t j = 0; j < group; ++j) {
+						lo = std::min(lo, row[j]);
+						hi = std::max(hi, row[j]);
+						amax = std::max(amax, std::abs(row[j]));
+					}
+					float scale = asymmetric ? (hi - lo) / 15.0f : amax / qmax;
+					scale = roundTo(scaleDtype, scale);
+					const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+					int zero = 0;
+					if (asymmetric) {
+						zero = static_cast<int>(std::clamp(std::nearbyint(-lo * inv), 0.0f, 15.0f));
+						r.zeros[g * N + n] = static_cast<int8_t>(zero);
+					}
+					r.scales[g * N + n] = scale;
+					for (int64_t j = 0; j < group; ++j) {
+						const int64_t k = g * group + j;
+						int v = static_cast<int>(std::nearbyint(row[j] * inv)) + zero;
+						v = asymmetric ? std::clamp(v, 0, 15) : std::clamp(v, int4 ? -8 : -127, int4 ? 7 : 127);
+						if (!int4) {
+							r.q[n * K + k] = static_cast<int8_t>(v);
+							continue;
+						}
+						auto& byte = reinterpret_cast<uint8_t&>(r.q[n * (K / 2) + k / 2]);
+						byte |= static_cast<uint8_t>((v & 0xF) << (k % 2 == 0 ? 0 : 4));
+					}
+				}
+			return r;
+		}
 
 		template <typename T>
 		std::string safetensorsDtypeOf() {
@@ -391,6 +486,7 @@ namespace mdl::runtime {
 		std::map<std::string, BasicTensor<bfloat16>> bfloats;
 		std::map<std::string, BasicTensor<float16>> halves;
 		std::map<std::string, BasicTensor<int32_t>> ints;
+		std::map<std::string, BasicTensor<int8_t>> bytes;
 
 		LoadedWeights() = default;
 		LoadedWeights(const LoadedWeights&) = delete; // the slots point into this object's tensors
@@ -411,7 +507,8 @@ namespace mdl::runtime {
 	 */
 	template <typename Model>
 	LoadedWeights<Model> loadWeights(
-			const std::filesystem::path& path, const NameMap& map = {}, FloatConversion conversion = FloatConversion::none
+			const std::filesystem::path& path, const NameMap& map = {}, FloatConversion conversion = FloatConversion::none,
+			Quantization quantization = Quantization::none
 	) {
 		detail::SafetensorsFile file{path};
 		LoadedWeights<Model> result;
@@ -420,7 +517,8 @@ namespace mdl::runtime {
 			std::string target = map ? map(name) : name;
 			if (target.empty())
 				continue;
-			if (result.weights.find(target) == nullptr) {
+			if (result.weights.find(target) == nullptr &&
+				(quantization == Quantization::none || result.weights.find(target + ".qweight") == nullptr)) {
 				result.unused.push_back(name);
 				continue;
 			}
@@ -428,7 +526,73 @@ namespace mdl::runtime {
 		}
 
 		std::string problems;
+		// Quantization of float weights: the parts of each quantized weight W, computed once from the file's W.
+		std::map<std::string, detail::Quantized> quantized;
+		auto quantizedPart = [&](const std::string& name) -> std::optional<std::pair<std::string, std::string>> {
+			if (quantization == Quantization::none)
+				return std::nullopt;
+			for (const char* part : {".qweight", ".scales", ".zeros"})
+				if (name.ends_with(part)) {
+					const std::string weight = name.substr(0, name.size() - std::strlen(part));
+					if (!byPath.contains(name) && byPath.contains(weight))
+						return std::pair{weight, std::string{part}};
+				}
+			return std::nullopt;
+		};
+		using Info = std::remove_cvref_t<decltype(Model::Weights::infos[0])>;
+		auto infoOf = [](const std::string& name) -> const Info* {
+			for (const auto& info : Model::Weights::infos)
+				if (name == info.name)
+					return &info;
+			return nullptr;
+		};
 		for (const auto& info : Model::Weights::infos) {
+			if (auto part = quantizedPart(info.name)) {
+				const auto& [weight, suffix] = *part;
+				const SafetensorsEntry& e = *byPath.at(weight);
+				const auto* q = infoOf(weight + ".qweight");
+				const auto* scales = infoOf(weight + ".scales");
+				const bool asymmetric = infoOf(weight + ".zeros") != nullptr;
+				const std::string scaleDtype = scales ? detail::safetensorsDtype(scales->dtype) : "";
+				const bool isFloat = e.dtype == "F32" || e.dtype == "BF16" || e.dtype == "F16";
+				if (q == nullptr || scales == nullptr || e.shape.size() != 2 || !isFloat || q->ndim != 2 ||
+					scales->ndim != 2 || q->shape[0] != e.shape[0] || scales->shape[1] != e.shape[0] ||
+					(q->shape[1] != e.shape[1] && 2 * q->shape[1] != e.shape[1]) || scales->shape[0] <= 0 ||
+					e.shape[1] % scales->shape[0] != 0) {
+					problems += "\n  " + weight + ": cannot quantize the file's " + e.dtype + " tensor for the model";
+					continue;
+				}
+				const int64_t N = e.shape[0], K = e.shape[1];
+				auto it = quantized.find(weight);
+				if (it == quantized.end())
+					it = quantized
+								 .emplace(weight, detail::quantize(
+														  detail::readAsFloat(file, e), N, K, K / scales->shape[0],
+														  q->shape[1] != K, asymmetric, scaleDtype
+												  ))
+								 .first;
+				const std::vector<int64_t> shape(info.shape.begin(), info.shape.begin() + info.ndim);
+				if (suffix != ".scales") {
+					const auto& values = suffix == ".qweight" ? it->second.q : it->second.zeros;
+					auto& stored = result.bytes.emplace(info.name, BasicTensor<int8_t>{shape, std::vector<int8_t>(values.begin(), values.end())}).first->second;
+					*result.weights.find(info.name) = stored.dl();
+					continue;
+				}
+				const auto& values = it->second.scales;
+				auto bindScales = [&](auto& storage, auto tensor) {
+					for (size_t i = 0; i < values.size(); ++i)
+						tensor.data()[i] = values[i];
+					auto& stored = storage.emplace(info.name, std::move(tensor)).first->second;
+					*result.weights.find(info.name) = stored.dl();
+				};
+				if (scaleDtype == "BF16")
+					bindScales(result.bfloats, BasicTensor<bfloat16>{shape});
+				else if (scaleDtype == "F16")
+					bindScales(result.halves, BasicTensor<float16>{shape});
+				else
+					bindScales(result.floats, BasicTensor<float>{shape});
+				continue;
+			}
 			auto it = byPath.find(info.name);
 			if (it == byPath.end()) {
 				problems += std::string("\n  missing: ") + info.name;
@@ -477,6 +641,8 @@ namespace mdl::runtime {
 			};
 			if (dtype == "I32")
 				bind(result.ints, BasicTensor<int32_t>{e.shape});
+			else if (dtype == "I8")
+				bind(result.bytes, BasicTensor<int8_t>{e.shape});
 			else if (dtype == "BF16")
 				bind(result.bfloats, BasicTensor<bfloat16>{e.shape});
 			else if (dtype == "F16")

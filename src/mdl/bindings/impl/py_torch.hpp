@@ -55,6 +55,8 @@ namespace mdl::bindings {
 				return "torch.float16";
 			case PrimitiveType::bfloat16:
 				return "torch.bfloat16";
+			case PrimitiveType::int8:
+				return "torch.int8";
 			default:
 				return "torch.float32";
 			}

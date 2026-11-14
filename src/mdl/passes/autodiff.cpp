@@ -274,6 +274,8 @@ namespace mdl::autodiff {
 				return arg == 0;
 			case FIDs::EQUAL_MASK:
 				return false; // piecewise constant
+			case FIDs::DEQUANT:
+				return false; // quantized weights are frozen
 			case FIDs::STOP_GRADIENT:
 			case FIDs::ONE_HOT_LIKE:
 				return false;
@@ -482,7 +484,7 @@ namespace mdl::autodiff {
 				inputNodes.emplace(in, node);
 		}
 		auto selected = [&](const std::string& path) {
-			return options.trainable.empty() || options.trainable.selects(path);
+			return !options.frozen.contains(path) && (options.trainable.empty() || options.trainable.selects(path));
 		};
 		std::unordered_set<const Node*> dependsOnTarget;
 		for (const auto& step : steps) {

@@ -2,7 +2,9 @@
 // Face's BertForSequenceClassification on padded sequences (data/bert_tiny_cls.safetensors, see
 // export_bert_reference.py --classes). With MDL_CLS_TRAIN, the objective `loss` is compiled as a masked gradient build
 // (`--mask loss --grad loss`, labels [batch] via `--ellipsis-rank labels=1`): its value is compared with Hugging
-// Face's loss, and its gradients with central finite differences.
+// Face's loss, and its gradients with central finite differences. With MDL_QUANTIZED (a tolerance), the model is compiled
+// with quantized weight matrices (`--quantize`), which are quantized from the float checkpoint while loading; the error
+// relative to the largest logit must be below MDL_QUANTIZED.
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -19,7 +21,15 @@ using Model = mdl::models::BertForSequenceClassification;
 
 int main(int argc, char** argv) {
 	const std::string path = argc > 1 ? argv[1] : MDL_BERT_REFERENCE;
+#ifdef MDL_QUANTIZED
+	auto loaded = mdl::runtime::loadWeights<Model>(
+			path, {}, mdl::runtime::FloatConversion::none, mdl::runtime::Quantization::fromFloat
+	);
+	const double tolerance = MDL_QUANTIZED;
+#else
 	auto loaded = mdl::runtime::loadWeights<Model>(path);
+	const double tolerance = 1e-4;
+#endif
 	auto floats = mdl::runtime::loadSafetensorsAs<float>(path);
 	auto ints = mdl::runtime::loadSafetensorsAs<int32_t>(path);
 	auto masks = mdl::runtime::loadSafetensorsAs<uint8_t>(path);
@@ -36,7 +46,15 @@ int main(int argc, char** argv) {
 		maxErr = std::max(maxErr, double(std::abs(logits.data()[i] - reference.data()[i])));
 	std::printf("logits [%lld, %lld]: max abs error vs Hugging Face %.3g\n", (long long)reference.shape()[0],
 				(long long)reference.shape()[1], maxErr);
-	bool ok = maxErr < 1e-4;
+#ifdef MDL_QUANTIZED
+	double largest = 0;
+	for (size_t i = 0; i < reference.size(); ++i)
+		largest = std::max(largest, double(std::abs(reference.data()[i])));
+	std::printf("error relative to the largest logit: %.3g\n", maxErr / largest);
+	bool ok = maxErr < tolerance * largest;
+#else
+	bool ok = maxErr < tolerance;
+#endif
 
 #ifdef MDL_CLS_TRAIN
 	// loss(ids, types, positions, labels, mask) -> loss, d_<weight>... (accumulated: start from zero)

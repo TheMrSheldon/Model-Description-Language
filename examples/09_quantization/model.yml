@@ -1,0 +1,22 @@
+# The weight matrices of the MLP in different formats (see docs/build-config.md, `quantize`).
+args:
+  MLP:
+    dims: [64, 96, 32]
+
+builds:
+  int8:                                       # one scale per output
+    quantize: [{ weights: ["**"], format: int8 }]
+  int8-grouped:                               # one scale per 32 inputs
+    quantize: [{ weights: ["**"], format: int8, group: 32 }]
+  int4:                                       # symmetric, one scale per 16 inputs
+    quantize: [{ weights: ["**"], format: int4, group: 16 }]
+  int4-asym:                                  # with zero points
+    quantize: [{ weights: ["**"], format: int4-asym, group: 32 }]
+  mixed:                                      # the first layer in 4 bits, the second in float
+    quantize: [{ weights: ["layers.0"], format: int4, group: 16 }]
+  int4-bf16:                                  # `float` as bfloat16: bfloat16 activations and scales
+    float: bf16
+    quantize: [{ weights: ["**"], format: int4, group: 16 }]
+  int8-f16:                                   # `float` as float16
+    float: f16
+    quantize: [{ weights: ["**"], format: int8 }]

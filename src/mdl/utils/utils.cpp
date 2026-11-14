@@ -38,7 +38,8 @@ std::string std::to_string(const PrimitiveType& prim) {
 			[std::to_underlying(PrimitiveType::uint)] = "uint",
 			[std::to_underlying(PrimitiveType::boolean)] = "bool",
 			[std::to_underlying(PrimitiveType::float16)] = "float16",
-			[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16"
+			[std::to_underlying(PrimitiveType::bfloat16)] = "bfloat16",
+			[std::to_underlying(PrimitiveType::int8)] = "int8"
 	};
 	return std::string{names[std::to_underlying(prim)]};
 }

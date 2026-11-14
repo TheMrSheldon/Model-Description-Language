@@ -312,6 +312,16 @@ namespace mdl::shapes {
 					arg(0);
 					return arg(3);
 
+				case FIDs::DEQUANT: { // q [N, K] (int4: [N, K/2]) -> [N, K]
+					Shape s = arg(0);
+					if (s.size() != 2)
+						fail("dequant of a quantized weight that is not 2-D");
+					const int64_t format = integer(args.at(3).get());
+					if (format == static_cast<int64_t>(builtins::QuantFormat::int4) ||
+						format == static_cast<int64_t>(builtins::QuantFormat::int4Asym))
+						s[1] = s[1] * Dim::constant(2);
+					return s;
+				}
 				case FIDs::STACK: {
 					if (args.empty())
 						fail("stack of no tensors");
@@ -549,6 +559,8 @@ namespace mdl::shapes {
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::SCATTER_ADD_ROWS:
 				return of(2).value_or(PrimitiveType::float32);
+			case FIDs::DEQUANT: // the type of the scales
+				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::UNSELECT_LIKE:
 				return of(3).value_or(PrimitiveType::float32);
 			case FIDs::TENSOR_ADD:

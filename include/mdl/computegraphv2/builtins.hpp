@@ -75,8 +75,22 @@ namespace mdl::builtins {
 		CAST, /**< (x, type): x converted to the element type `type` (a constant: the value of mdl::PrimitiveType) */
 		/** Stacking **/
 		STACK, /**< (x_0, ..., x_{n-1}): the tensors (of equal shapes) stacked along a new first dimension [n, ...] */
+		/** Quantization **/
+		DEQUANT, /**< (q, scales, zeros, format, group): the float weight [N, K] of a quantized one (see QuantFormat) */
 
 		COUNT
+	};
+
+	/**
+	 * @brief The formats of quantized weights (the constant `format` of FunctionIDs::DEQUANT). A weight W [N, K] (e.g.
+	 * of a linear layer: N outputs, K inputs) is stored as q [N, K] int8 (int4: [N, K/2], two values per byte, the
+	 * even k in the low nibble), scales [K/group, N] in the float type of W, and (asymmetric) zeros [K/group, N] int8:
+	 * W[n, k] = scales[k/group, n] * (q[n, k] - zeros[k/group, n]) (the layout of GPTQ checkpoints and of oneDNN).
+	 */
+	enum class QuantFormat : int {
+		int8 = 1,		 ///< signed 8 bits, symmetric (no zeros)
+		int4 = 2,		 ///< signed 4 bits (-8..7), symmetric (no zeros)
+		int4Asym = 3,	 ///< unsigned 4 bits (0..15) with zeros
 	};
 
 	/** @brief Marks the position of the ellipsis group in a PERMUTE permutation (see FunctionIDs::PERMUTE). */

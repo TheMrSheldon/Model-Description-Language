@@ -61,6 +61,8 @@ namespace mdl::bindings::detail {
 			return "{kDLFloat, 16, 1}";
 		case PrimitiveType::bfloat16:
 			return "{kDLBfloat, 16, 1}";
+		case PrimitiveType::int8:
+			return "{kDLInt, 8, 1}";
 		case PrimitiveType::integer:
 			return "{kDLInt, 32, 1}";
 		case PrimitiveType::uint:

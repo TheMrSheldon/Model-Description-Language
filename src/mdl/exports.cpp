@@ -143,9 +143,155 @@ hyperparameterValue(const CompilationUnit& unit, const DataType& type, const std
 	return std::nullopt;
 }
 
+/**
+ * @brief Replaces the weights that @p rules select (in the functions @p decls of a module) by the dequantization of
+ * their quantized parts (see QuantizationRule); updates the weight @p order and records the new parts in @p parts and
+ * the quantized weights in @p quantized.
+ */
+static void quantizeWeights(
+		const CompilationUnit& unit, const ArgVals& argvals, const std::string& moduleName,
+		const std::vector<QuantizationRule>& rules, std::map<std::string, const FunctionDecl*>& decls,
+		std::vector<std::string>& order, std::set<std::string>& parts, std::map<std::string, std::string>& quantized
+) {
+	using builtins::QuantFormat;
+	auto& graph = unit.graph();
+	std::map<std::string, const Node*> weightNodes;
+	{
+		std::vector<const Node*> stack;
+		std::unordered_set<const Node*> seen;
+		for (const auto& [_, decl] : decls)
+			for (const auto& out : decl->outputs)
+				stack.push_back(&out.get());
+		while (!stack.empty()) {
+			const Node* n = stack.back();
+			stack.pop_back();
+			if (!seen.insert(n).second)
+				continue;
+			if (const auto* pn = std::get_if<ParameterNode>(n))
+				weightNodes.emplace(pn->name, n);
+			else if (const auto* inv = std::get_if<InvocationNode>(n))
+				for (const auto& a : inv->arguments)
+					stack.push_back(&a.get());
+		}
+	}
+	// The rules' selections, and each of their (not negated) patterns alone: for the diagnostics.
+	struct Pattern {
+		std::string text;
+		PathPatterns alone;
+		bool exact;				   ///< a path without wildcards
+		bool selectsMatrix = false; ///< whether it selects a matrix used by the exported functions
+	};
+	std::vector<PathPatterns> selections;
+	std::vector<Pattern> patterns;
+	for (const auto& rule : rules) {
+		selections.emplace_back(rule.weights);
+		const size_t before = patterns.size();
+		for (const auto& line : rule.weights) {
+			const auto begin = line.find_first_not_of(" \t"), end = line.find_last_not_of(" \t\r");
+			const std::string text = begin == std::string::npos ? "" : line.substr(begin, end - begin + 1);
+			if (text.empty() || text.front() == '#' || text.front() == '!')
+				continue;
+			patterns.push_back({text, PathPatterns{{text}}, text.find_first_of("*?") == std::string::npos});
+		}
+		if (patterns.size() == before)
+			throw std::runtime_error("a quantization rule needs a pattern that selects weights (not only negations)");
+	}
+
+	std::unordered_map<const Node*, const Node*> replacements;
+	std::vector<std::string> newOrder;
+	for (const auto& path : order) {
+		auto node = weightNodes.find(path);
+		const auto* type = node == weightNodes.end() ? nullptr : std::get_if<TensorType>(&getDataType(*node->second));
+		// Only matrices are quantized (the patterns may select whole modules, including biases and norms).
+		const bool matrix = type != nullptr && type->shape.size() == 2 && isFloat(type->type);
+		for (auto& pattern : patterns) {
+			if (!pattern.alone.selects(path))
+				continue;
+			if (matrix)
+				pattern.selectsMatrix = true;
+			else if (pattern.exact && pattern.text == path && type != nullptr)
+				throw std::runtime_error(std::format(
+						"{}: the quantization pattern '{}' names the weight {} ({}-D), but only matrices (2-D float "
+						"weights) can be quantized",
+						moduleName, pattern.text, path, type->shape.size()
+				));
+		}
+		if (!matrix) {
+			newOrder.push_back(path);
+			continue;
+		}
+		const QuantizationRule* rule = nullptr; // the last rule that selects the weight
+		for (size_t i = 0; i < rules.size(); ++i)
+			if (selections[i].selects(path))
+				rule = &rules[i];
+		if (rule == nullptr) {
+			newOrder.push_back(path);
+			continue;
+		}
+		std::vector<int64_t> dims;
+		for (const auto& d : type->shape) {
+				std::optional<int64_t> v;
+				if (const auto* u = std::get_if<unsigned>(&d))
+					v = *u;
+				else if (const auto* n = std::get_if<const Node*>(&d))
+					v = evalConstant(**n, argvals);
+				if (!v)
+					break;
+				dims.push_back(*v);
+			}
+		if (dims.size() != 2)
+			throw std::runtime_error(std::format("{}.{}: only weights with constant shapes can be quantized", moduleName, path));
+		const int64_t N = dims[0], K = dims[1];
+		const bool int4 = rule->format != QuantFormat::int8;
+		const int64_t group = rule->group == 0 ? K : rule->group;
+		if (K % group != 0 || (int4 && group % 2 != 0))
+			throw std::runtime_error(std::format(
+					"{}.{}: the group size {} must divide the input dimension {}{}", moduleName, path, group, K,
+					int4 ? " and be even (int4)" : ""
+			));
+		auto tensor = [](PrimitiveType t, int64_t a, int64_t b) {
+			return TensorType{.type = t, .shape = {static_cast<unsigned>(a), static_cast<unsigned>(b)}};
+		};
+		const Node& q = graph.addParameterNode(tensor(PrimitiveType::int8, N, int4 ? K / 2 : K), path + ".qweight");
+		const Node& scales = graph.addParameterNode(tensor(type->type, K / group, N), path + ".scales");
+		std::vector<std::string> names{path + ".qweight", path + ".scales"};
+		const Node* zeros = &graph.addConstNode(Atomic{0});
+		if (rule->format == QuantFormat::int4Asym) {
+			zeros = &graph.addParameterNode(tensor(PrimitiveType::int8, K / group, N), path + ".zeros");
+			names.push_back(path + ".zeros");
+		}
+		newOrder.insert(newOrder.end(), names.begin(), names.end());
+		parts.insert(names.begin(), names.end());
+		quantized.emplace(path, std::format("format {}, group {}", std::to_underlying(rule->format), group));
+		replacements.emplace(
+				node->second,
+				&graph.addInvocationNode(
+						builtins::FunctionIDs::DEQUANT,
+						{q, scales, *zeros, graph.addConstNode(Atomic{static_cast<int>(rule->format)}),
+						 graph.addConstNode(Atomic{static_cast<int>(group)})}
+				)
+		);
+	}
+	for (const auto& pattern : patterns)
+		if (!pattern.selectsMatrix)
+			log::getLogger("compiler")->warn(
+					"{}: the quantization pattern '{}' selects no weight matrix used by the exported functions",
+					moduleName, pattern.text
+			);
+	if (replacements.empty())
+		return;
+	for (auto& [_, decl] : decls) {
+		FunctionDecl rewritten = *decl;
+		rewritten.outputs = graph.substitute(decl->outputs, replacements, /*keepCalls=*/true);
+		decl = &unit.keep(std::move(rewritten));
+	}
+	order = std::move(newOrder);
+}
+
 std::vector<ExportedFunction> mdl::exportedFunctions(
 		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients,
-		const std::vector<std::string>& masked, const std::map<std::string, unsigned>& inputRanks
+		const std::vector<std::string>& masked, const std::map<std::string, unsigned>& inputRanks,
+		const std::vector<QuantizationRule>& quantize
 ) {
 	std::vector<ExportedFunction> exports;
 	std::set<std::string> differentiated; // the requested gradient functions that some compiled module defines
@@ -175,7 +321,7 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			module = &result->get();
 			hyperparameters = module->hyperparameterValues; // (including defaults)
 		}
-		const auto order = weightPaths(*module);
+		auto order = weightPaths(*module);
 
 		// The member functions; the gradient pass replaces the requested ones by their gradient functions.
 		struct Function {
@@ -280,6 +426,13 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			it->second = &unit.keep(std::move(result->function));
 		}
 
+		// Quantization: the selected weights become the dequantization of their quantized parts (after masking,
+		// which elaborates functions anew, and before differentiation, which then sees a computation of frozen weights).
+		std::set<std::string> quantizedParts;
+		std::map<std::string, std::string> quantizedFrom; // quantized weight -> its rule's description (diagnostics)
+		if (!quantize.empty())
+			quantizeWeights(unit, argvals, moduleName, quantize, decls, order, quantizedParts, quantizedFrom);
+
 		for (const auto& [funcName, decl] : decls)
 			if (!requested(funcName))
 				functions.push_back({funcName, decl});
@@ -299,6 +452,14 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 						cotangentShapes["d_" + (original.outputs.size() == 1 ? std::string{"output"} : "output" + std::to_string(i))] = *s;
 			autodiff::Options options = gradients.options;
 			options.shapes = &oracle;
+			options.frozen = quantizedParts;
+			if (!options.trainable.empty())
+				for (const auto& [weight, _] : quantizedFrom)
+					if (options.trainable.selects(weight) || options.trainable.selects(weight + ".qweight"))
+						throw std::runtime_error(std::format(
+								"{}: the weight {} is quantized and cannot be trained (exclude it with --trainable '!{}')",
+								moduleName, weight, weight
+						));
 			auto grad = autodiff::vjp(unit.graph(), original, order, options);
 			if (!grad)
 				throw std::runtime_error(moduleName + "." + grad.error());
@@ -317,8 +478,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				reach(output.get());
 			std::vector<std::string> gradientOf;
 			for (const auto& path : order) {
-				const bool selected =
-						gradients.options.trainable.empty() || gradients.options.trainable.selects(path);
+				const bool selected = !quantizedParts.contains(path) &&
+									  (gradients.options.trainable.empty() || gradients.options.trainable.selects(path));
 				const bool used = std::any_of(reachable.begin(), reachable.end(), [&](const Node* n) {
 					const auto* pn = std::get_if<ParameterNode>(n);
 					return pn != nullptr && pn->name == path;
@@ -429,6 +590,12 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			std::sort(weights.begin(), weights.end(), [&](auto* a, auto* b) { return rank(a) < rank(b); });
 			for (const auto* weight : weights) {
 				const auto& pn = std::get<ParameterNode>(*weight);
+				if (quantizedFrom.contains(pn.name)) // e.g. used by the custom gradient of a module
+					throw std::runtime_error(std::format(
+							"{}.{}: uses the quantized weight {} itself (custom gradients of quantized modules are not "
+							"supported)",
+							moduleName, funcName, pn.name
+					));
 				fn.weights.push_back(makeSignature(pn.name, pn.type, weight, argvals, ellipsisRank));
 			}
 			// The exact output shapes (the `...` of an output may have fewer dimensions than that of the inputs, e.g.

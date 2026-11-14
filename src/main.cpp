@@ -110,6 +110,30 @@ public:
 								"build key diagnostics.{}: expected error, warning, or ignored (got {})", name, level
 						));
 				}
+			} else if (key == "quantize") { // [{weights: [...], format: F, group: G}, ...] or FORMAT[:GROUP]=PATTERNS
+				item.name = key;
+				for (const auto& rule : node.IsSequence() ? node : YAML::Node(std::vector<YAML::Node>{node})) {
+					if (rule.IsScalar()) {
+						item.inputs.push_back(rule.as<std::string>());
+						continue;
+					}
+					if (!rule.IsMap() || !rule["weights"] || !rule["format"])
+						throw CLI::ConfigError("build key quantize: expected a list of {weights: [patterns], format: "
+											   "int8|int4|int4-asym, group: N}");
+					for (const auto& entry : rule) {
+						const auto name = entry.first.as<std::string>();
+						if (name != "weights" && name != "format" && name != "group")
+							throw CLI::ConfigError("build key quantize: unknown key " + name + " (weights, format, group)");
+					}
+					std::string value = rule["format"].as<std::string>();
+					if (rule["group"])
+						value += ":" + rule["group"].as<std::string>();
+					value += "=";
+					const auto patterns = scalars(rule["weights"], "quantize.weights");
+					for (size_t i = 0; i < patterns.size(); ++i)
+						value += (i > 0 ? "," : "") + patterns[i];
+					item.inputs.push_back(value);
+				}
 			} else if (key == "ellipsis-rank" && node.IsMap()) { // {default: N, NAME: K}
 				item.name = key;
 				for (const auto& entry : node) {
@@ -147,6 +171,7 @@ struct CompileArgs {
 	std::vector<std::string> maskFunctions;
 	std::vector<std::string> ellipsisRanks;
 	std::vector<std::string> checkpoint;
+	std::vector<std::string> quantize;
 	mdl::PrimitiveType defaultFloat = mdl::PrimitiveType::float32;
 	std::vector<std::string> warnings;
 	std::optional<std::string> build;
@@ -176,6 +201,50 @@ static void writeDepfile(
 	for (const auto& source : sources)
 		out << " \\\n  " << escape(source.string());
 	out << "\n";
+}
+
+/** @brief Parses --quantize values FORMAT[:GROUP]=PATTERN[,PATTERN...]. */
+static std::vector<mdl::QuantizationRule> parseQuantizationRules(const std::vector<std::string>& values) {
+	std::vector<mdl::QuantizationRule> rules;
+	for (const auto& value : values) {
+		const auto eq = value.find('=');
+		if (eq == std::string::npos)
+			throw std::runtime_error("--quantize: expected FORMAT[:GROUP]=PATTERNS, got " + value);
+		std::string format = value.substr(0, eq);
+		mdl::QuantizationRule rule;
+		if (const auto colon = format.find(':'); colon != std::string::npos) {
+			try {
+				rule.group = static_cast<unsigned>(std::stoul(format.substr(colon + 1)));
+			} catch (const std::exception&) {
+				throw std::runtime_error("--quantize: invalid group size in " + value);
+			}
+			if (rule.group == 0)
+				throw std::runtime_error("--quantize: the group size must be positive");
+			format = format.substr(0, colon);
+		}
+		if (format == "int8")
+			rule.format = mdl::builtins::QuantFormat::int8;
+		else if (format == "int4")
+			rule.format = mdl::builtins::QuantFormat::int4;
+		else if (format == "int4-asym")
+			rule.format = mdl::builtins::QuantFormat::int4Asym;
+		else
+			throw std::runtime_error("--quantize: unknown format " + format + " (int8, int4, int4-asym)");
+		if (rule.format != mdl::builtins::QuantFormat::int8 && rule.group == 0)
+			rule.group = 128; // the usual group size of 4-bit weights
+		std::vector<std::string> patterns;
+		std::string rest = value.substr(eq + 1);
+		for (size_t start = 0;;) {
+			const auto comma = rest.find(',', start);
+			patterns.push_back(rest.substr(start, comma - start));
+			if (comma == std::string::npos)
+				break;
+			start = comma + 1;
+		}
+		rule.weights = std::move(patterns);
+		rules.push_back(std::move(rule));
+	}
+	return rules;
 }
 
 static void runCompileCommand(const CompileArgs& args) {
@@ -253,7 +322,8 @@ static void runCompileCommand(const CompileArgs& args) {
 		if (rank > compileOpts.ellipsisRank)
 			throw std::runtime_error("--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`");
 	auto exports = mdl::exportedFunctions(
-			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks
+			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks,
+			parseQuantizationRules(args.quantize)
 	);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
@@ -340,6 +410,14 @@ int main(int argc, char* argv[]) {
 	);
 	app.add_option("--trainable-file", args.trainableFile, "File with --trainable patterns (one per line).")
 			->check(CLI::ExistingFile);
+	app.add_option(
+			   "--quantize", args.quantize,
+			   "Quantize the weights selected by the patterns (e.g. 'int4:128=**.W,!classifier.**'): FORMAT int8 (one "
+			   "scale per output unless GROUP is given), int4 (symmetric), or int4-asym (with zero points); GROUP values "
+			   "of the input dimension share a scale (default 128 for int4). A weight W [N, K] becomes W.qweight, "
+			   "W.scales (and W.zeros); quantized weights are frozen. Repeatable; later rules take precedence."
+	)
+			->type_name("FORMAT[:GROUP]=PATTERNS");
 	app.add_flag("--input-grads", args.inputGrads, "Also compute the gradients with respect to the inputs.");
 	app.add_option(
 			"-O,--optimize", args.compileOpts.optimization,
@@ -395,7 +473,12 @@ int main(int argc, char* argv[]) {
 	app.callback([&args, config]() {
 		if (config->count() > 0)
 			args.argvals = config->as<std::string>();
-		runCompileCommand(args);
+		try {
+			runCompileCommand(args);
+		} catch (const std::exception& e) { // errors of the compilation (not of the command line)
+			std::cerr << "mdlc: error: " << e.what() << "\n";
+			std::exit(1);
+		}
 	});
 
 	CLI11_PARSE(app, argc, argv);

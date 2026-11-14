@@ -21,6 +21,8 @@ namespace mdl::bindings::detail {
 			return "float16";
 		case mdl::PrimitiveType::bfloat16:
 			return "bfloat16";
+		case mdl::PrimitiveType::int8:
+			return "int8";
 		case mdl::PrimitiveType::integer:
 			return "int"; /** \todo load the configured datatype for default int */
 		case mdl::PrimitiveType::uint:

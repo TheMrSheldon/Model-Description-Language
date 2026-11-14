@@ -7,6 +7,7 @@
 #include "./shapes.hpp"
 
 #include <expected>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,8 @@ namespace mdl::autodiff {
 	struct Options {
 		/** @brief The weights to differentiate with respect to (by path); all weights if empty. */
 		PathPatterns trainable;
+		/** @brief Weights that are never differentiated, whatever @p trainable selects (e.g. quantized weights). */
+		std::set<std::string> frozen = {};
 		/** @brief Whether to also compute the gradients with respect to the function's inputs. */
 		bool inputs = false;
 		/**
