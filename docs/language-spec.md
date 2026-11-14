@@ -171,6 +171,21 @@ error: Argument 1 of forward is float[..., 512], but the parameter x is float[..
 ```
 Errors point to their location in the source, with the line and the marked expression.
 
+Sizes that are different compile-time expressions, e.g. two hyperparameters, may be equal in one instance and differ in
+another. Where equal sizes are needed, they are a warning (`-Wpossible-mismatch`), and an error in strict mode
+(`mdlc --strict`, or `-Werror=possible-mismatch`):
+```dlm
+module Test[input: uint, output: uint] {
+    W: float[input, output]
+    b: float[output]
+    float[output] forward(x: float[input]) => W @ x + b;
+}
+```
+```
+warning: Operator @: the inner dimensions of the matrix product may differ ([input, output] @ [input]) [-Wpossible-mismatch]
+warning: Operator +: cannot broadcast [input] and [output] (the sizes may differ) [-Wpossible-mismatch]
+```
+
 # Loops
 `for (i in lo..hi) { ... }` repeats its body for `i = lo, ..., hi - 1`; the bounds are compile-time integers, and the
 loop is expanded when compiling (there is no loop at runtime). The body is a scope of its own; an assignment `h = ...`

@@ -95,7 +95,7 @@ Features:
   - What depends on unknown values is checked conservatively: both branches of `?:`, members with `@conditional`, one
     iteration of a loop, and one instance of an array of modules.
   - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
-    equal in an instance, so they are not reported.
+    equal in an instance: they are warnings (`possible-mismatch`), and errors with the `strict` option.
 - **Semantic tokens:** modules, structs, functions, hyperparameters, members, parameters, variables, annotations,
   keywords and numbers. The axes of einops patterns get their own token type, `axis`. The token types are standard,
   except `axis`, which an editor extension declares with a fallback.
@@ -123,8 +123,10 @@ changed lines are mapped).
 
 Initialization options (from the editor), the same as `mdlc`'s:
 ```json
-{ "importDirs": ["path/to/lib"], "float": "bf16" }
+{ "importDirs": ["path/to/lib"], "float": "bf16", "strict": true }
 ```
+With `strict`, sizes that may differ (e.g. two hyperparameters where equal sizes are needed) are errors instead of
+warnings.
 
 ### Using it from an editor without an extension
 Any LSP client can run it, e.g. Neovim:

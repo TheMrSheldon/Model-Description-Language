@@ -117,17 +117,20 @@ namespace mdl::shapes {
 	 * @brief Whether a computed type matches a declared one (e.g. a function's result against its declared return type).
 	 * @details Only definite mismatches count: the shapes are compared from the end up to the first `...` of either,
 	 * and a dimension that is not constant matches any. With @p elements, floating-point and integer/boolean element
-	 * types differ as well. Float tensors of different float types never match (conversions are explicit).
+	 * types differ as well. Float tensors of different float types never match (conversions are explicit). With
+	 * @p strict, sizes that are different compile-time expressions (e.g. `indim` and `outdim`) do not match either:
+	 * they may differ in an instance.
 	 */
-	bool matches(const DataType& declared, const DataType& computed, bool elements = true);
+	bool matches(const DataType& declared, const DataType& computed, bool elements = true, bool strict = false);
 
 	/**
 	 * @brief Checks the arguments of the builtin @p id for definite mismatches (e.g. the inner dimensions of a matrix
-	 * product, or shapes that do not broadcast).
+	 * product, or shapes that do not broadcast). With @p strict, also for sizes that are different compile-time
+	 * expressions (e.g. `indim @ outdim`), which may differ in an instance.
 	 * @return a description of the mismatch, or std::nullopt.
 	 */
 	std::optional<std::string>
-	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args, bool strict = false);
 
 	/**
 	 * @brief The float type of float results of non-float values (e.g. the mean of integers, or `x.mask` of an integer

@@ -124,12 +124,14 @@ void mdls::Server::handleNotification(const std::string& method, const json& par
 }
 
 mdls::json mdls::Server::initialize(const json& params) {
-	// Initialization options mirror mdlc's: {"importDirs": [...], "float": "f32|bf16|f16"}.
+	// Initialization options mirror mdlc's: {"importDirs": [...], "float": "f32|bf16|f16", "strict": false}.
 	if (params.contains("initializationOptions") && params["initializationOptions"].is_object()) {
 		const auto& options = params["initializationOptions"];
 		if (options.contains("importDirs"))
 			for (const auto& dir : options["importDirs"])
 				parseOptions.importDirs.emplace_back(dir.get<std::string>());
+		if (options.value("strict", false)) // what may be wrong (e.g. sizes that may differ) is an error
+			parseOptions.possibleMismatch = mdl::parser::DiagnosticLevel::error;
 		const std::string type = options.value("float", "f32");
 		parseOptions.defaultFloat = type == "bf16"	? mdl::PrimitiveType::bfloat16
 									: type == "f16" ? mdl::PrimitiveType::float16
