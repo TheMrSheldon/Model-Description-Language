@@ -58,6 +58,43 @@ jobs:
           name: ${{ matrix.name }}
           fail_ci_if_error: true
 
+  tooling:
+    # The frontend and the tooling (mdl-format, mdls) without the compiler: no TVM/LLVM/oneDNN, so it builds with each
+    # platform's native toolchain (MSVC on Windows). These are the binaries the editor integration ships.
+    name: Tooling (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+          - name: macOS arm64
+            os: macos-latest
+          - name: macOS x86_64
+            os: macos-13
+          - name: Windows x86_64 (MSVC)
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Install Java (ANTLR code generation)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Configure CMake
+        run: cmake -B ./build --preset=conf-tooling
+      - name: Build
+        run: cmake --build ./build --config Release --parallel
+      - name: Run Tests
+        run: ctest --test-dir ./build --build-config Release --output-on-failure
+      - name: Check the Format of the .dlm Files
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: ./build/src/commands/mdl-format --check $(git ls-files '*.dlm')
+
   linters:
     name: Run C++ Linters
     runs-on: ubuntu-latest

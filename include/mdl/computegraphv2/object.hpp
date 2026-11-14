@@ -60,6 +60,11 @@ namespace mdl {
 	 */
 	struct ArrayInstance {
 		std::vector<Object> elements;
+		/**
+		 * @brief Whether the only element stands for all elements of an array of unknown size (symbolic analysis of a
+		 * module without hyperparameter values): every index selects it.
+		 */
+		bool representative = false;
 	};
 
 	std::optional<std::reference_wrapper<const FunctionDecl>>

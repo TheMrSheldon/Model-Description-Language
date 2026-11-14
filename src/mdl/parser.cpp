@@ -8,6 +8,8 @@
 #include <mdl/passes/shapes.hpp>
 #include <mdl/utils/utils.hpp>
 #include <mdl/utils/einops.hpp>
+#include <mdl/utils/platform.hpp>
+#include <mdl/analysis/index.hpp>
 
 #include <mdlBaseVisitor.h>
 #include <mdlLexer.h>
@@ -19,9 +21,12 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <sstream>
 #include <set>
 #include <string_view>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace mdl {
@@ -53,6 +58,11 @@ namespace mdl {
 	};
 
 	struct parser::FrontendState {
+		/** @brief Receives every diagnostic (also of later instantiations); destroyed last (the listeners refer to it). */
+		DiagnosticSink sink;
+		std::vector<Diagnostic> diagnostics; ///< all diagnostics so far
+		bool printing = false;				 ///< whether the diagnostics are printed to stderr (no sink in the options)
+		std::unique_ptr<analysis::SemanticIndex> index; ///< for tools (parser::analyze); null for the compiler
 		Computegraph graph;
 		std::vector<std::unique_ptr<ParsedFile>> files;
 		std::deque<FunctionDecl> derivedFunctions; ///< e.g. gradient functions (stable references)
@@ -71,6 +81,208 @@ namespace mdl {
 		std::map<std::pair<const ModuleTemplate*, std::string>, ModuleType> instances;
 		/** @brief The error listener of the file that is currently translated. */
 		PrettyErrorListener* errorlistener = nullptr;
+		/** @brief Whether modules with hyperparameters are checked with symbolic values (see analyzeGeneric()). */
+		bool checkGenericModules = false;
+		/** @brief Whether a module is being elaborated with symbolic hyperparameter values. */
+		bool symbolicMode = false;
+		/** @brief The token streams of the translated files (by source name), e.g. for doc comments. */
+		std::map<std::string, antlr4::CommonTokenStream*> tokenStreams;
+		/** @brief The module being instantiated (for the index), empty outside of modules. */
+		std::string currentModule;
+
+		// ── Semantic index (only for tools: parser::analyze) ──────────────────────────────────────────────────────
+
+		analysis::SemanticIndex* index() const { return state.index.get(); }
+		std::string currentFile() const { return errorlistener != nullptr ? errorlistener->getFile() : std::string{}; }
+
+		static SourceRange rangeOf(antlr4::Token* t) {
+			const size_t line = t->getLine(), column = t->getCharPositionInLine();
+			return {{line, column}, {line, column + t->getText().size()}};
+		}
+
+		static SourceRange rangeOf(antlr4::ParserRuleContext* ctx) {
+			if (ctx == nullptr || ctx->start == nullptr || ctx->stop == nullptr)
+				return {};
+			return {rangeOf(ctx->start).begin, rangeOf(ctx->stop).end};
+		}
+
+		/** @brief The source text of @p ctx with whitespace runs collapsed (e.g. a declaration for hovers). */
+		std::string sourceText(antlr4::ParserRuleContext* ctx, antlr4::Token* last = nullptr) {
+			auto it = tokenStreams.find(currentFile());
+			if (it == tokenStreams.end() || ctx == nullptr || ctx->start == nullptr)
+				return {};
+			auto* stop = last != nullptr ? last : ctx->stop;
+			std::string result;
+			for (size_t i = ctx->start->getTokenIndex(); stop != nullptr && i <= stop->getTokenIndex(); ++i) {
+				auto* t = it->second->get(i);
+				if (t->getChannel() != antlr4::Token::DEFAULT_CHANNEL) {
+					if (!result.empty() && result.back() != ' ')
+						result += ' ';
+					continue;
+				}
+				result += t->getText();
+			}
+			while (!result.empty() && result.back() == ' ')
+				result.pop_back();
+			return result;
+		}
+
+		/** @brief The doc comment before @p ctx (`/** ... *\/` or `///` lines) as Markdown, if any. */
+		std::string documentation(antlr4::ParserRuleContext* ctx) {
+			auto it = tokenStreams.find(currentFile());
+			if (it == tokenStreams.end() || ctx == nullptr || ctx->start == nullptr)
+				return {};
+			auto hidden = it->second->getHiddenTokensToLeft(ctx->start->getTokenIndex());
+			std::vector<std::string> comments;
+			size_t newlines = 0;
+			for (auto t = hidden.rbegin(); t != hidden.rend(); ++t) {
+				const std::string text = (*t)->getText();
+				if ((*t)->getType() == antlr4::mdlLexer::WS) {
+					newlines += text == "\n";
+					if (newlines > 1)
+						break; // a blank line separates the comment from the definition
+					continue;
+				}
+				newlines = 0;
+				const bool doc = text.starts_with("/**") || text.starts_with("/*!") || text.starts_with("///");
+				if (!doc)
+					break;
+				comments.insert(comments.begin(), text);
+				if (text.starts_with("/*"))
+					break;
+			}
+			std::string joined;
+			for (const auto& c : comments)
+				joined += c + "\n";
+			return comments.empty() ? std::string{} : analysis::docCommentToMarkdown(joined);
+		}
+
+		/** @brief The type of @p type for hovers, e.g. `float32[..., dim]`, `Linear`, `struct`. */
+		static std::string typeString(const DataType& type) {
+			if (const auto* bound = std::get_if<BoundModuleType>(&type))
+				return bound->definition.templ ? bound->definition.templ->name : "module";
+			if (const auto* m = std::get_if<ModuleType>(&type))
+				return m->templ ? m->templ->name : "module";
+			if (std::holds_alternative<AggregateType>(type))
+				return "struct";
+			if (const auto* array = std::get_if<ArrayType>(&type))
+				return std::format("array[{}; {}]", typeString(*array->element), array->size);
+			return shapes::str(type);
+		}
+
+		/** @brief The type of the value @p object for hovers. */
+		static std::string objectType(const Object& object) {
+			return std::visit(
+					overloaded{
+							[](const Node* node) -> std::string {
+								if (const auto* c = std::get_if<ConstNode>(node))
+									if (const auto* i = std::get_if<int>(&c->value))
+										return std::format("{} = {}", typeString(getDataType(*node)), *i);
+								return typeString(getDataType(*node));
+							},
+							[](const FunctionDecl& f) -> std::string { return f.name.empty() ? "function" : "function " + f.name; },
+							[](const AggregateInstance&) -> std::string { return "struct"; },
+							[](const ArrayInstance& a) -> std::string {
+								std::string element = a.elements.empty() ? std::string{"?"} : objectType(a.elements.front());
+								return a.representative ? std::format("array of {}", element)
+														: std::format("array of {} {}", a.elements.size(), element);
+							},
+							[](const auto&) -> std::string { return {}; },
+					},
+					object
+			);
+		}
+
+		/** @brief What `.` can access on the value @p object (module and struct members, tensor members). */
+		static std::set<std::string> objectMembers(const Object& object) {
+			std::set<std::string> members;
+			if (const auto* agg = std::get_if<AggregateInstance>(&object)) {
+				for (const auto& [name, _] : agg->getType().members)
+					members.insert(name);
+			} else if (const auto* node = std::get_if<const Node*>(&object)) {
+				const auto& type = getDataType(**node);
+				if (const auto* bound = std::get_if<BoundModuleType>(&type)) {
+					if (const auto& t = bound->definition.templ) {
+						for (auto* v : t->ctx->vardecl())
+							if (v->IDENT())
+								members.insert(v->IDENT()->getText());
+						for (auto* f : t->ctx->funcdef())
+							if (f->IDENT())
+								members.insert(f->IDENT()->getText());
+					}
+				} else if (const auto* tensor = std::get_if<TensorType>(&type)) {
+					members.insert("T");
+					if (tensor->masked) {
+						members.insert("data");
+						members.insert("mask");
+					}
+				}
+			}
+			return members;
+		}
+
+		/** @brief Records a definition in the index (if any); returns its index. */
+		std::optional<size_t> define(
+				antlr4::Token* name, analysis::SymbolKind kind, const std::string& detail, antlr4::ParserRuleContext* docCtx,
+				SourceRange scope, std::set<std::string> types = {}, const std::string& container = {}
+		) {
+			if (index() == nullptr || name == nullptr)
+				return std::nullopt;
+			return index()->define(analysis::Symbol{
+					.name = name->getText(),
+					.kind = kind,
+					.file = currentFile(),
+					.range = rangeOf(name),
+					.container = container,
+					.detail = detail,
+					.documentation = documentation(docCtx),
+					.scope = scope,
+					.types = std::move(types),
+			});
+		}
+
+		/** @brief define() and binds the name to the definition in the current namespace. */
+		void defineHere(
+				antlr4::Token* name, analysis::SymbolKind kind, const std::string& detail, antlr4::ParserRuleContext* docCtx,
+				SourceRange scope, std::set<std::string> types = {}, const std::string& container = {}
+		) {
+			if (auto id = define(name, kind, detail, docCtx, scope, std::move(types), container))
+				currentNamespace().setSymbol(name->getText(), *id);
+		}
+
+		/** @brief Records a use of @p name (bound in the current namespace) with the value @p value. */
+		void referenceHere(antlr4::Token* name, const std::optional<Object>& value) {
+			if (index() == nullptr || name == nullptr)
+				return;
+			analysis::Reference r{.file = currentFile(), .range = rangeOf(name), .symbol = currentNamespace().symbol(name->getText())};
+			if (value) {
+				if (auto type = objectType(*value); !type.empty())
+					r.types.insert(type);
+				r.members = objectMembers(*value);
+			}
+			index()->reference(std::move(r));
+		}
+
+		/** @brief The range of the whole file of @p ctx (the scope of global definitions). */
+		static SourceRange fileScope() { return {{1, 0}, {std::numeric_limits<size_t>::max(), 0}}; }
+
+		/** @brief The innermost function body or loop around @p ctx (the scope of a local variable). */
+		static antlr4::ParserRuleContext* enclosingBlock(antlr4::ParserRuleContext* ctx) {
+			for (auto* p = dynamic_cast<antlr4::ParserRuleContext*>(ctx->parent); p != nullptr;
+				 p = dynamic_cast<antlr4::ParserRuleContext*>(p->parent))
+				if (dynamic_cast<mdlParser::FuncdefContext*>(p) || dynamic_cast<mdlParser::ForStatementContext*>(p))
+					return p;
+			return ctx;
+		}
+
+		/** @brief The signature of a function as written (without its body). */
+		std::string signature(mdlParser::FuncdefContext* ctx) {
+			antlr4::Token* close = nullptr;
+			for (auto* child : ctx->children)
+				if (auto* t = dynamic_cast<antlr4::tree::TerminalNode*>(child); t && t->getText() == ")")
+					close = t->getSymbol();
+			return sourceText(ctx, close);
+		}
 		/** @brief Directory of the file that is currently translated (first search path for its imports). */
 		std::filesystem::path currentDir;
 		/** @brief Whether definitions of the current file are added to the compilation unit (false for imports). */
@@ -260,6 +472,9 @@ namespace mdl {
 		}
 
 	public:
+		/** @brief Also check the modules with hyperparameters of the main file symbolically (see analyzeGeneric()). */
+		void setCheckGenericModules(bool check) { checkGenericModules = check; }
+
 		TranslatingVisitor(parser::FrontendState& state, parser::ParseOptions options)
 				: state(state), options(std::move(options)) {
 			pushGraph(&state.graph);
@@ -293,14 +508,17 @@ namespace mdl {
 			// The parse tree stays alive (owned by the frontend state) so that module templates defined in this file
 			// can be expanded later.
 			auto& file = *state.files.emplace_back(std::make_unique<ParsedFile>());
-			file.errors = std::make_unique<PrettyErrorListener>(sourcename);
+			file.errors = std::make_unique<PrettyErrorListener>(sourcename, state.sink);
 			file.input = std::make_unique<antlr4::ANTLRInputStream>(stream);
 			file.lexer = std::make_unique<antlr4::mdlLexer>(file.input.get());
 			file.tokens = std::make_unique<antlr4::CommonTokenStream>(file.lexer.get());
 			file.parser = std::make_unique<antlr4::mdlParser>(file.tokens.get());
+			file.lexer->removeErrorListeners();
+			file.lexer->addErrorListener(file.errors.get());
 			file.parser->removeErrorListeners();
 			file.parser->addErrorListener(file.errors.get());
 
+			tokenStreams[sourcename] = file.tokens.get();
 			auto* outerErrors = std::exchange(errorlistener, file.errors.get());
 			auto outerDir = std::exchange(currentDir, dir);
 			bool outerRecord = std::exchange(recordDefinitions, main);
@@ -313,7 +531,8 @@ namespace mdl {
 			currentDir = std::move(outerDir);
 			recordDefinitions = outerRecord;
 
-			file.errors->printSummary();
+			if (state.printing)
+				printDiagnosticSummary(std::cerr, file.errors->getNumErrors(), file.errors->getNumWarnings());
 			numErrors += file.errors->getNumErrors() - errorsBefore;
 		}
 
@@ -323,9 +542,17 @@ namespace mdl {
 			if (!translatedFiles.insert(ec ? file : canonical).second)
 				return; // Already imported (or currently being imported).
 			sources.push_back(ec ? file : canonical);
-			std::ifstream stream{file};
+			// The contents: from the options' reader (e.g. an editor's unsaved buffer), else from the file.
+			std::optional<std::string> text = options.readFile ? options.readFile(file) : std::nullopt;
+			std::ifstream fileStream;
+			std::istringstream textStream;
+			if (text)
+				textStream.str(std::move(*text));
+			else
+				fileStream.open(file);
+			std::istream& stream = text ? static_cast<std::istream&>(textStream) : fileStream;
 			if (!stream) {
-				std::cerr << "error: cannot read " << file.string() << std::endl;
+				state.sink(Diagnostic{.file = file.string(), .message = "cannot read " + file.string()});
 				++numErrors;
 				return;
 			}
@@ -352,11 +579,66 @@ namespace mdl {
 				record(std::move(name), std::move(f));
 			}
 			// Parse Modules third (no matter where they are in the file)
+			std::vector<ModuleType> generic;
 			for (auto&& def : ctx->module_def()) {
 				auto [name, m] = std::any_cast<std::pair<std::string, ModuleType>>(def->accept(this));
+				if (checkGenericModules && recordDefinitions && !m.instantiated && !m.typeargs.empty())
+					generic.push_back(m);
 				record(std::move(name), std::move(m));
 			}
+			for (const auto& m : generic)
+				analyzeGeneric(m);
 			return {};
+		}
+
+		/**
+		 * @brief A symbolic value of a hyperparameter of type @p type named @p name: a hyperparameter node for numbers
+		 * and booleans, structs and arrays of them (members `conf.dims.model`, elements `sizes[2]`).
+		 */
+		std::optional<Object> symbolicValue(const DataType& type, const std::string& name) {
+			if (std::holds_alternative<PrimitiveType>(type))
+				return Object{&graph().addHyperparameterNode(type, name)};
+			if (const auto* agg = std::get_if<AggregateType>(&type)) {
+				std::map<std::string, Object> members;
+				for (const auto& [member, memberType] : agg->members) {
+					auto value = symbolicValue(memberType, name + "." + member);
+					if (!value)
+						return std::nullopt;
+					members.emplace(member, std::move(*value));
+				}
+				auto instance = AggregateInstance::create(*agg, std::move(members));
+				return instance ? std::optional<Object>{Object{std::move(*instance)}} : std::nullopt;
+			}
+			if (const auto* array = std::get_if<ArrayType>(&type)) {
+				ArrayInstance instance;
+				for (unsigned i = 0; i < array->size; ++i) {
+					auto element = symbolicValue(*array->element, std::format("{}[{}]", name, i));
+					if (!element)
+						return std::nullopt;
+					instance.elements.push_back(std::move(*element));
+				}
+				return Object{std::move(instance)};
+			}
+			return std::nullopt;
+		}
+
+		/**
+		 * @brief Checks a module with hyperparameters without values (for tools, see parser::analyze): the module is
+		 * instantiated with symbolic values, so that types read e.g. `float[..., dim]`. What depends on unknown values
+		 * is checked conservatively: both branches of `?:`, members with `@conditional`, and one iteration of loops and
+		 * one instance of arrays of unknown size; only definite mismatches are errors.
+		 */
+		void analyzeGeneric(const ModuleType& def) {
+			std::vector<Object> values;
+			for (const auto& [pname, hn] : def.typeargs) {
+				auto value = symbolicValue(hn.get().type, pname);
+				if (!value)
+					return;
+				values.push_back(std::move(*value));
+			}
+			const bool outer = std::exchange(symbolicMode, true);
+			(void)instantiate(def, values);
+			symbolicMode = outer;
 		}
 
 		/** @brief Reports the annotations of a declaration where they do not apply (e.g. members of structs). */
@@ -400,8 +682,14 @@ namespace mdl {
 			AggregateType s;
 			auto name = ctx->IDENT()->getText();
 			updateTypeWithVarDecl(s, name, ctx->vardecl());
-			if (!checkRedefinition(ctx->IDENT()))
+			if (!checkRedefinition(ctx->IDENT())) {
 				currentNamespace().putType(name, DataType{s});
+				defineHere(ctx->IDENT()->getSymbol(), analysis::SymbolKind::structure, "struct " + name, ctx, fileScope());
+			}
+			for (auto* var : ctx->vardecl())
+				if (var->IDENT() && s.members.contains(var->IDENT()->getText()))
+					define(var->IDENT()->getSymbol(), analysis::SymbolKind::member, sourceText(var), var, rangeOf(ctx),
+						   {typeString(s.members.at(var->IDENT()->getText()))}, name);
 			return std::make_pair(name, s);
 		}
 
@@ -421,6 +709,17 @@ namespace mdl {
 			m.templ = std::make_shared<const ModuleTemplate>(
 					ModuleTemplate{.name = name, .ctx = ctx, .scope = &currentNamespace(), .errors = errorlistener}
 			);
+			if (index() != nullptr) {
+				antlr4::Token* close = nullptr; // the `]` after the hyperparameters
+				for (auto* child : ctx->children)
+					if (auto* t = dynamic_cast<antlr4::tree::TerminalNode*>(child); t && t->getText() == "]" && !close)
+						close = t->getSymbol();
+				if (auto id = define(ctx->IDENT()->getSymbol(), analysis::SymbolKind::module, sourceText(ctx, close), ctx, fileScope()))
+					currentNamespace().setSymbol(name, *id);
+				for (size_t i = 0; i < ctx->param().size() && i < m.typeargs.size(); ++i)
+					define(ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::hyperparameter, sourceText(ctx->param()[i]), nullptr,
+						   rangeOf(ctx), {typeString(m.typeargs[i].second.get().type)}, name);
+			}
 			if (m.typeargs.empty())
 				if (auto instance = instantiate(m, {}))
 					m = instance.value().get();
@@ -477,13 +776,29 @@ namespace mdl {
 			}
 		}
 
-		/** @brief Evaluates a compile-time integer (e.g. a loop bound or an index); reports an error otherwise. */
-		std::optional<int> constantInt(mdlParser::ExprContext* expr) {
+		/**
+		 * @brief In the symbolic analysis of a module without hyperparameter values (see analyzeGeneric()): whether
+		 * @p node is a value that depends on the unknown hyperparameters.
+		 */
+		bool isSymbolic(const Node& node) const {
+			return symbolicMode && !std::holds_alternative<ErrorNode>(node) && !foldConstant(node);
+		}
+
+		/** @brief constantInt()'s result for a symbolic value without fallback. */
+		static constexpr int unknownInt = std::numeric_limits<int>::min();
+
+		/**
+		 * @brief Evaluates a compile-time integer (e.g. a loop bound or an index); reports an error otherwise. In the
+		 * symbolic analysis, a value that depends on the hyperparameters yields @p symbolic (unknownInt by default).
+		 */
+		std::optional<int> constantInt(mdlParser::ExprContext* expr, int symbolic = unknownInt) {
 			const Node* node = asNode(expr->accept(this), expr->start);
 			if (std::holds_alternative<ErrorNode>(*node))
 				return std::nullopt;
 			if (auto value = foldConstant(*node); value && std::holds_alternative<int>(*value))
 				return std::get<int>(*value);
+			if (isSymbolic(*node))
+				return symbolic;
 			errorlistener->semanticError(
 					PrettyErrorListener::ErrorLevel::Error, expr->start, expr->start->getLine(),
 					expr->start->getCharPositionInLine(), "Expected a compile-time integer"
@@ -498,7 +813,8 @@ namespace mdl {
 							[](const Node* node) -> std::string {
 								if (auto v = foldConstant(*node))
 									return std::visit([](auto x) { return std::format("{}", x); }, *v);
-								return "?";
+								// A symbolic value (interned: the same expression is the same node).
+								return std::format("#{}", static_cast<const void*>(node));
 							},
 							[](const AggregateInstance& agg) -> std::string {
 								std::string key = "{";
@@ -548,6 +864,8 @@ namespace mdl {
 					if (std::holds_alternative<ErrorNode>(**node))
 						return false;
 					auto folded = foldConstant(**node);
+					if (!folded && isSymbolic(**node))
+						return true; // symbolic analysis: the instance gets the symbolic value
 					if (!folded) {
 						errorlistener->semanticError(
 								PrettyErrorListener::ErrorLevel::Error, expr->start, expr->start->getLine(),
@@ -701,12 +1019,19 @@ namespace mdl {
 			const std::string outerScope = std::exchange(scope, key);
 			auto* outerErrors = std::exchange(errorlistener, t.errors);
 			nsstack.push(t.scope->createSubnamespace());
-			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i)
+			const std::string outerModule = std::exchange(currentModule, t.name);
+			for (size_t i = 0; i < values.size() && i < def.typeargs.size(); ++i) {
 				currentNamespace().put(def.typeargs[i].first, Object{values[i]});
+				if (i < t.ctx->param().size())
+					defineHere(t.ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::hyperparameter, sourceText(t.ctx->param()[i]),
+							   nullptr, rangeOf(t.ctx), {objectType(values[i])}, t.name);
+			}
 
 			for (auto* var : t.ctx->vardecl())
 				declareMember(m, var);
 			for (auto& func : t.ctx->funcdef()) {
+				if (func->IDENT())
+					defineHere(func->IDENT()->getSymbol(), analysis::SymbolKind::method, signature(func), func, rangeOf(t.ctx), {}, t.name);
 				auto [name, decl] = std::any_cast<std::pair<std::string, FunctionDecl>>(func->accept(this));
 				if (auto it = m.functions.find(name); it != m.functions.end())
 					it->second.overloads.push_back(std::move(decl)); // (duplicates were reported by registerFunction)
@@ -728,6 +1053,7 @@ namespace mdl {
 			nsstack.pop();
 			errorlistener = outerErrors;
 			scope = outerScope;
+			currentModule = outerModule;
 			const size_t newErrors = t.errors->getNumErrors() - errorsBefore;
 			numErrors += newErrors;
 			if (newErrors > 0)
@@ -763,6 +1089,8 @@ namespace mdl {
 						 const Node* cond = v.asNode(a->args[0]->accept(&v), a->args[0]->start);
 						 auto value = foldConstant(*cond);
 						 const auto* i = value ? std::get_if<int>(&*value) : nullptr;
+						 if (i == nullptr && v.isSymbolic(*cond))
+							 return std::nullopt; // symbolic analysis: the member may exist
 						 if (i == nullptr) {
 							 if (!std::holds_alternative<ErrorNode>(*cond))
 								 v.errorlistener->semanticError(
@@ -799,23 +1127,38 @@ namespace mdl {
 			return omitted;
 		}
 
+		/** @brief The source line of @p tok with the token marked (for diagnostics). */
+		std::vector<PrettyErrorListener::ContextLine> tokenContext(antlr4::Token* tok) const {
+			return {{.number = tok->getLine(),
+					 .text = PrettyErrorListener::getline(*tok->getInputStream(), 0, tok->getStartIndex()),
+					 .markBegin = tok->getCharPositionInLine(),
+					 .markWidth = tok->getText().size()}};
+		}
+
 		void reportUnknownAnnotation(mdlParser::AnnotationContext* a) {
-			if (options.unknownAnnotation == parser::Diagnostic::ignored)
+			if (options.unknownAnnotation == parser::DiagnosticLevel::ignored)
 				return;
-			const bool error = options.unknownAnnotation == parser::Diagnostic::error;
+			const bool error = options.unknownAnnotation == parser::DiagnosticLevel::error;
 			auto* tok = a->name;
 			errorlistener->semanticError(
-					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning, tok,
-					tok->getLine(), tok->getCharPositionInLine(),
-					std::format("Unknown annotation @{} [-W{}unknown-annotation]", a->name->getText(), error ? "error=" : "")
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+					tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(),
+					std::format("Unknown annotation @{}", a->name->getText()), "", "unknown-annotation"
 			);
 		}
 
 		/** @brief Declares a member variable (weight, submodule, or array of them) of a module being expanded. */
 		void declareMember(ModuleType& m, mdlParser::VardeclContext* var) {
 			const auto vname = var->IDENT()->getText();
+			auto* moduleCtx = m.templ ? m.templ->ctx : nullptr;
+			// The definition of the member in the index (with the type of its value).
+			auto record = [&](std::set<std::string> types) {
+				defineHere(var->IDENT()->getSymbol(), analysis::SymbolKind::member, sourceText(var), var,
+						   rangeOf(moduleCtx), std::move(types), currentModule);
+			};
 			if (auto reason = applyAnnotations(var)) {
 				currentNamespace().put(vname, OmittedMember{*reason});
+				record({"left out: " + *reason});
 				return;
 			}
 			auto addVariable = [&](const std::string& path, const DataType& dtype) -> const Node& {
@@ -827,16 +1170,24 @@ namespace mdl {
 
 			if (auto* comp = dynamic_cast<mdlParser::ComprehensionTypeContext*>(var->type())) {
 				// `name: [T for i in lo..hi]` declares the members name.lo, ..., name.(hi-1).
-				auto lo = constantInt(comp->lo), hi = constantInt(comp->hi);
+				auto lo = constantInt(comp->lo, 0), hi = constantInt(comp->hi);
 				ArrayInstance array;
+				if (lo && hi == unknownInt) { // symbolic analysis: one instance stands for all
+					hi = *lo + 1;
+					array.representative = true;
+				}
 				for (int i = lo.value_or(0); lo && hi && i < *hi; ++i) {
 					pushNamespace();
 					currentNamespace().put(comp->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+					defineHere(comp->var, analysis::SymbolKind::loopVariable, comp->var->getText() + " in " +
+							   sourceText(comp->lo) + ".." + sourceText(comp->hi), nullptr, rangeOf(comp), {"int"});
 					auto dtype = std::any_cast<DataType>(comp->element->accept(this));
 					popNamespace();
 					array.elements.push_back(Object{&addVariable(vname + "." + std::to_string(i), dtype)});
 				}
 				currentNamespace().put(vname, Object{std::move(array)});
+				if (auto value = currentNamespace().get<Object>(vname))
+					record({objectType(value->get())});
 				return;
 			}
 
@@ -850,6 +1201,7 @@ namespace mdl {
 				);
 			else
 				currentNamespace().put(vname, Object{&node});
+			record({typeString(dtype)});
 		}
 
 		virtual std::any visitParam(mdlParser::ParamContext* ctx) override {
@@ -859,6 +1211,14 @@ namespace mdl {
 
 		virtual std::any visitTypeSpec(mdlParser::TypeSpecContext* ctx) override {
 			auto dtype = std::any_cast<DataType>(unqualifiedTypeSpec(ctx));
+			if (index() != nullptr && ctx->typename_ != nullptr)
+				index()->reference(analysis::Reference{
+						.file = currentFile(),
+						.range = rangeOf(ctx->typename_),
+						.symbol = currentNamespace().symbol(ctx->typename_->getText()),
+						.types = {typeString(dtype)},
+						.members = {},
+				});
 			if (ctx->masked != nullptr) {
 				if (auto* tensor = std::get_if<TensorType>(&dtype)) {
 					tensor->masked = true;
@@ -924,9 +1284,9 @@ namespace mdl {
 							auto* arg = positionalArgs[*e.positional];
 							errorlistener->semanticError(
 									PrettyErrorListener::ErrorLevel::Error,
-									{{.linenr = arg->start->getLine(),
-									  .line = errorlistener->getline(*arg->start->getInputStream(), 0, arg->start->getStartIndex()),
-									  .beginMark = arg->start->getCharPositionInLine(),
+									{{.number = arg->start->getLine(),
+									  .text = errorlistener->getline(*arg->start->getInputStream(), 0, arg->start->getStartIndex()),
+									  .markBegin = arg->start->getCharPositionInLine(),
 									  .markWidth = arg->stop->getStopIndex() - arg->start->getStartIndex() + 1}},
 									arg->start->getLine(), arg->start->getCharPositionInLine(), e.message, e.hint
 							);
@@ -954,11 +1314,11 @@ namespace mdl {
 						auto lasttok = ctx->type_arg().empty() ? ctx->stop : ctx->type_arg().back()->stop;
 						errorlistener->semanticError(
 								PrettyErrorListener::ErrorLevel::Error,
-								{{.linenr = ctx->typename_->getLine(),
-								  .line = errorlistener->getline(
+								{{.number = ctx->typename_->getLine(),
+								  .text = errorlistener->getline(
 										  *firsttok->getInputStream(), 0, firsttok->getStartIndex()
 								  ),
-								  .beginMark = firsttok->getCharPositionInLine(),
+								  .markBegin = firsttok->getCharPositionInLine(),
 								  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 								ctx->typename_->getLine(), firsttok->getCharPositionInLine(), ta.error()
 						);
@@ -986,9 +1346,9 @@ namespace mdl {
 					auto lasttok = ctx->expr()->stop;
 					errorlistener->semanticError(
 							PrettyErrorListener::ErrorLevel::Error,
-							{{.linenr = firsttok->getLine(),
-							  .line = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-							  .beginMark = firsttok->getCharPositionInLine(),
+							{{.number = firsttok->getLine(),
+							  .text = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+							  .markBegin = firsttok->getCharPositionInLine(),
 							  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 							firsttok->getLine(), firsttok->getCharPositionInLine(),
 							"Parameters must be compile time constant"
@@ -1031,8 +1391,12 @@ namespace mdl {
 					if (auto value = boundTemplate.find(name); value != boundTemplate.end()) {
 						// Specialized for a call: the template parameter is a constant in the body.
 						currentNamespace().put(name, Object{&graph().addConstNode(Atomic{value->second})});
+						defineHere(decl->IDENT()->getSymbol(), analysis::SymbolKind::templateParameter, sourceText(decl),
+								   nullptr, rangeOf(ctx), {std::format("{} = {}", typeString(dtype), value->second)});
 						continue;
 					}
+					defineHere(decl->IDENT()->getSymbol(), analysis::SymbolKind::templateParameter, sourceText(decl), nullptr,
+							   rangeOf(ctx), {typeString(dtype)});
 					auto& p = currentNamespace().put(name, Object{&graph().addHyperparameterNode(dtype, name)});
 					tparams.emplace_back(name, std::get<mdl::HyperparameterNode>(*std::get<const mdl::Node*>(p)));
 				}
@@ -1048,6 +1412,8 @@ namespace mdl {
 				if (auto* tensor = std::get_if<TensorType>(&dtype); tensor && specialization && i < specialization->size())
 					tensor->masked |= (*specialization)[i];
 				auto& p = currentNamespace().put(name, Object{&graph().addInputNode(dtype, name)});
+				defineHere(ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::parameter,
+						   sourceText(ctx->param()[i]), nullptr, rangeOf(ctx), {typeString(dtype)});
 				params.emplace_back(name, std::get<mdl::InputNode>(*std::get<const mdl::Node*>(p)));
 			}
 			std::vector<std::variant<PrimitiveType, TensorType>> returnTypes;
@@ -1156,8 +1522,17 @@ namespace mdl {
 		/** @brief Defines the function @p decl in the current namespace, as an overload if the name is a function. */
 		void registerFunction(antlr4::tree::TerminalNode* ident, const FunctionDecl& decl) {
 			const std::string name = ident->getText();
+			if (decl.templ != nullptr)
+				define(ident->getSymbol(), analysis::SymbolKind::function, signature(decl.templ->ctx), decl.templ->ctx,
+					   fileScope());
+			auto bind = [&] {
+				if (index() != nullptr)
+					if (auto id = index()->find(currentFile(), rangeOf(ident->getSymbol()).begin))
+						currentNamespace().setSymbol(name, *id);
+			};
 			if (!currentNamespace().definesLocally(name)) {
 				currentNamespace().put<mdl::Object>(name, Object{decl});
+				bind();
 				return;
 			}
 			auto existing = currentNamespace().get<Object>(name);
@@ -1179,6 +1554,7 @@ namespace mdl {
 			FunctionDecl merged = *function;
 			merged.overloads.push_back(decl);
 			currentNamespace().assign(name, Object{std::move(merged)});
+			bind();
 		}
 
 		/**
@@ -1343,8 +1719,11 @@ namespace mdl {
 	public:
 
 		virtual std::any visitVarAccessExpression(mdlParser::VarAccessExpressionContext* ctx) override {
-			if (const auto* tensor = currentNamespace().find<SlottedTensor>(ctx->IDENT()->getText()))
-				return stacked(*tensor, ctx->IDENT()->getText(), ctx->IDENT()->getSymbol());
+			if (const auto* tensor = currentNamespace().find<SlottedTensor>(ctx->IDENT()->getText())) {
+				const Node* whole = stacked(*tensor, ctx->IDENT()->getText(), ctx->IDENT()->getSymbol());
+				referenceHere(ctx->IDENT()->getSymbol(), Object{whole});
+				return whole;
+			}
 			if (const auto* omitted = currentNamespace().find<OmittedMember>(ctx->IDENT()->getText())) {
 				auto* sym = ctx->IDENT()->getSymbol();
 				errorlistener->semanticError(
@@ -1362,6 +1741,7 @@ namespace mdl {
 				);
 				return &graph().addErrorNode();
 			}
+			referenceHere(ctx->IDENT()->getSymbol(), value->get());
 			return value.value().get(); // Returns Object as std::any
 		}
 		virtual std::any visitConstantExpression(mdlParser::ConstantExpressionContext* ctx) override {
@@ -1372,8 +1752,44 @@ namespace mdl {
 		}
 
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
+			std::optional<Object> base;
+			auto result = accessExpression(ctx, base);
+			if (index() != nullptr && ctx->IDENT() != nullptr) {
+				analysis::Reference r{.file = currentFile(), .range = rangeOf(ctx->IDENT()->getSymbol())};
+				// The member's definition: in the module of the instance.
+				const auto* node = base ? std::get_if<const Node*>(&*base) : nullptr;
+				const auto* bound = node ? std::get_if<BoundModuleType>(&getDataType(**node)) : nullptr;
+				if (bound != nullptr && bound->definition.templ) {
+					const auto& t = *bound->definition.templ;
+					auto locate = [&](antlr4::Token* tok) {
+						if (tok != nullptr && tok->getText() == ctx->IDENT()->getText())
+							r.symbol = index()->find(t.errors->getFile(), rangeOf(tok).begin);
+					};
+					for (auto* v : t.ctx->vardecl())
+						locate(v->IDENT() ? v->IDENT()->getSymbol() : nullptr);
+					for (auto* f : t.ctx->funcdef())
+						locate(f->IDENT() ? f->IDENT()->getSymbol() : nullptr);
+				}
+				try {
+					Object value = std::any_cast<Object>(result);
+					r.types.insert(objectType(value));
+					r.members = objectMembers(value);
+				} catch (const std::bad_any_cast&) {
+					if (const auto* n = std::any_cast<const Node*>(&result); n && !std::holds_alternative<ErrorNode>(**n)) {
+						r.types.insert(objectType(Object{*n}));
+						r.members = objectMembers(Object{*n});
+					}
+				}
+				r.types.erase(std::string{});
+				index()->reference(std::move(r));
+			}
+			return result;
+		}
+
+		std::any accessExpression(mdlParser::AccessExpressionContext* ctx, std::optional<Object>& base) {
 			/** \todo this function needs refactoring; e.g., merge the handling of AggregateInstance, ModuleInstance, TensorType, ... to simple getMember lookups **/
 			auto baseObj = asObject(ctx->expr()->accept(this));
+			base = baseObj;
 			auto memberName = ctx->IDENT()->getText();
 			auto* memberTok = ctx->IDENT()->getSymbol();
 
@@ -1449,9 +1865,9 @@ namespace mdl {
 			auto* lasttok = ctx->stop;
 			errorlistener->semanticError(
 					PrettyErrorListener::ErrorLevel::Error,
-					{{.linenr = firsttok->getLine(),
-					  .line = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-					  .beginMark = firsttok->getCharPositionInLine(),
+					{{.number = firsttok->getLine(),
+					  .text = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+					  .markBegin = firsttok->getCharPositionInLine(),
 					  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 					firsttok->getLine(), firsttok->getCharPositionInLine(),
 					"Member access is only supported on struct instances and module objects"
@@ -1561,6 +1977,7 @@ namespace mdl {
 		struct SlottedTensor {
 			TensorType type;
 			std::vector<const Node*> slots; ///< nullptr: not assigned yet
+			bool representative = false;	///< symbolic analysis: the only slot stands for all
 		};
 
 		/** @brief The type of a slot of @p t (the declared type without its first dimension). */
@@ -1578,7 +1995,7 @@ namespace mdl {
 		/** @brief The slot @p index of @p t (negative: from the end), which must be assigned. */
 		const Node* slot(const SlottedTensor& t, const std::string& name, int index, antlr4::Token* tok) {
 			const int n = static_cast<int>(t.slots.size());
-			const int i = index < 0 ? index + n : index;
+			const int i = t.representative ? 0 : index < 0 ? index + n : index;
 			if (i < 0 || i >= n)
 				return slotError(tok, std::format("Index {} is out of bounds ({} has {} slots)", index, name, n));
 			if (t.slots[i] == nullptr)
@@ -1617,17 +2034,16 @@ namespace mdl {
 			const bool widening = target == PrimitiveType::float32;
 			const auto level = widening ? options.floatWidening : options.floatNarrowing;
 			const std::string flag = widening ? "float-widening" : "float-narrowing";
-			if (level != parser::Diagnostic::ignored) {
-				const bool error = level == parser::Diagnostic::error;
+			if (level != parser::DiagnosticLevel::ignored) {
+				const bool error = level == parser::DiagnosticLevel::error;
 				errorlistener->semanticError(
-						error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning, tok,
-						tok->getLine(), tok->getCharPositionInLine(),
+						error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+						tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(),
 						std::format(
-								"{}: implicit {} from {} to {}{} [-W{}{}]", what, widening ? "widening" : "narrowing",
-								std::to_string(*from), std::to_string(target),
-								error ? std::format(" (convert explicitly, e.g. {}(x))", std::to_string(target)) : "",
-								error ? "error=" : "", flag
-						)
+								"{}: implicit {} from {} to {}", what, widening ? "widening" : "narrowing",
+								std::to_string(*from), std::to_string(target)
+						),
+						error ? std::format("convert explicitly, e.g. `{}(x)`", std::to_string(target)) : "", flag
 				);
 				if (error)
 					return nullptr;
@@ -1884,9 +2300,9 @@ namespace mdl {
 				/** \todo describe data types **/
 				errorlistener->semanticError(
 						PrettyErrorListener::ErrorLevel::Error,
-						{{.linenr = firsttok->getLine(),
-						  .line = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
-						  .beginMark = firsttok->getCharPositionInLine(),
+						{{.number = firsttok->getLine(),
+						  .text = errorlistener->getline(*firsttok->getInputStream(), 0, firsttok->getStartIndex()),
+						  .markBegin = firsttok->getCharPositionInLine(),
 						  .markWidth = lasttok->getStopIndex() - firsttok->getStartIndex() + 1}},
 						firsttok->getLine(), firsttok->getCharPositionInLine(),
 						std::format("Operator {} not supported on {}", ctx->bop->getText(), "TODO")
@@ -1931,6 +2347,12 @@ namespace mdl {
 			auto value = foldConstant(*cond);
 			const auto* i = value ? std::get_if<int>(&*value) : nullptr;
 			const auto* d = value ? std::get_if<double>(&*value) : nullptr;
+			if (i == nullptr && d == nullptr && isSymbolic(*cond)) {
+				// Symbolic analysis: both branches are checked; the first one is the value.
+				auto result = ctx->then->accept(this);
+				ctx->otherwise->accept(this);
+				return result;
+			}
 			if (i == nullptr && d == nullptr) {
 				auto* tok = ctx->cond->start;
 				errorlistener->semanticError(
@@ -1981,12 +2403,18 @@ namespace mdl {
 				auto dtype = std::any_cast<DataType>(ctx->type()->accept(this));
 				const auto* tensor = std::get_if<TensorType>(&dtype);
 				std::optional<int> n;
+				bool representative = false;
 				if (tensor != nullptr && !tensor->shape.empty()) {
 					if (const auto* u = std::get_if<unsigned>(&tensor->shape.front()))
 						n = static_cast<int>(*u);
-					else if (const auto* node = std::get_if<const Node*>(&tensor->shape.front()))
+					else if (const auto* node = std::get_if<const Node*>(&tensor->shape.front())) {
 						if (auto v = foldConstant(**node); v && std::holds_alternative<int>(*v))
 							n = std::get<int>(*v);
+						else if (isSymbolic(**node)) {
+							n = 1; // symbolic analysis: one slot stands for all
+							representative = true;
+						}
+					}
 				}
 				if (!n || *n <= 0) {
 					slotError(
@@ -1995,16 +2423,27 @@ namespace mdl {
 					);
 					return std::nullopt;
 				}
-				for (auto* name : ctx->names)
+				for (auto* name : ctx->names) {
 					currentNamespace().put(
-							name->getText(), SlottedTensor{.type = *tensor, .slots = std::vector<const Node*>(*n, nullptr)}
+							name->getText(),
+							SlottedTensor{
+									.type = *tensor,
+									.slots = std::vector<const Node*>(*n, nullptr),
+									.representative = representative
+							}
 					);
+					defineHere(name, analysis::SymbolKind::variable, sourceText(ctx), nullptr, rangeOf(enclosingBlock(ctx)),
+							   {typeString(*tensor)});
+				}
 				return std::nullopt;
 			}
 			/** \todo check datatype with ctx->type() **/
 			auto value = ctx->expr()->accept(this);
 			if (ctx->names.size() == 1) {
-				currentNamespace().put(ctx->names[0]->getText(), asObject(std::move(value), ctx->expr()->start));
+				const auto& object =
+						currentNamespace().put(ctx->names[0]->getText(), asObject(std::move(value), ctx->expr()->start));
+				defineHere(ctx->names[0], analysis::SymbolKind::variable, sourceText(ctx), nullptr,
+						   rangeOf(enclosingBlock(ctx)), {objectType(object)});
 				return std::nullopt;
 			}
 			// Destructuring: `auto a, b = f(x);`
@@ -2022,19 +2461,23 @@ namespace mdl {
 					);
 				nodes.assign(ctx->names.size(), &graph().addErrorNode());
 			}
-			for (size_t i = 0; i < nodes.size(); ++i)
+			for (size_t i = 0; i < nodes.size(); ++i) {
 				currentNamespace().put(ctx->names[i]->getText(), Object{nodes[i]});
+				defineHere(ctx->names[i], analysis::SymbolKind::variable, sourceText(ctx), nullptr,
+						   rangeOf(enclosingBlock(ctx)), {objectType(Object{nodes[i]})});
+			}
 			return std::nullopt;
 		}
 
 		virtual std::any visitAssignStatement(mdlParser::AssignStatementContext* ctx) override {
 			auto value = asObject(ctx->expr()->accept(this), ctx->expr()->start);
+			referenceHere(ctx->name, value);
 			if (!currentNamespace().assign(ctx->name->getText(), std::move(value)))
 				errorlistener->semanticError(
 						PrettyErrorListener::ErrorLevel::Error, ctx->name, ctx->name->getLine(),
 						ctx->name->getCharPositionInLine(),
-						std::format("Variable {} is not defined (declare it with `auto {} = ...;`)", ctx->name->getText(),
-									ctx->name->getText())
+						std::format("Variable {} is not defined", ctx->name->getText()),
+						std::format("declare it with `auto {} = ...;`", ctx->name->getText())
 				);
 			return std::nullopt;
 		}
@@ -2051,12 +2494,12 @@ namespace mdl {
 				);
 				return std::nullopt;
 			}
-			auto index = constantInt(ctx->index);
+			auto index = constantInt(ctx->index, 0);
 			const Node* value = asNode(ctx->value->accept(this), ctx->value->start);
 			if (!index)
 				return std::nullopt;
 			const int n = static_cast<int>(tensor->slots.size());
-			const int i = *index < 0 ? *index + n : *index;
+			const int i = tensor->representative ? 0 : *index < 0 ? *index + n : *index;
 			if (i < 0 || i >= n) {
 				slotError(ctx->index->start, std::format("Index {} is out of bounds ({} has {} slots)", *index, name, n));
 				return std::nullopt;
@@ -2085,12 +2528,17 @@ namespace mdl {
 		}
 
 		virtual std::any visitForStatement(mdlParser::ForStatementContext* ctx) override {
-			auto lo = constantInt(ctx->lo), hi = constantInt(ctx->hi);
+			auto lo = constantInt(ctx->lo, 0), hi = constantInt(ctx->hi);
 			if (!lo || !hi)
 				return std::nullopt;
+			if (*hi == unknownInt)
+				hi = *lo + 1; // symbolic analysis: one iteration stands for all
 			for (int i = *lo; i < *hi; ++i) {
 				pushNamespace();
 				currentNamespace().put(ctx->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+				defineHere(ctx->var, analysis::SymbolKind::loopVariable,
+						   ctx->var->getText() + " in " + sourceText(ctx->lo) + ".." + sourceText(ctx->hi), nullptr,
+						   rangeOf(ctx), {"int"});
 				for (auto* stmt : ctx->statement()) {
 					auto result = stmt->accept(this);
 					if (std::any_cast<MultiValue>(&result) != nullptr)
@@ -2109,7 +2557,7 @@ namespace mdl {
 			if (auto* var = dynamic_cast<mdlParser::VarAccessExpressionContext*>(ctx->base); var && ctx->indices.size() == 1)
 				if (const auto* tensor = currentNamespace().find<SlottedTensor>(var->IDENT()->getText()))
 					if (auto* value = dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[0])) {
-						auto index = constantInt(value->expr());
+						auto index = constantInt(value->expr(), 0);
 						if (!index)
 							return static_cast<const Node*>(&graph().addErrorNode());
 						return slot(*tensor, var->IDENT()->getText(), *index, value->start);
@@ -2128,9 +2576,11 @@ namespace mdl {
 				auto* value = ctx->indices.size() == 1 ? dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[0]) : nullptr;
 				if (value == nullptr)
 					return error(ctx->start, "An array takes one index");
-				auto index = constantInt(value->expr());
+				auto index = constantInt(value->expr(), 0);
 				if (!index)
 					return &graph().addErrorNode();
+				if (array->representative && !array->elements.empty())
+					return array->elements.front();
 				if (*index < 0 || *index >= static_cast<int>(array->elements.size()))
 					return error(
 							value->start,
@@ -2157,7 +2607,7 @@ namespace mdl {
 				auto* value = dynamic_cast<mdlParser::IndexValueContext*>(ctx->indices[i]);
 				if (value == nullptr)
 					continue; // `:` or `...`
-				auto index = constantInt(value->expr());
+				auto index = constantInt(value->expr(), 0);
 				if (!index)
 					return &graph().addErrorNode();
 				if (ellipsis && i > *ellipsis)
@@ -2198,49 +2648,122 @@ namespace mdl {
 
 std::vector<std::filesystem::path> mdl::parser::defaultStdlibDirs() {
 	std::vector<std::filesystem::path> dirs;
+#if defined(_WIN32)
+	constexpr char separator = ';';
+#else
+	constexpr char separator = ':';
+#endif
 	if (const char* env = std::getenv("MDL_STDLIB_PATH")) {
 		std::string_view paths{env};
 		while (!paths.empty()) {
-			auto sep = paths.find(':');
+			auto sep = paths.find(separator);
 			if (auto dir = paths.substr(0, sep); !dir.empty())
 				dirs.emplace_back(dir);
 			paths = (sep == std::string_view::npos) ? std::string_view{} : paths.substr(sep + 1);
 		}
 	}
+	// An installation: <prefix>/bin/<tool> and <prefix>/share/mdl/std.
+	if (auto exe = utils::executablePath(); !exe.empty()) {
+		std::error_code ec;
+		auto installed = exe.parent_path().parent_path() / "share" / "mdl" / "std";
+		if (std::filesystem::is_directory(installed, ec))
+			dirs.push_back(std::move(installed));
+	}
 #ifdef MDL_DEFAULT_STDLIB_DIR
-	dirs.emplace_back(MDL_DEFAULT_STDLIB_DIR);
+	dirs.emplace_back(MDL_DEFAULT_STDLIB_DIR); // the source tree (running from the build tree)
 #endif
 	return dirs;
 }
 
 namespace {
-	std::optional<mdl::CompilationUnit> finish(std::shared_ptr<mdl::parser::FrontendState> state) {
+	/** @brief A frontend state whose diagnostics go to @p sink (stderr with a summary per file if empty). */
+	std::shared_ptr<mdl::parser::FrontendState> makeState(mdl::DiagnosticSink sink) {
+		auto state = std::make_shared<mdl::parser::FrontendState>();
+		state->printing = !sink;
+		state->sink = [s = state.get(), forward = std::move(sink)](const mdl::Diagnostic& d) {
+			s->diagnostics.push_back(d);
+			if (forward)
+				forward(d);
+			else
+				mdl::printDiagnostic(std::cerr, d);
+		};
+		return state;
+	}
+
+	mdl::CompilationUnit makeUnit(std::shared_ptr<mdl::parser::FrontendState> state) {
 		auto& visitor = *state->visitor;
-		if (visitor.getNumErrors() > 0)
-			return std::nullopt;
 		mdl::CompilationUnit unit;
 		unit.definitions = std::move(visitor.getDefinitions());
 		unit.sources = std::move(visitor.getSources());
 		unit.state = std::move(state);
 		return unit;
 	}
+
+	std::optional<mdl::CompilationUnit> finish(std::shared_ptr<mdl::parser::FrontendState> state) {
+		if (state->visitor->getNumErrors() > 0)
+			return std::nullopt;
+		return makeUnit(std::move(state));
+	}
+
+	mdl::parser::AnalysisResult finishAnalysis(std::shared_ptr<mdl::parser::FrontendState> state) {
+		const bool ok = state->visitor->getNumErrors() == 0;
+		auto diagnostics = state->diagnostics;
+		auto index = std::shared_ptr<const mdl::analysis::SemanticIndex>(state, state->index.get());
+		return {.unit = makeUnit(std::move(state)), .diagnostics = std::move(diagnostics), .ok = ok, .index = index};
+	}
+
+	std::shared_ptr<mdl::parser::FrontendState> translateStream(
+			std::istream& stream, std::string_view sourcename, const mdl::parser::ParseOptions& options,
+			mdl::DiagnosticSink sink, bool analysis = false
+	) {
+		mdl::shapes::setDefaultFloat(options.defaultFloat);
+		auto state = makeState(std::move(sink));
+		if (analysis)
+			state->index = std::make_unique<mdl::analysis::SemanticIndex>();
+		state->visitor = std::make_unique<mdl::TranslatingVisitor>(*state, options);
+		state->visitor->setCheckGenericModules(analysis);
+		state->visitor->translate(
+				stream, std::string{sourcename}, options.sourceDir.value_or(std::filesystem::current_path()), /*main=*/true
+		);
+		return state;
+	}
+
+	std::shared_ptr<mdl::parser::FrontendState> translatePath(
+			const std::filesystem::path& file, const mdl::parser::ParseOptions& options, mdl::DiagnosticSink sink,
+			bool analysis = false
+	) {
+		mdl::shapes::setDefaultFloat(options.defaultFloat);
+		auto state = makeState(std::move(sink));
+		if (analysis)
+			state->index = std::make_unique<mdl::analysis::SemanticIndex>();
+		state->visitor = std::make_unique<mdl::TranslatingVisitor>(*state, options);
+		state->visitor->setCheckGenericModules(analysis);
+		state->visitor->translateFile(file, /*main=*/true);
+		return state;
+	}
+
+	/** @brief Collects the diagnostics without printing them (and forwards them to the options' sink, if any). */
+	mdl::DiagnosticSink quiet(const mdl::parser::ParseOptions& options) {
+		return options.diagnostics ? options.diagnostics : [](const mdl::Diagnostic&) {};
+	}
 } // namespace
 
 std::optional<mdl::CompilationUnit>
 mdl::parser::parse(std::istream& stream, std::string_view sourcename, const ParseOptions& options) {
-	shapes::setDefaultFloat(options.defaultFloat);
-	auto state = std::make_shared<FrontendState>();
-	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
-	state->visitor->translate(stream, std::string{sourcename}, std::filesystem::current_path(), /*main=*/true);
-	return finish(std::move(state));
+	return finish(translateStream(stream, sourcename, options, options.diagnostics));
 }
 
 std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::path& file, const ParseOptions& options) {
-	shapes::setDefaultFloat(options.defaultFloat);
-	auto state = std::make_shared<FrontendState>();
-	state->visitor = std::make_unique<TranslatingVisitor>(*state, options);
-	state->visitor->translateFile(file, /*main=*/true);
-	return finish(std::move(state));
+	return finish(translatePath(file, options, options.diagnostics));
+}
+
+mdl::parser::AnalysisResult
+mdl::parser::analyze(std::istream& stream, std::string_view sourcename, const ParseOptions& options) {
+	return finishAnalysis(translateStream(stream, sourcename, options, quiet(options), /*analysis=*/true));
+}
+
+mdl::parser::AnalysisResult mdl::parser::analyze(const std::filesystem::path& file, const ParseOptions& options) {
+	return finishAnalysis(translatePath(file, options, quiet(options), /*analysis=*/true));
 }
 
 mdl::Computegraph& mdl::CompilationUnit::graph() const { return state->graph; }

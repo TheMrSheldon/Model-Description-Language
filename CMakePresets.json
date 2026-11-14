@@ -31,6 +31,16 @@
             }
         },
         {
+            "name": "conf-tooling",
+            "description": "Only the frontend and the tooling (mdl-format, mdls): no TVM/LLVM/oneDNN",
+            "inherits": "conf-release-common",
+            "cacheVariables": {
+                "BUILD_SHARED_LIBS": "OFF",
+                "MDL_ENABLE_COMPILER": "OFF",
+                "MDL_BUILD_TESTS": "ON"
+            }
+        },
+        {
             "name": "conf-dev",
             "description": "Settings for development",
             "inherits": "conf-common",
