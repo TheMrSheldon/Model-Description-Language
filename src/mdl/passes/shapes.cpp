@@ -114,6 +114,18 @@ namespace mdl::shapes {
 		[[noreturn]] void fail(std::string message) { throw ShapeError{std::move(message)}; }
 		[[noreturn]] void mismatched(std::string message) { throw Mismatch{{std::move(message)}}; }
 
+		/**
+		 * @brief Whether sizes that are different compile-time expressions (e.g. the hyperparameters `indim` and
+		 * `outdim`) count as a mismatch: they may differ in an instance (see check(..., strict)).
+		 */
+		thread_local bool strictSizes = false;
+
+		/** @brief Whether @p a and @p b are known sizes that may differ (not both constant, not equal). */
+		bool mayDiffer(const Dim& a, const Dim& b) {
+			return strictSizes && a.known && b.known && !a.group && !b.group && a != b &&
+				   !(a.isConstant() && b.isConstant());
+		}
+
 		Dim numel(const Shape& shape) {
 			Dim d = Dim::constant(1);
 			for (const auto& dim : shape)
@@ -145,6 +157,8 @@ namespace mdl::shapes {
 					tail.push_back(db);
 				else if (db == Dim::constant(1) || da == db)
 					tail.push_back(da);
+				else if (mayDiffer(da, db))
+					mismatched(std::format("cannot broadcast {} and {} (the sizes may differ)", str(a), str(b)));
 				else if (!da.known || !db.known || (symbolic && !(da.isConstant() && db.isConstant())))
 					tail.push_back(Dim::unknown());
 				else
@@ -401,6 +415,10 @@ namespace mdl::shapes {
 					mismatched(
 							std::format("the inner dimensions of the matrix product differ ({} @ {})", str(a), str(b))
 					);
+				if (mayDiffer(ka, kb))
+					mismatched(std::format(
+							"the inner dimensions of the matrix product may differ ({} @ {})", str(a), str(b)
+					));
 				if (b.size() == 1)
 					return Shape(a.begin(), a.end() - 1);
 				if (a.size() == 1) {
@@ -691,7 +709,7 @@ namespace mdl::shapes {
 		return s + (shape ? str(*shape) : "[?]");
 	}
 
-	bool matches(const DataType& declared, const DataType& computed, bool elements) {
+	bool matches(const DataType& declared, const DataType& computed, bool elements, bool strict) {
 		auto element = [](const DataType& t) -> std::optional<PrimitiveType> {
 			if (const auto* p = std::get_if<PrimitiveType>(&t))
 				return *p;
@@ -725,6 +743,8 @@ namespace mdl::shapes {
 				return true;
 			if (d.isConstant() && c.isConstant() && d != c)
 				return false;
+			if (strict && d.known && c.known && d != c)
+				return false;
 		}
 		return true;
 	}
@@ -732,7 +752,7 @@ namespace mdl::shapes {
 	void setDefaultFloat(PrimitiveType type) { defaultFloatType = type; }
 
 	std::optional<std::string>
-	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
+	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args, bool strict) {
 		// Float tensors of different types do not combine (conversions are explicit).
 		std::optional<PrimitiveType> floatType;
 		for (size_t i : combinedOperands(id, args.size())) {
@@ -754,13 +774,16 @@ namespace mdl::shapes {
 			shapes.push_back(std::move(*shape));
 		}
 		static const ConstantEvaluator evaluate = constantInteger;
+		const bool outer = std::exchange(strictSizes, strict);
+		std::optional<std::string> problem;
 		try {
 			Rules{evaluate, true}.apply(id, args, [&](size_t i) -> const Shape& { return shapes[i]; });
 		} catch (const Mismatch& e) {
-			return e.message;
+			problem = e.message;
 		} catch (const ShapeError&) {
 		}
-		return std::nullopt;
+		strictSizes = outer;
+		return problem;
 	}
 
 	DataType resultType(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {

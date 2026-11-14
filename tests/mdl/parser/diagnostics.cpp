@@ -176,3 +176,38 @@ TEST_CASE("the symbolic analysis reports no errors in the repository's models", 
 		}
 	CHECK(count > 5);
 }
+
+TEST_CASE("sizes that may differ are warnings, and errors in strict mode", "[parser][diagnostics]") {
+	const std::string code = R"(
+		module Test[input: uint, output: uint] {
+			W: float[input, output]
+			b: float[output]
+			float[output] forward(x: float[input]) => W @ x + b;
+		})";
+	auto lenient = analyzeSource(code);
+	CHECK(lenient.ok);
+	REQUIRE(lenient.diagnostics.size() == 2);
+	CHECK(lenient.diagnostics[0].severity == Severity::warning);
+	CHECK(lenient.diagnostics[0].flag == "possible-mismatch");
+	CHECK(lenient.diagnostics[0].message ==
+		  "Operator @: the inner dimensions of the matrix product may differ ([input, output] @ [input])");
+	CHECK(lenient.diagnostics[1].message == "Operator +: cannot broadcast [input] and [output] (the sizes may differ)");
+
+	parser::ParseOptions strict;
+	strict.possibleMismatch = parser::DiagnosticLevel::error;
+	auto strictResult = analyzeSource(code, strict);
+	CHECK_FALSE(strictResult.ok);
+	REQUIRE(strictResult.diagnostics.size() == 2);
+	CHECK(strictResult.diagnostics[0].severity == Severity::error);
+
+	// Correct generic code has no warnings (x @ W.T() is [..., output]).
+	auto correct = analyzeSource(R"(
+		module Test[input: uint, output: uint] {
+			W: float[output, input]
+			b: float[output]
+			float[..., output] forward(x: float[..., input]) => x @ W.T() + b;
+		})",
+								 strict);
+	CHECK(correct.ok);
+	CHECK(correct.diagnostics.empty());
+}

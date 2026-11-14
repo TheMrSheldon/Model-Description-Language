@@ -1182,6 +1182,20 @@ namespace mdl {
 			};
 		}
 
+		/**
+		 * @brief Reports a possible mismatch (`-Wpossible-mismatch`, an error with `--strict`): sizes that are different
+		 * compile-time expressions (e.g. the hyperparameters `input` and `output`), which may differ in an instance.
+		 */
+		void reportPossibleMismatch(antlr4::Token* tok, const std::string& message) {
+			if (options.possibleMismatch == parser::DiagnosticLevel::ignored)
+				return;
+			const bool error = options.possibleMismatch == parser::DiagnosticLevel::error;
+			errorlistener->semanticError(
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+					tokenContext(tok), tok->getLine(), tok->getCharPositionInLine(), message, "", "possible-mismatch"
+			);
+		}
+
 		void reportUnknownAnnotation(mdlParser::AnnotationContext* a) {
 			if (options.unknownAnnotation == parser::DiagnosticLevel::ignored)
 				return;
@@ -1558,6 +1572,14 @@ namespace mdl {
 							std::format(
 									"{} returns {}, but its declared return type is {}", decl.name,
 									shapes::str(getDataType(decl.outputs[i].get())), shapes::str(declared)
+							)
+					);
+				} else if (!shapes::matches(declared, getDataType(decl.outputs[i].get()), true, /*strict=*/true)) {
+					reportPossibleMismatch(
+							ctx->IDENT()->getSymbol(),
+							std::format(
+									"{} returns {}, but its declared return type is {} (the sizes may differ)",
+									decl.name, shapes::str(getDataType(decl.outputs[i].get())), shapes::str(declared)
 							)
 					);
 				}
@@ -2276,6 +2298,18 @@ namespace mdl {
 							)
 					);
 					return &graph().addErrorNode();
+				} else if (!builtin && callee.templateParameters.empty() &&
+						   !shapes::matches(
+								   callee.parameters[i].second.get().type, argtypes[i], false, /*strict=*/true
+						   )) {
+					reportPossibleMismatch(
+							ctx->args[i]->start,
+							std::format(
+									"Argument {} of {} is {}, but the parameter {} is {} (the sizes may differ)", i + 1,
+									callee.name, shapes::str(argtypes[i]), callee.parameters[i].first,
+									shapes::str(callee.parameters[i].second.get().type)
+							)
+					);
 				}
 
 			// If the callee is a module instance node, use addModuleInvocationNode so that each instance (weightQuery,
@@ -2315,6 +2349,8 @@ namespace mdl {
 									PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(),
 									tok->getCharPositionInLine(), std::format("{}: {}", callee.name, *problem)
 							);
+						} else if (auto possible = shapes::check(inv->id, inv->arguments, /*strict=*/true)) {
+							reportPossibleMismatch(ctx->func->start, std::format("{}: {}", callee.name, *possible));
 						}
 				if (outputs) {
 					auto gradient = currentNamespace().get<Object>(callee.name + "_gradient");
@@ -2402,6 +2438,8 @@ namespace mdl {
 							PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
 							std::format("Operator {}: {}", tok->getText(), *problem)
 					);
+				} else if (auto possible = shapes::check(inv->id, inv->arguments, /*strict=*/true)) {
+					reportPossibleMismatch(ctx->bop, std::format("Operator {}: {}", ctx->bop->getText(), *possible));
 				}
 			return &result;
 		}
@@ -2616,6 +2654,15 @@ namespace mdl {
 				tensor->slots[i] = &graph().addErrorNode(); // (reported)
 				return std::nullopt;
 			}
+			if (shapes::matches(type, getDataType(*value)) &&
+				!shapes::matches(type, getDataType(*value), true, /*strict=*/true))
+				reportPossibleMismatch(
+						ctx->value->start,
+						std::format(
+								"{}[{}] is assigned {}, but the slots of {} are {} (the sizes may differ)", name, i,
+								shapes::str(getDataType(*value)), name, shapes::str(type)
+						)
+				);
 			if (!shapes::matches(type, getDataType(*value))) {
 				tensor->slots[i] = slotError(
 						ctx->value->start, std::format(
