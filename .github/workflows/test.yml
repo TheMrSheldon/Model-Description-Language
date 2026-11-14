@@ -19,9 +19,6 @@ jobs:
           - name: macOS arm64
             os: macos-latest
             arch: arm64
-          - name: macOS x86_64
-            os: macos-13
-            arch: x86_64
           - name: Windows x86_64
             os: windows-latest
             arch: x86_64
@@ -41,6 +38,14 @@ jobs:
       - name: Install OpenBLAS (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y libopenblas-dev
+      - name: Install LLVM (macOS; TVM's code generation)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+      - name: Allow Long Paths (Windows; TVM's submodules)
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
       - name: Configure CMake
         run: cmake -B ./build --preset=conf-dev "-DCMAKE_CXX_FLAGS=--coverage" "-DCMAKE_C_FLAGS=--coverage" "-DCMAKE_EXE_LINKER_FLAGS=--coverage" ${{ matrix.cmake_extra_args }}
       - name: Build
@@ -72,8 +77,6 @@ jobs:
             os: ubuntu-24.04-arm
           - name: macOS arm64
             os: macos-latest
-          - name: macOS x86_64
-            os: macos-13
           - name: Windows x86_64 (MSVC)
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -111,7 +114,7 @@ jobs:
         run: cmake -B ./build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
       - name: Run Clang-Tidy
         working-directory: ${{github.workspace}}
-        run: clang-tidy-19 -p ./build/compile_commands.json $(find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$')
+        run: clang-tidy -p ./build/compile_commands.json $(find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$')
 
   format-checks:
     name: Check C++ code format
@@ -126,4 +129,4 @@ jobs:
         uses: actions/checkout@v6
       - name: Check Codestyle
         working-directory: ${{github.workspace}}
-        run: find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$' | xargs clang-format-19 --dry-run --Werror --Wno-error=unknown
+        run: find src/ include/ -type f -iregex '^.*\.\(c\|h\|cpp\|hpp\|cc\|hh\)$' | xargs clang-format --dry-run --Werror --Wno-error=unknown

@@ -812,7 +812,18 @@ namespace mdl {
 					overloaded{
 							[](const Node* node) -> std::string {
 								if (auto v = foldConstant(*node))
-									return std::visit([](auto x) { return std::format("{}", x); }, *v);
+									return std::visit(
+											overloaded{
+													[](const std::vector<int>& xs) {
+														std::string s = "(";
+														for (int x : xs)
+															s += std::to_string(x) + ",";
+														return s + ")";
+													},
+													[](auto x) { return std::format("{}", x); },
+											},
+											*v
+									);
 								// A symbolic value (interned: the same expression is the same node).
 								return std::format("#{}", static_cast<const void*>(node));
 							},

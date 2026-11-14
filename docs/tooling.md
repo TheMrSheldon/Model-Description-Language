@@ -11,7 +11,7 @@ arm64).
 
 ## Prebuilt binaries
 Each release (and the rolling `nightly` release of `main`) has archives `mdl-tools-<platform>` for `linux-x64`,
-`linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64`, plus `SHA256SUMS`. They contain
+`linux-arm64`, `darwin-universal` (arm64 and x86_64), `win32-x64`, and `win32-arm64`, plus `SHA256SUMS`. They contain
 `bin/mdl-format`, `bin/mdls`, and `share/mdl/std/`. They have no dependencies besides the operating system:
 - **Linux:** built on glibc 2.28 with libstdc++ and libgcc linked statically, so they run on distributions with glibc
   2.28 or newer (e.g. Debian 10, Ubuntu 18.10, RHEL 8).
