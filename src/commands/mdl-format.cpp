@@ -1,6 +1,7 @@
 // mdl-format: formats `.dlm` files (like clang-format). The style comes from `--style-file`, else from the closest
 // `.mdl-format` file of each source, else the defaults (see mdl::format::FormatOptions).
 #include <mdl/format.hpp>
+#include <mdl/version.hpp>
 
 #include <CLI/CLI.hpp>
 
@@ -25,6 +26,7 @@ namespace {
 
 int main(int argc, char* argv[]) {
 	CLI::App app("mdl-format -- formats model description language files");
+	app.set_version_flag("--version", std::string{mdl::version});
 	std::vector<std::filesystem::path> files;
 	bool inPlace = false, check = false;
 	std::optional<std::filesystem::path> styleFile;

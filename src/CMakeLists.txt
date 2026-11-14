@@ -18,8 +18,13 @@ set(ANTLR_EXECUTABLE ${antlrjar_SOURCE_DIR}/antlr-${ANTLR_VERSION}-complete.jar)
 if (NOT BUILD_SHARED_LIBS)
 	add_definitions(-DANTLR4CPP_STATIC)
 endif()
-# using /MD flag for antlr4_runtime (for Visual C++ compilers only)
-set(ANTLR4_WITH_STATIC_CRT OFF)
+# The C runtime of antlr4_runtime (Visual C++ only): static (/MT) if the project uses the static runtime (release builds
+# of the tools, -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded), else /MD.
+if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded(Debug)?$")
+	set(ANTLR4_WITH_STATIC_CRT ON)
+else()
+	set(ANTLR4_WITH_STATIC_CRT OFF)
+endif()
 set(ANTLR_BUILD_CPP_TESTS OFF)
 FetchContent_Declare(
     antlr

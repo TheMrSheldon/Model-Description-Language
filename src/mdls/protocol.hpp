@@ -7,6 +7,7 @@
 #include <istream>
 #include <optional>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,7 +16,18 @@
 namespace mdls {
 	using json = nlohmann::json;
 
-	/** @brief Reads one message (`Content-Length` header, then the JSON body); std::nullopt at the end of the input. */
+	/** @brief A message with an invalid header (e.g. a `Content-Length` that is not a number or too large). */
+	struct ProtocolError : std::runtime_error {
+		using std::runtime_error::runtime_error;
+	};
+
+	/** @brief The largest message body that is read (64 MiB). */
+	constexpr size_t maxMessageSize = size_t{64} << 20;
+
+	/**
+	 * @brief Reads one message (`Content-Length` header, then the JSON body; a discarded json if the body is not valid
+	 * JSON); std::nullopt at the end of the input. Throws ProtocolError for an invalid header.
+	 */
 	std::optional<json> readMessage(std::istream& in);
 
 	/** @brief Writes one message. */
