@@ -42,6 +42,18 @@ namespace mdl {
 			size_t markBegin = 0, markWidth = 0;
 		};
 		std::vector<Line> context;
+
+		/** @brief A text change of a fix: replaces @p range by @p text (an empty range inserts). */
+		struct Edit {
+			SourceRange range;
+			std::string text;
+		};
+		/** @brief A way to fix the problem (e.g. a quick fix of an editor). */
+		struct Fix {
+			std::string title;
+			std::vector<Edit> edits;
+		};
+		std::vector<Fix> fixes;
 	};
 
 	/** @brief Receives the diagnostics of a compilation as they are found. */

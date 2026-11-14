@@ -128,9 +128,10 @@ public:
 
 	void semanticError(
 			ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
-			const std::string& msg, const std::string& hint = "", const std::string& flag = ""
+			const std::string& msg, const std::string& hint = "", const std::string& flag = "",
+			std::vector<mdl::Diagnostic::Fix> fixes = {}
 	) {
-		report(level, std::move(context), offendingLine, offendingCol, msg, hint, flag);
+		report(level, std::move(context), offendingLine, offendingCol, msg, hint, flag, std::move(fixes));
 	}
 
 	constexpr size_t getNumErrors() const { return numErrors; }
@@ -139,7 +140,8 @@ public:
 private:
 	void
 	report(ErrorLevel level, std::vector<ContextLine> context, size_t offendingLine, size_t offendingCol,
-		   const std::string& msg, const std::string& hint = "", const std::string& flag = "");
+		   const std::string& msg, const std::string& hint = "", const std::string& flag = "",
+		   std::vector<mdl::Diagnostic::Fix> fixes = {});
 };
 
 #endif

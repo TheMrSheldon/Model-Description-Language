@@ -2,6 +2,7 @@
 // members after `x.`, named hyperparameters after `.` in `Module[..., .name=...]`, annotations after `@`, import paths
 // after `import`, else the names in scope, keywords, and types. Nothing is proposed inside comments.
 #include "./features.hpp"
+#include "./tokens.hpp"
 
 #include <mdlLexer.h>
 
@@ -33,43 +34,8 @@ namespace {
 		}
 	}
 
-	/** @brief A token of the document (line from 1, columns in code points). */
-	struct Token {
-		size_t type;
-		std::string text;
-		mdl::SourcePosition begin, end; ///< end: of the last line for multi-line tokens
-
-		bool is(std::string_view t) const { return text == t; }
-		bool identifier() const { return type == mdlLexer::IDENT; }
-	};
-
-	std::vector<Token> tokenize(const std::string& text) {
-		antlr4::ANTLRInputStream input{text};
-		mdlLexer lexer{&input};
-		lexer.removeErrorListeners();
-		antlr4::CommonTokenStream stream{&lexer};
-		stream.fill();
-		std::vector<Token> tokens;
-		for (auto* t : stream.getTokens()) {
-			if (t->getType() == mdlLexer::WS || t->getType() == antlr4::Token::EOF)
-				continue;
-			const std::string s = t->getText();
-			const size_t newlines = std::count(s.begin(), s.end(), '\n');
-			const size_t lastLine = s.rfind('\n');
-			const size_t line = t->getLine(), column = t->getCharPositionInLine();
-			// Columns in code points: count the UTF-8 lead bytes.
-			auto points = [](std::string_view v) {
-				return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; })
-				);
-			};
-			const mdl::SourcePosition end =
-					newlines == 0
-							? mdl::SourcePosition{line, column + points(s)}
-							: mdl::SourcePosition{line + newlines, points(std::string_view{s}.substr(lastLine + 1))};
-			tokens.push_back({t->getType(), s, {line, column}, end});
-		}
-		return tokens;
-	}
+	using mdls::Token;
+	using mdls::tokenize;
 
 	class Completer {
 	public:
@@ -86,7 +52,7 @@ namespace {
 					if (t.type == mdlLexer::BLOCKCOMMENT || t.type == mdlLexer::LINECOMMENT)
 						return items; // inside a comment
 				}
-				if (t.type != mdlLexer::BLOCKCOMMENT && t.type != mdlLexer::LINECOMMENT)
+				if (!t.comment())
 					before.push_back(&t);
 			}
 			if (!before.empty() && before.back()->end == cursor &&

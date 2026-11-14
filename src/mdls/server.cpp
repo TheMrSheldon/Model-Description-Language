@@ -80,6 +80,26 @@ mdls::json mdls::Server::handleRequest(const std::string& method, const json& pa
 		return completion(document(params), params, parseOptions);
 	if (method == "textDocument/documentSymbol")
 		return documentSymbols(document(params));
+	if (method == "textDocument/signatureHelp")
+		return signatureHelp(document(params), params);
+	if (method == "textDocument/inlayHint")
+		return inlayHints(document(params), params);
+	if (method == "textDocument/references")
+		return references(document(params), params, openTexts());
+	if (method == "textDocument/documentHighlight")
+		return documentHighlight(document(params), params);
+	if (method == "textDocument/prepareRename")
+		return prepareRename(document(params), params);
+	if (method == "textDocument/rename")
+		return rename(document(params), params, openTexts());
+	if (method == "textDocument/foldingRange")
+		return foldingRanges(document(params));
+	if (method == "textDocument/codeAction")
+		return codeActions(document(params), params, openTexts(), standardLibraryNames());
+	if (method == "textDocument/rangeFormatting") {
+		const auto& doc = document(params);
+		return rangeFormatting(doc, params, styleOf(doc));
+	}
 	throw RequestError(MethodNotFound, "unsupported method " + method);
 }
 
@@ -147,6 +167,14 @@ mdls::json mdls::Server::initialize(const json& params) {
 					 {"definitionProvider", true},
 					 {"documentSymbolProvider", true},
 					 {"completionProvider", {{"triggerCharacters", json::array({".", "@"})}}},
+					 {"signatureHelpProvider", {{"triggerCharacters", json::array({"(", "[", ","})}}},
+					 {"inlayHintProvider", true},
+					 {"referencesProvider", true},
+					 {"documentHighlightProvider", true},
+					 {"renameProvider", {{"prepareProvider", true}}},
+					 {"foldingRangeProvider", true},
+					 {"codeActionProvider", {{"codeActionKinds", json::array({"quickfix"})}}},
+					 {"documentRangeFormattingProvider", true},
 					 {"semanticTokensProvider", {{"legend", legend}, {"full", true}}},
 			 }},
 			{"serverInfo", {{"name", "mdls"}, {"version", mdl::version}}},
@@ -217,9 +245,11 @@ void mdls::Server::analyze(Document& document) {
 	}
 	const LineIndex lines{document.text};
 	json diagnostics = json::array();
+	document.diagnostics.clear();
 	for (const auto& d : all) {
 		if (d.file != document.sourceName())
 			continue; // in an imported file
+		document.diagnostics.push_back(d);
 		json diagnostic{
 				{"range", toProtocol(lines, d.range)},
 				{"severity", d.severity == mdl::Severity::error		? 1
@@ -262,4 +292,25 @@ void mdls::Server::notify(const std::string& method, json params) {
 void mdls::Server::logLine(const std::string& text) {
 	if (log != nullptr)
 		*log << text << std::endl;
+}
+
+const std::map<std::string, std::string>& mdls::Server::standardLibraryNames() {
+	if (!stdNames) {
+		stdNames.emplace();
+		std::istringstream source{"import std;"};
+		auto result = mdl::parser::analyze(source, "<std>", parseOptions);
+		for (const auto& s : result.index->symbols())
+			if (s.container.empty() &&
+				(s.kind == mdl::analysis::SymbolKind::function || s.kind == mdl::analysis::SymbolKind::module ||
+				 s.kind == mdl::analysis::SymbolKind::structure))
+				stdNames->try_emplace(s.name, "std." + std::filesystem::path{s.file}.stem().string());
+	}
+	return *stdNames;
+}
+
+std::map<std::string, std::string> mdls::Server::openTexts() const {
+	std::map<std::string, std::string> texts;
+	for (const auto& [_, doc] : documents)
+		texts[doc.sourceName()] = doc.text;
+	return texts;
 }

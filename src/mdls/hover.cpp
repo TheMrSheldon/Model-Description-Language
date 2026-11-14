@@ -70,6 +70,36 @@ mdls::json mdls::hover(const Document& doc, const json& params) {
 			);
 		return result;
 	}
+	// `auto`: the inferred types of the declared names (also without inlay hints).
+	const auto tokens = tokenize(doc.text);
+	const auto cursor = toSource(lines, params.at("position"));
+	for (size_t i = 0; i < tokens.size(); ++i)
+		if (tokens[i].is("auto") && tokens[i].begin <= cursor && cursor <= tokens[i].end) {
+			std::string md;
+			for (size_t k = i + 1; k < tokens.size() && (tokens[k].identifier() || tokens[k].is(",")); ++k) {
+				if (!tokens[k].identifier())
+					continue;
+				const auto* r = doc.index->referenceAt(doc.sourceName(), doc.toIndex(tokens[k].begin));
+				if (r == nullptr)
+					continue;
+				for (const auto& type : r->types) // the declaration with its inferred type
+					md += "auto " + tokens[k].text + ": " + type + "\n";
+			}
+			if (md.empty())
+				return nullptr;
+			md = "```mdl\n" + md + "```\n*inferred type*";
+			return {{"contents", {{"kind", "markdown"}, {"value", md}}},
+					{"range", toProtocol(lines, mdl::SourceRange{tokens[i].begin, tokens[i].end})}};
+		}
+	// An einops axis: its size.
+	for (const auto& a : doc.index->axes())
+		if (a.file == doc.sourceName() && a.range.begin.line == position.line &&
+			a.range.begin.column <= position.column && position.column <= a.range.end.column) {
+			std::string sizes;
+			for (const auto& s : a.sizes)
+				sizes += (sizes.empty() ? "`" : ", `") + s + "`";
+			return {{"contents", {{"kind", "markdown"}, {"value", "*einops axis* `" + a.name + "`: size " + sizes}}}};
+		}
 	const auto* ref = doc.index->referenceAt(doc.sourceName(), position);
 	if (ref == nullptr)
 		return nullptr;
@@ -82,10 +112,14 @@ mdls::json mdls::hover(const Document& doc, const json& params) {
 		const auto& types = ref->types.empty() ? s.types : ref->types;
 		if (!types.empty() && s.kind != SymbolKind::module && s.kind != SymbolKind::structure)
 			md += "\n\n" + listTypes(types);
+		for (const auto& weight : ref->weights) // the path of the weight (e.g. in a checkpoint)
+			md += "\n\nWeight: `" + weight + "`";
 		if (!s.documentation.empty())
 			md += "\n\n---\n\n" + s.documentation;
 	} else if (!ref->types.empty()) {
 		md = listTypes(ref->types);
+		for (const auto& weight : ref->weights)
+			md += "\n\nWeight: `" + weight + "`";
 	} else {
 		return nullptr;
 	}

@@ -25,6 +25,8 @@ namespace mdls {
 		/** @brief The index of the last analysis that could translate the document (kept while it has syntax errors). */
 		std::shared_ptr<const mdl::analysis::SemanticIndex> index;
 		std::string indexText; ///< the text that @p index is from
+		/** @brief The diagnostics of the last analysis in this document (with their fixes). */
+		std::vector<mdl::Diagnostic> diagnostics;
 
 		/** @brief The name of the document in the frontend's diagnostics and index. */
 		std::string sourceName() const { return path.string(); }

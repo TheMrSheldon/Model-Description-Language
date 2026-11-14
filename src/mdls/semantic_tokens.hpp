@@ -25,7 +25,9 @@ namespace mdls {
 	 * @brief Classifies the identifiers of @p text from its parse tree (no type checking, so it works on code with
 	 * errors): definitions and references of modules, structs, functions, hyperparameters, members, parameters,
 	 * variables; annotations; einops axes. Keywords, literals, and operators are left to the editor's grammar (they
-	 * need no context, and a grammar can distinguish them further, e.g. control-flow keywords).
+	 * need no context, and a grammar can distinguish them further, e.g. control-flow keywords). In doc comments: the
+	 * Doxygen commands (`keyword`), parameter names (`parameter`), references (`label`), and math (`string`), with the
+	 * modifier `documentation`.
 	 */
 	std::vector<SemanticToken> semanticTokens(std::string_view text);
 

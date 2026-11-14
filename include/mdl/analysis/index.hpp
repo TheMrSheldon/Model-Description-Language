@@ -48,6 +48,8 @@ namespace mdl::analysis {
 		std::set<std::string> types;  ///< the type of the value there (one per distinct elaboration)
 		/** @brief The members that `x.` can access after this name (module members, struct members, `data`/`mask`). */
 		std::set<std::string> members;
+		/** @brief The full path of the weight there (e.g. `layers.3.weightQuery.W`), if the value is a weight. */
+		std::set<std::string> weights;
 	};
 
 	/** @brief A part of an import path (`std` or `nn` in `import std.nn;`) and the file(s) it stands for. */
@@ -59,10 +61,28 @@ namespace mdl::analysis {
 		std::string documentation;		  ///< the file's `@file` comment, or the list of the package's files (Markdown)
 	};
 
+	/** @brief An axis of an einops pattern (`h` in `x[... (h d) -> h ... d | h=heads]`) and its size(s). */
+	struct Axis {
+		std::string file;
+		SourceRange range;
+		std::string name;
+		std::set<std::string> sizes; ///< one per distinct elaboration (e.g. `heads` and `12`)
+	};
+
 	/** @brief Definitions and references of a program (see parser::analyze), from all its elaborations. */
 	class SemanticIndex {
 	public:
 		void addImport(ImportPath path) { imports_.push_back(std::move(path)); }
+		/** @brief Records the size of an einops axis (merged with earlier records at the same position). */
+		void addAxis(Axis axis) {
+			for (auto& a : axes_)
+				if (a.file == axis.file && a.range == axis.range) {
+					a.sizes.insert(axis.sizes.begin(), axis.sizes.end());
+					return;
+				}
+			axes_.push_back(std::move(axis));
+		}
+		const std::vector<Axis>& axes() const { return axes_; }
 		const std::vector<ImportPath>& imports() const { return imports_; }
 		/** @brief The import path part at @p position of @p file, if any. */
 		const ImportPath* importAt(std::string_view file, SourcePosition position) const {
@@ -97,6 +117,7 @@ namespace mdl::analysis {
 		std::vector<Symbol> symbols_;
 		std::vector<Reference> references_;
 		std::vector<ImportPath> imports_;
+		std::vector<Axis> axes_;
 		std::map<std::tuple<std::string, size_t, size_t>, size_t> symbolAt_, referenceAt_;
 	};
 

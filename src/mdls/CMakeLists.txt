@@ -8,5 +8,11 @@ add_library(mdls_lib STATIC
 	navigation.cpp
 	completion.cpp
 	formatting.cpp
+	tokens.cpp
+	signature.cpp
+	hints.cpp
+	references.cpp
+	folding.cpp
+	actions.cpp
 )
 target_link_libraries(mdls_lib PUBLIC mdl_frontend mdl_format nlohmann_json::nlohmann_json)

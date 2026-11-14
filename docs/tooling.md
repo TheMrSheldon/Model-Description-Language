@@ -99,15 +99,22 @@ Features:
 - **Semantic tokens:** what needs the parse tree: modules, structs, functions and methods, hyperparameters, members,
   parameters, variables, annotations, and the axes of einops patterns (their own token type `axis`, which an editor
   extension declares with a fallback). Keywords, literals, and operators are left to the editor's grammar: they need no
-  context, and a grammar can distinguish them further (e.g. control-flow keywords from declarations).
+  context, and a grammar can distinguish them further (e.g. control-flow keywords from declarations). In doc comments,
+  with the modifier `documentation`: the Doxygen commands (`keyword`), parameter names after `@param`/`@tparam`/`\p`
+  (`parameter`), the targets of `\ref`, `\see`, `\sa` and the keys of `\cite` (`label`), and math (`string`).
 - **Hover:**
   - the declaration as written;
   - its kind and container;
   - the inferred type(s), e.g. for `auto` variables, symbolic and concrete (`float32[..., d]`,
     `float32[..., 768]`);
-  - the documentation from Doxygen-style comments (`/** @brief ... @param ... */`) as Markdown, with math (`\f$`,
-    `\f(`, `\f[`, `\f{env}{`, also spelled with `@`); hyperparameters, template parameters, and function parameters
-    show their `@param`/`@tparam` text from the comment of their module or function;
+  - the documentation from Doxygen-style comments as Markdown. Commands are spelled with `@` or `\`:
+    - paragraphs: `brief`, `details`, `param`/`tparam`, `return`, and the sections `note`, `warning`, `see`/`sa`,
+      `deprecated`, `todo`;
+    - inline: math (`f$`, `f(`, `f[`, `f{env}{`), `p` and `c` (code), `a`/`e`/`em` (italic), `b` (bold), `cite`;
+    - code blocks: `code` ... `endcode`.
+
+    Hyperparameters, template parameters, and function parameters show their `@param`/`@tparam` text from the comment
+    of their module or function;
   - on an import path (`import std.nn;`): the file's `@file` comment, or for a package (`std`) its files with the
     first paragraph of their documentation.
 - **Go to definition:** also into imported files and the standard library; on an import path, the imported file (or
@@ -119,6 +126,21 @@ Features:
   - `import std.` modules, keywords, types, annotations.
 
   While the text does not parse (e.g. right after typing `.`), the last analysis is used.
+- **Hover on `auto`:** the inferred type of the declared name(s); on an einops axis its size; on a weight its full
+  path (e.g. `layers.3.weightQuery.W`, as in checkpoints).
+- **Signature help:** while typing the arguments of a call (`f(`, `inst.f(`, `inst(`) or the hyperparameters of an
+  instantiation (`Linear[`): the declaration, the active parameter (by position, or by name for `.name=`), and the
+  `@param` documentation.
+- **Inlay hints:** the inferred type after `auto` declarations, the size of each einops axis (`(h=12 d=64)`), and the
+  names of positional hyperparameters (`Linear[indim: 768, outdim: 3]`).
+- **Find references, highlight, rename:** of variables, parameters, members, functions, modules, structs (across the
+  open documents and their imports; definitions of the standard library are not renamed). Highlighting an einops axis
+  marks its occurrences in the pattern.
+- **Quick fixes:** `.name=value` for an optional hyperparameter given by position, `float32(x)` (or the respective
+  type) for an implicit float conversion, renaming a definition that breaks a naming rule, and an `import std.x;` for
+  an undefined name that the standard library defines.
+- **Go to definition of struct members** (`conf.dims.model`), **folding ranges** (blocks, comments, imports), and
+  **range formatting**.
 - **Formatting:** the whole document, with `mdl-format`'s style (from `.mdl-format`, else the editor's tab size).
 - **Document symbols:** the outline of modules, structs and functions with their members.
 

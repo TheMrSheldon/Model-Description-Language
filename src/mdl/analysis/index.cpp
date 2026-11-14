@@ -32,6 +32,7 @@ void SemanticIndex::reference(Reference reference) {
 		auto& existing = references_[it->second];
 		existing.types.insert(reference.types.begin(), reference.types.end());
 		existing.members.insert(reference.members.begin(), reference.members.end());
+		existing.weights.insert(reference.weights.begin(), reference.weights.end());
 		if (!existing.symbol)
 			existing.symbol = reference.symbol;
 		return;
@@ -77,6 +78,8 @@ namespace {
 	struct DocComment {
 		std::string brief, details, returns, todo;
 		std::vector<std::pair<std::string, std::string>> params;
+		/** @brief `@note`, `@warning`, `@see`, `@deprecated` paragraphs: (title, text), in order. */
+		std::vector<std::pair<std::string, std::string>> sections;
 	};
 
 	/** @brief The text of the lines of a comment without the comment markers. */
@@ -111,7 +114,8 @@ namespace {
 		}
 		// Commands in the middle of a line start a new paragraph (like in Doxygen): one line per command.
 		std::vector<std::string> split;
-		const std::regex command{R"(\s+(?=[@\\](brief|details|t?param|returns?|todo)\b))"};
+		const std::regex command{R"(\s+(?=[@\\](brief|details|t?param|returns?|todo|note|warning|see|sa|deprecated)\b))"
+		};
 		for (const auto& l : lines) {
 			std::sregex_token_iterator it{l.begin(), l.end(), command, -1}, end;
 			for (; it != end; ++it)
@@ -135,7 +139,19 @@ namespace {
 				to += ' ';
 			to += text;
 		};
+		bool code = false; // in `@code ... @endcode` (lines kept as they are)
 		for (auto text : commentLines(comment)) {
+			if (code) {
+				const auto first = text.find_first_not_of(' ');
+				if (first != std::string::npos &&
+					(text.compare(first, 8, "@endcode") == 0 || text.compare(first, 8, "\\endcode") == 0)) {
+					*current += "```\n\n";
+					code = false;
+				} else {
+					*current += text + "\n";
+				}
+				continue;
+			}
 			auto command = [&](std::string_view name) {
 				for (char lead : {'@', '\\'})
 					if (text.size() > name.size() && text[0] == lead && text.compare(1, name.size(), name) == 0 &&
@@ -163,6 +179,23 @@ namespace {
 				current = &doc.returns;
 			} else if (command("todo")) {
 				current = &doc.todo;
+			} else if (const char* title = [&]() -> const char* {
+						   for (auto [name, title] :
+								{std::pair{"note", "Note"}, std::pair{"warning", "Warning"},
+								 std::pair{"see", "See also"}, std::pair{"sa", "See also"},
+								 std::pair{"deprecated", "Deprecated"}})
+							   if (command(name))
+								   return title;
+						   return nullptr;
+					   }()) {
+				doc.sections.emplace_back(title, "");
+				current = &doc.sections.back().second;
+			} else if (command("code")) { // `@code` or `@code{.py}`: the following lines as a code block
+				if (!current->empty() && !current->ends_with("\n\n"))
+					*current += current->ends_with("\n") ? "\n" : "\n\n";
+				*current += "```\n";
+				code = true;
+				continue;
 			} else if (command("file") || command("ingroup") || command("defgroup") || command("addtogroup")) {
 				continue;
 			}
@@ -181,6 +214,10 @@ namespace {
 				s, std::regex{R"([@\\]f\{(\w+\*?)\}\{?(.*?)[@\\]f\})"}, "$$$$\\begin{$1}$2\\end{$1}$$$$"
 		);
 		s = std::regex_replace(s, std::regex{R"([@\\]cite\s+(\S+))"}, "[$1]");
+		// Word styles: `\a`, `\e`, `\em` italic, `\b` bold, `\c` code.
+		s = std::regex_replace(s, std::regex{R"([@\\](a|e|em)\s+(\w+))"}, "*$2*");
+		s = std::regex_replace(s, std::regex{R"([@\\]b\s+(\w+))"}, "**$1**");
+		s = std::regex_replace(s, std::regex{R"([@\\]c\s+(\w+))"}, "`$1`");
 		while (!s.empty() && (s.back() == '\n' || s.back() == ' '))
 			s.pop_back();
 		return s;
@@ -206,6 +243,8 @@ std::string mdl::analysis::docCommentToMarkdown(std::string_view comment) {
 	}
 	if (!doc.returns.empty())
 		section("**Returns** " + inlineMarkdown(doc.returns));
+	for (const auto& [title, text] : doc.sections)
+		section("**" + title + "** " + inlineMarkdown(text));
 	if (!doc.todo.empty())
 		section("**Todo** " + inlineMarkdown(doc.todo));
 	return md;

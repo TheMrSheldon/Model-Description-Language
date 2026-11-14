@@ -151,3 +151,21 @@ float[...] total(y: float[..., N]) => __builtin_sum(y);
 	CHECK(doc(17, "N") == "the size");				   // template parameter
 	CHECK(doc(18, "y") == "the values");
 }
+
+TEST_CASE("doc comments accept both command spellings, sections, code blocks, and word styles", "[parser][index]") {
+	using analysis::docCommentToMarkdown;
+	// `\cmd` and `@cmd` are the same command (as in Doxygen).
+	CHECK(docCommentToMarkdown("/** \\brief Short. \\param x the input \\return y \\todo more */") ==
+		  docCommentToMarkdown("/** @brief Short. @param x the input @return y @todo more */"));
+	CHECK(docCommentToMarkdown("/** \\brief Short. \\todo more */") == "Short.\n\n**Todo** more");
+	CHECK(analysis::docParameter("/** \\param x the input */", "x") == "the input");
+	// Sections in order, after the parameters and the result.
+	CHECK(docCommentToMarkdown("/** @brief B. @note N. @warning W. @see S. \\deprecated D. */") ==
+		  "B.\n\n**Note** N.\n\n**Warning** W.\n\n**See also** S.\n\n**Deprecated** D.");
+	// Word styles.
+	CHECK(docCommentToMarkdown("/** @brief An \\a italic, \\b bold, and \\c code word. */") ==
+		  "An *italic*, **bold**, and `code` word.");
+	// Code blocks keep their lines.
+	CHECK(docCommentToMarkdown("/**\n * @brief Usage:\n * @code\n * auto y = f(x);\n *   z\n * @endcode\n */") ==
+		  "Usage:\n\n```\nauto y = f(x);\n  z\n```");
+}
