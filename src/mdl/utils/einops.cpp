@@ -38,6 +38,34 @@ namespace {
 	// Helpers
 	// -----------------------------------------------------------------------
 
+	/**
+	 * @brief Records the size of the axis @p name for a dimension of size @p size; an error if the axis already has a
+	 * different static size (from a binding, an RHS literal, or another occurrence).
+	 */
+	static std::expected<void, std::string> bindAxis(DimSizeMap& sizes, const std::string& name, const DimSize& size) {
+		auto [it, inserted] = sizes.try_emplace(name, size);
+		if (inserted)
+			return {};
+		const auto* known = std::get_if<int64_t>(&it->second);
+		const auto* actual = std::get_if<int64_t>(&size);
+		if (known != nullptr && actual != nullptr && *known != *actual)
+			return std::unexpected(
+					std::format("The axis {} has size {}, but the dimension has size {}", name, *known, *actual)
+			);
+		if (known == nullptr && actual != nullptr)
+			it->second = size; // a static size is more precise
+		return {};
+	}
+
+	/** @brief The atoms of a group as written, e.g. `(a b 2)`. */
+	static std::string groupText(const SpecItem& group) {
+		std::string text = "(";
+		for (const auto& atom : group.atoms)
+			text += (text.size() > 1 ? " " : "") +
+					(atom.kind == AtomKind::Literal ? std::to_string(atom.value) : atom.name);
+		return text + ")";
+	}
+
 	static const Node& constNode(Computegraph& graph, int64_t val) {
 		return graph.addConstNode(Atomic{static_cast<int>(val)});
 	}
@@ -142,6 +170,10 @@ namespace {
 		int unknownCount = 0;
 
 		for (auto& atom : group.atoms) {
+			if (atom.kind == AtomKind::Literal) {
+				knownProduct *= atom.value;
+				continue;
+			}
 			if (atom.kind != AtomKind::Named)
 				continue;
 			auto it = sizes.find(atom.name);
@@ -155,8 +187,15 @@ namespace {
 			}
 		}
 
-		if (unknownCount == 0)
-			return {}; // All known; nothing to do.
+		if (unknownCount == 0) {
+			// All sizes known: their product must be the dimension's size.
+			if (mergedSize >= 0 && !dynamicKnown && knownProduct != mergedSize)
+				return std::unexpected(std::format(
+						"The group {} has size {}, but the dimension has size {}", groupText(group), knownProduct,
+						mergedSize
+				));
+			return {};
+		}
 
 		if (unknownCount > 1) {
 			// Build a helpful error listing all unknowns.
@@ -210,7 +249,8 @@ namespace {
 		if (!hasEllipsis) {
 			if (lhs.size() != shape.size())
 				return std::unexpected(std::format(
-						"LHS has {} dimension items but input tensor has {} dimensions", lhs.size(), shape.size()
+						"The pattern has {} dimension(s), but the tensor has {} (`...` matches the others)", lhs.size(),
+						shape.size()
 				));
 
 			for (size_t i = 0; i < lhs.size(); ++i) {
@@ -234,10 +274,16 @@ namespace {
 					auto& atom = item.atoms[0];
 					if (atom.kind == AtomKind::Named) {
 						if (auto sz = extractSize())
-							sizes.emplace(atom.name, *sz);
+							if (auto ok = bindAxis(sizes, atom.name, *sz); !ok)
+								return std::unexpected(ok.error());
 						// If shapeDim is Elipsis (unknown), skip – size stays unknown
+					} else if (atom.kind == AtomKind::Literal) {
+						if (auto size = staticSize(shapeDim); size && *size != atom.value)
+							return std::unexpected(std::format(
+									"The literal axis {} does not match the dimension of size {}", atom.value, *size
+							));
 					}
-					// Anon / Ellipsis / Literal atoms don't contribute named sizes
+					// Anon / Ellipsis atoms don't contribute named sizes
 				}
 			}
 			return sizes;
@@ -262,13 +308,21 @@ namespace {
 			);
 
 		// Helper: extract size for one non-grouped, non-ellipsis LHS item.
-		auto extractNamed = [&](const SpecItem& item, const TensorType::Shape::value_type& dim) {
-			if (item.atoms[0].kind == AtomKind::Named) {
+		auto extractNamed = [&](const SpecItem& item,
+								const TensorType::Shape::value_type& dim) -> std::expected<void, std::string> {
+			const auto& atom = item.atoms[0];
+			if (atom.kind == AtomKind::Named) {
 				if (auto size = staticSize(dim))
-					sizes[item.atoms[0].name] = *size;
-				else if (auto* np = std::get_if<const Node*>(&dim))
-					sizes[item.atoms[0].name] = *np;
+					return bindAxis(sizes, atom.name, *size);
+				if (auto* np = std::get_if<const Node*>(&dim))
+					return bindAxis(sizes, atom.name, *np);
+			} else if (atom.kind == AtomKind::Literal) {
+				if (auto size = staticSize(dim); size && *size != atom.value)
+					return std::unexpected(std::format(
+							"The literal axis {} does not match the dimension of size {}", atom.value, *size
+					));
 			}
+			return {};
 		};
 
 		// Helper: resolve a single LHS item against its corresponding shape dimension.
@@ -277,8 +331,7 @@ namespace {
 							   const TensorType::Shape::value_type& dim) -> std::expected<void, std::string> {
 			if (item.is_group)
 				return inferGroupSizes(item, dim, sizes);
-			extractNamed(item, dim);
-			return {};
+			return extractNamed(item, dim);
 		};
 
 		// Items before ellipsis match shape[0 .. ellipsisPos-1]

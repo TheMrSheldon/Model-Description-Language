@@ -376,3 +376,31 @@ module N[] {
 		possible += d.flag == "permits-illegal-instantiation";
 	CHECK(possible == 0);
 }
+
+TEST_CASE("einops patterns are checked against the sizes of the tensor", "[parser][diagnostics]") {
+	auto errors = [](const std::string& code) {
+		std::vector<std::string> messages;
+		for (const auto& d : analyzeSource(code).diagnostics)
+			if (d.severity == Severity::error)
+				messages.push_back(d.message);
+		return messages;
+	};
+	CHECK(errors("float[4, 2] f(x: float[6]) => x[(a b) -> a b | a=4, b=2];") ==
+		  std::vector<std::string>{"einops error: The group (a b) has size 8, but the dimension has size 6"});
+	CHECK(errors("float[4] f(x: float[6]) => x[a -> a | a=4];") ==
+		  std::vector<std::string>{"einops error: The axis a has size 4, but the dimension has size 6"});
+	CHECK(errors("float[4, 2] f(x: float[8]) => x[(a b) -> a b | a=4, b=2];").empty());
+	CHECK(errors("float[4, 2] f(x: float[8]) => x[(a 2) -> a 2];").empty());
+	// In an instance, the error is reported once in the module and once where it is instantiated; uses of the failed
+	// instance cause no further errors (and the arguments still count as used).
+	auto result = analyzeSource(R"(module M[n: uint] { float[4, 2] f(x: float[n]) => x[(a b) -> a b | a=4, b=2]; }
+module N[] { m: M[6] float[4, 2] g(x: float[6]) => m.f(x); })");
+	std::vector<std::string> messages;
+	for (const auto& d : result.diagnostics)
+		messages.push_back(d.message);
+	CHECK(messages == std::vector<std::string>{
+							  "einops error: The group (a b) has size 8, but the dimension has size 6",
+							  "M[6] has an error: einops error: The group (a b) has size 8, but the dimension has size 6 "
+							  "(<test>:1:51)",
+					  });
+}
