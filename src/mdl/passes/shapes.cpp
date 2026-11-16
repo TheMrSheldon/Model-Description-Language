@@ -652,11 +652,30 @@ namespace mdl::shapes {
 		}
 
 		/** @brief Constant integers (the sizes and axes of the builtins in the computegraph's types). */
+		/** @brief The value of an integer constant, also of arithmetic over constants (e.g. `heads * key` in an instance). */
 		std::optional<int64_t> constantInteger(const Node& node) {
 			if (const auto* c = std::get_if<ConstNode>(&node))
 				if (const auto* i = std::get_if<int>(&c->value))
 					return *i;
-			return std::nullopt;
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr || inv->arguments.size() != 2)
+				return std::nullopt;
+			auto lhs = constantInteger(inv->arguments[0].get()), rhs = constantInteger(inv->arguments[1].get());
+			if (!lhs || !rhs)
+				return std::nullopt;
+			using FIDs = builtins::FunctionIDs;
+			switch (inv->id) {
+			case FIDs::TENSOR_ADD:
+				return *lhs + *rhs;
+			case FIDs::TENSOR_SUB:
+				return *lhs - *rhs;
+			case FIDs::TENSOR_PROD:
+				return *lhs * *rhs;
+			case FIDs::TENSOR_DIV:
+				return *rhs != 0 && *lhs % *rhs == 0 ? std::optional<int64_t>{*lhs / *rhs} : std::nullopt;
+			default:
+				return std::nullopt;
+			}
 		}
 
 	} // namespace
