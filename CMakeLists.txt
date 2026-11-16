@@ -9,6 +9,7 @@ include(FeatureSummary)
 option(MDL_BUILD_TESTS "Build the tests" OFF)
 add_feature_info(tests MDL_BUILD_TESTS "Build the MDL tests")
 option(MDL_BUILD_EXAMPLES "Build the examples" OFF)
+option(MDL_BENCHMARKS "Build the benchmarks of scripts/benchmark.sh (with the examples)" OFF)
 add_feature_info(examples MDL_BUILD_EXAMPLES "Build the MDL examples")
 
 
