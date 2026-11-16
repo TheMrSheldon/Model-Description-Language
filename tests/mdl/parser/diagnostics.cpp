@@ -354,3 +354,25 @@ float[4] g(x: float[4]) { auto relu = x; return relu; })");
 	for (const auto& d : analyzeSource("module M[] { W: float[4] float[4] f(W: float[4]) => W; }", options).diagnostics)
 		CHECK(d.flag != "shadow");
 }
+
+TEST_CASE("sizes computed from hyperparameter values are compared as numbers", "[parser][diagnostics]") {
+	// In the instance M[4, 8], lin is L[32] (its value folded), so lin(x) is float[..., 32], while the parameter of f
+	// is float[..., 4 * 8]: equal sizes.
+	auto result = analyzeSource(R"(module L[n: uint] {
+    W: float[n, n]
+    float[..., n] forward(x: float[..., n]) => x @ W;
+}
+module M[h: uint, k: uint] {
+    lin: L[h * k]
+    float[..., h * k] f(x: float[..., h * k]) => x;
+    float[..., h * k] g(x: float[..., h * k]) => f(lin(x));
+}
+module N[] {
+    m: M[4, 8]
+    float[..., 32] run(x: float[..., 32]) => m.g(x);
+})");
+	size_t possible = 0;
+	for (const auto& d : result.diagnostics)
+		possible += d.flag == "permits-illegal-instantiation";
+	CHECK(possible == 0);
+}
