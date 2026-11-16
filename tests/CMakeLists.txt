@@ -36,6 +36,7 @@ endif()
 add_executable(tests
     mdl/computegraph/einops.cpp
     mdl/backends/tvm_patterns.cpp
+    mdl/kernels/packages.cpp
     mdl/passes/autodiff.cpp
     mdl/passes/masking.cpp
     mdl/runtime/safetensors.cpp
@@ -44,6 +45,14 @@ target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl mdl_runtime)
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_features(tests PRIVATE cxx_std_23)
 add_test(NAME unit_tests COMMAND tests)
+target_compile_definitions(tests PRIVATE MDL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+# mdl-kernels list: valid packages (exit 0), a broken package (exit 1, with its problems).
+set(_kernels "${CMAKE_CURRENT_LIST_DIR}/kernels")
+add_test(NAME mdl_kernels_list COMMAND mdl-kernels --kernels-dir "${_kernels}/valid" list)
+set_tests_properties(mdl_kernels_list PROPERTIES PASS_REGULAR_EXPRESSION "cubin, device sm_80.*scaled_add 1.0")
+add_test(NAME mdl_kernels_list_problems COMMAND mdl-kernels --kernels-dir "${_kernels}/broken" list)
+set_tests_properties(mdl_kernels_list_problems PROPERTIES WILL_FAIL TRUE)
 
 # The build settings of argument-value files (mdlc --arg-vals, see docs/build-config.md): the command line takes
 # precedence, unknown keys and builds are errors.

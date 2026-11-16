@@ -64,6 +64,8 @@ add_library(mdl
 	bindings/generator.cpp
 	compiler.cpp
 	exports.cpp
+	kernels/discovery.cpp
+	kernels/package.cpp
 	passes/autodiff.cpp
 	passes/masking.cpp
 	logging.cpp
@@ -75,6 +77,8 @@ target_link_libraries(mdl PUBLIC
 	spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
 	yaml-cpp::yaml-cpp
 )
+# The kernel packages of the source tree when running from the build tree (see kernels::kernelDirs).
+target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${PROJECT_SOURCE_DIR}/kernels")
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)
 

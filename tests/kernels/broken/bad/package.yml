@@ -1,0 +1,21 @@
+schema: 1
+package: bad
+version: "1.0"
+artifacts:
+  lib:
+    kind: static-libary
+    path: lib.a
+patterns:
+  p:
+    op: relax.exp
+    args: [{ capture: x }]
+    outputs: [z]
+implementations:
+  i:
+    pattern: missing
+    artifacts: [lib, nope]
+    symbol: f
+    signature:
+      arguments:
+        - { type: pointer, value: $x.data }
+    colour: red
