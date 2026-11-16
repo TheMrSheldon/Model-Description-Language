@@ -120,7 +120,8 @@ mdls::json mdls::workspaceSymbols(
 	static std::map<std::string, std::pair<std::filesystem::file_time_type, std::vector<Entry>>> cache;
 	auto definitions = [](const std::string& text) {
 		std::vector<Entry> entries;
-		antlr4::ANTLRInputStream input{text};
+		antlr4::ANTLRInputStream input;
+		input.load(text, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 		mdlLexer lexer{&input};
 		lexer.removeErrorListeners();
 		antlr4::CommonTokenStream stream{&lexer};
@@ -206,7 +207,8 @@ mdls::json mdls::workspaceSymbols(
 }
 
 mdls::json mdls::selectionRanges(const Document& doc, const json& params) {
-	antlr4::ANTLRInputStream input{doc.text};
+	antlr4::ANTLRInputStream input;
+	input.load(doc.text, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();
 	antlr4::CommonTokenStream stream{&lexer};

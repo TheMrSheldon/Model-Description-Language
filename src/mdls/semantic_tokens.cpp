@@ -1,4 +1,5 @@
 #include "./semantic_tokens.hpp"
+#include "./utf8.hpp"
 
 #include <mdlLexer.h>
 #include <mdlParser.h>
@@ -273,9 +274,7 @@ namespace {
 		if (!(text.starts_with("/**") || text.starts_with("/*!") || text.starts_with("///") || text.starts_with("//!")))
 			return;
 		// Positions: line and code-point column of each byte offset.
-		auto points = [](std::string_view v) {
-			return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; }));
-		};
+		auto points = mdls::utf8::codePoints;
 		auto position = [&](size_t offset) {
 			const size_t lineStart = text.rfind('\n', offset == 0 ? 0 : offset - 1);
 			const size_t newlines = std::count(text.begin(), text.begin() + offset, '\n');
@@ -367,7 +366,8 @@ const std::vector<std::string>& mdls::semanticTokenModifiers() {
 }
 
 std::vector<mdls::SemanticToken> mdls::semanticTokens(std::string_view text) {
-	antlr4::ANTLRInputStream input{std::string{text}};
+	antlr4::ANTLRInputStream input;
+	input.load(std::string{text}, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();
 	antlr4::CommonTokenStream stream{&lexer};

@@ -677,7 +677,15 @@ namespace mdl {
 			// can be expanded later.
 			auto& file = *state.files.emplace_back(std::make_unique<ParsedFile>());
 			file.errors = std::make_unique<PrettyErrorListener>(sourcename, state.sink);
-			file.input = std::make_unique<antlr4::ANTLRInputStream>(stream);
+			// Invalid UTF-8 is an error; the file is still decoded (leniently: replacement characters) and analyzed.
+			const std::string text{std::istreambuf_iterator<char>{stream}, {}};
+			if (auto invalid = invalidUtf8(text, sourcename))
+				file.errors->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, invalid->context, invalid->range.begin.line,
+						invalid->range.begin.column, invalid->message
+				);
+			file.input = std::make_unique<antlr4::ANTLRInputStream>();
+			file.input->load(text, /*lenient=*/true);
 			file.lexer = std::make_unique<antlr4::mdlLexer>(file.input.get());
 			file.tokens = std::make_unique<antlr4::CommonTokenStream>(file.lexer.get());
 			file.parser = std::make_unique<antlr4::mdlParser>(file.tokens.get());
