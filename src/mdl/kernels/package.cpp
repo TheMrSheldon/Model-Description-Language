@@ -1,5 +1,6 @@
 // Reading and validating package manifests (package.yml, schema 1; see docs/kernels.md).
 #include <mdl/kernels.hpp>
+#include <mdl/kernels/expr.hpp>
 
 #include <yaml-cpp/yaml.h>
 
@@ -445,12 +446,67 @@ namespace mdl::kernels {
 							problem(at["artifacts"],
 									std::format("implementation '{}' refers to an unknown artifact '{}'", impl.id, a));
 				}
+				for (const auto& impl : p.implementations)
+					if (const auto* pattern = p.pattern(impl.pattern))
+						checkExpressions(impl, *pattern, root["implementations"][impl.id]);
 				for (const auto& a : p.artifacts)
 					for (const auto& d : a.dependencies)
 						if (d.kind == Dependency::Kind::artifact && p.artifact(d.name) == nullptr)
 							problem(root["artifacts"][a.id]["dependencies"],
 									std::format("artifact '{}' depends on an unknown artifact '{}'", a.id, d.name));
 				return p;
+			}
+
+			static void collectCaptures(const PatternNode& node, std::vector<std::string>& out) {
+				if (node.kind == PatternNode::Kind::capture && std::ranges::find(out, node.capture) == out.end())
+					out.push_back(node.capture);
+				for (const auto& arg : node.args)
+					collectCaptures(arg, out);
+			}
+
+			/** @brief Parses the expressions of @p impl over the captures of @p pattern and checks their types. */
+			void checkExpressions(const Implementation& impl, const Pattern& pattern, const YAML::Node& at) {
+				std::vector<std::string> captures;
+				collectCaptures(pattern.root, captures);
+				auto check = [&](const std::string& text, expr::Type type, const YAML::Node& node,
+								 std::string_view what) {
+					auto parsed = expr::parse(text, captures);
+					if (!parsed)
+						problem(node, std::format("{} '{}': {}", what, text, parsed.error()));
+					else if ((*parsed)->type != type)
+						problem(node, std::format(
+											  "{} '{}' must be {}, not {}", what, text, expr::str(type),
+											  expr::str((*parsed)->type)
+									  ));
+				};
+				const auto sig = at["signature"];
+				for (size_t i = 0; i < impl.arguments.size(); ++i) {
+					const auto& arg = impl.arguments[i];
+					check(arg.value, arg.type == "pointer" ? expr::Type::pointer : expr::Type::integer,
+						  sig["arguments"][i]["value"], std::format("argument {}", i + 1));
+				}
+				for (size_t i = 0; i < impl.outputs.size(); ++i) {
+					check(impl.outputs[i].first, expr::Type::shape, sig["outputs"][i]["shape"], "the output shape");
+					check(impl.outputs[i].second, expr::Type::dtype, sig["outputs"][i]["dtype"], "the output dtype");
+				}
+				const auto app = at["applicability"];
+				const auto where = app ? app["where"] : YAML::Node{};
+				for (size_t i = 0; i < impl.where.size(); ++i)
+					check(impl.where[i], expr::Type::boolean, where.IsSequence() ? where[i] : where, "the condition");
+				auto known = [&](const std::map<std::string, auto>& entries, const char* section) {
+					for (const auto& [name, _] : entries)
+						if (std::ranges::find(captures, name) == captures.end())
+							problem(at["applicability"][section],
+									std::format(
+											"'{}' in {} is not a capture of pattern '{}'", name, section, pattern.id
+									));
+				};
+				known(impl.dtypes, "dtype");
+				known(impl.layouts, "layout");
+				if (impl.aliasing.starts_with("out=") &&
+					std::ranges::find(captures, impl.aliasing.substr(4)) == captures.end())
+					problem(sig["aliasing"],
+							std::format("aliasing refers to an unknown capture '{}'", impl.aliasing.substr(4)));
 			}
 
 		private:

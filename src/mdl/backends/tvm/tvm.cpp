@@ -3,6 +3,7 @@
 #include "../../argvals.hpp"
 #include "../../logging.hpp"
 #include "./details/aot.hpp"
+#include "./details/kernel_match.hpp"
 #include "./details/pipeline.hpp"
 #include "./details/relax_builtins.hpp"
 #include "./details/tvm_compat.hpp"
@@ -679,7 +680,20 @@ void mdl::backends::tvm::compileToFile(
 
 	// 2. Relax passes, AOT lowering, TIR passes, and code generation.
 	auto target = backend::makeTarget(opts);
-	mod = backend::runRelaxPipeline(mod, target, opts);
+	mod = backend::canonicalize(mod, target);
+	dump(mod, "relax-match"); // the matching boundary of kernel packages (see docs/kernels.md)
+	using Inspection = mdl::CompileOptions::KernelInspection;
+	if (opts.inspectKernels == Inspection::dump) {
+		*opts.inspectOut << mod;
+		return;
+	}
+	if (opts.inspectKernels != Inspection::none) {
+		const auto discovery = mdl::kernels::discover(mdl::kernels::kernelDirs(opts.kernelDirs, opts.source));
+		const auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
+		backend::explain(*opts.inspectOut, matches, discovery, opts.inspectKernels == Inspection::explain);
+		return;
+	}
+	mod = backend::lowerRelax(mod, target, opts);
 	dump(mod, "relax-lowered");
 	const auto prefix = symbolPrefix(output);
 	mod = backend::lowerToAOT(mod, prefix + "k_", packing, opts.profile);

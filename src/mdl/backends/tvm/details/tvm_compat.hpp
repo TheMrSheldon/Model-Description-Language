@@ -12,6 +12,7 @@
 #include <tvm/runtime/tensor.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 
@@ -67,6 +68,38 @@ namespace mdl::backend::tvm {
 		if (info == nullptr || !info->GetShape().defined())
 			return std::nullopt;
 		return info->GetShape().value();
+	}
+
+	/** @brief The value of a scalar constant (0-d / single-element float constant or PrimValue). */
+	inline std::optional<double> scalarConstant(const ::tvm::Expr& e) {
+		if (auto tensor = tensorConstant(e)) {
+			const auto& data = *tensor;
+			if (data.Shape().Product() != 1 || (data->dtype.code != kDLFloat && data->dtype.code != kDLBfloat))
+				return std::nullopt;
+			if (data->dtype.code == kDLBfloat && data->dtype.bits == 16) {
+				const uint32_t bits = static_cast<uint32_t>(static_cast<const uint16_t*>(data->data)[0]) << 16;
+				float value;
+				std::memcpy(&value, &bits, sizeof(value));
+				return value;
+			}
+			if (data->dtype.bits == 16) {
+				_Float16 half;
+				std::memcpy(&half, data->data, sizeof(half));
+				return static_cast<double>(half);
+			}
+			if (data->dtype.bits == 32)
+				return static_cast<const float*>(data->data)[0];
+			if (data->dtype.bits == 64)
+				return static_cast<const double*>(data->data)[0];
+			return std::nullopt;
+		}
+		if (scalarValue(e)) {
+			if (const auto* f = e.as<::tvm::FloatImmNode>())
+				return f->value;
+			if (const auto* i = e.as<::tvm::IntImmNode>())
+				return static_cast<double>(intValue(i));
+		}
+		return std::nullopt;
 	}
 
 	inline bool isFloat(const ::tvm::PrimType& t) { return t.MatchesCode(kDLFloat); }

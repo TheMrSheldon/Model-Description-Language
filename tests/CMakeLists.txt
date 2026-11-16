@@ -53,6 +53,17 @@ add_test(NAME mdl_kernels_list COMMAND mdl-kernels --kernels-dir "${_kernels}/va
 set_tests_properties(mdl_kernels_list PROPERTIES PASS_REGULAR_EXPRESSION "cubin, device sm_80.*scaled_add 1.0")
 add_test(NAME mdl_kernels_list_problems COMMAND mdl-kernels --kernels-dir "${_kernels}/broken" list)
 set_tests_properties(mdl_kernels_list_problems PROPERTIES WILL_FAIL TRUE)
+# mdl-kernels check/dump: the selection among competing implementations (tests/kernels/matching), the verdicts, and the
+# Relax module at the matching boundary.
+set(_model "${_kernels}/models/scaled_add.dlm")
+add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}")
+set_tests_properties(mdl_kernels_check PROPERTIES PASS_REGULAR_EXPRESSION
+	"M__forward: competing/scaled-add-f32 at v4.*M__other: competing/add-f32.*13 candidate\\(s\\), 4 selected")
+add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}")
+set_tests_properties(mdl_kernels_explain PROPERTIES PASS_REGULAR_EXPRESSION
+	"overlaps competing/scaled-add-f32.*B % 16 == 0\\) \\[could be checked at runtime\\].*it is float32")
+add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
+set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")
 
 # The build settings of argument-value files (mdlc --arg-vals, see docs/build-config.md): the command line takes
 # precedence, unknown keys and builds are errors.

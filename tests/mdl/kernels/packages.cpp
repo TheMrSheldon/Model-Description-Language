@@ -1,5 +1,6 @@
 // Kernel packages: manifests (package.yml), kernel directories, and platform compatibility (see docs/kernels.md).
 #include <mdl/kernels.hpp>
+#include <mdl/kernels/expr.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -138,4 +139,59 @@ TEST_CASE("artifacts run on compatible platforms", "[kernels]") {
 			{.os = "linux", .arch = "x86_64", .abi = "gnu", .libc = ""}
 	));																						   // no glibc (e.g. musl)
 	CHECK(compatible({.os = "linux", .arch = "x86_64", .abi = "gnu", .libc = ">=2.9"}, host)); // numerically
+}
+
+TEST_CASE("expressions are parsed and type-checked over the captures", "[kernels][expr]") {
+	namespace e = mdl::kernels::expr;
+	const std::vector<std::string> captures{"x", "y"};
+	auto type = [&](const std::string& text) { return e::parse(text, captures).value()->type; };
+	CHECK(type("prod($x.shape[:-1])") == e::Type::integer);
+	CHECK(type("$x.shape[-1] % 16 == 0") == e::Type::boolean);
+	CHECK(type("$x.shape == $y.shape and $x.ndim >= 2") == e::Type::boolean);
+	CHECK(type("$x.dtype in [float32, bfloat16]") == e::Type::boolean);
+	CHECK(type("$out.data") == e::Type::pointer);
+	CHECK(type("$x.shape[1:]") == e::Type::shape);
+	CHECK(type("$x.attr.axis + 1") == e::Type::integer);
+	CHECK(e::str(*e::parse("prod($x.shape[:-1])", captures).value()) == "prod($x.shape[:-1])");
+
+	auto error = [&](const std::string& text) { return e::parse(text, captures).error(); };
+	CHECK(error("$z.shape") == "column 1: unknown capture '$z'");
+	CHECK(error("$x.shape + 1") == "column 10: an operand of '+' must be an integer, not a shape");
+	CHECK(error("$x.dtype == 3") == "column 10: '==' compares an element type with an integer");
+	CHECK(error("$x.size") == "column 4: unknown field 'size' (shape, ndim, dtype, data, attr.<name>)");
+	CHECK(error("prod($x.shape") == "column 14: expected ')'");
+	CHECK(error("$x.data < $y.data") == "column 9: an operand of '<' must be an integer, not a pointer");
+}
+
+TEST_CASE("the expressions of an implementation are checked when its package is loaded", "[kernels][expr]") {
+	TempDir dir{"mdl-kernels-expr"};
+	write(dir.path / "p" / "package.yml", R"(schema: 1
+package: p
+version: "1"
+artifacts:
+  a: { kind: static-library, path: a.a, platform: { os: linux, arch: x86_64 } }
+patterns:
+  p: { op: relax.exp, args: [{ capture: x }] }
+implementations:
+  i:
+    pattern: p
+    artifacts: [a]
+    symbol: f
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: "$out.shape" }
+        - { type: int64, value: "$y.ndim" }
+    applicability:
+      where: ["$x.ndim"]
+)");
+	std::vector<Problem> problems;
+	CHECK_FALSE(loadPackage(dir.path / "p" / "package.yml", problems).has_value());
+	std::vector<std::string> messages;
+	for (const auto& p : problems)
+		messages.push_back(std::to_string(p.line) + ": " + p.message);
+	CHECK(messages == std::vector<std::string>{
+							  "15: argument 1 '$out.shape' must be a pointer, not a shape",
+							  "16: argument 2 '$y.ndim': column 1: unknown capture '$y'",
+							  "18: the condition '$x.ndim' must be a condition, not an integer",
+					  });
 }

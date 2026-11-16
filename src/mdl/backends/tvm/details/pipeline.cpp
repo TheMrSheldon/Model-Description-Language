@@ -269,13 +269,11 @@ namespace mdl::backend::tvm {
 		return ::tvm::Target(target, target);
 	}
 
-	IRModule runRelaxPipeline(IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts) {
-		auto logger = mdl::log::getLogger("compiler");
-
+	IRModule canonicalize(IRModule mod, const ::tvm::Target& target) {
 		// Constant folding first (e.g. sqrt(64) → 8) so that patterns can check constant values.
 		mod = runPasses(mod, {RT::Normalize(), RT::FoldConstant()}, target);
 		mod = applyPatterns(mod, defaultPatterns());
-		mod = runPasses(
+		return runPasses(
 				mod,
 				{
 						foldPermutesIntoMatmul(),
@@ -284,6 +282,16 @@ namespace mdl::backend::tvm {
 						inlineScalarConstantsPass(),
 						widenSumsPass(),
 						RT::Normalize(),
+				},
+				target
+		);
+	}
+
+	IRModule lowerRelax(IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts) {
+		auto logger = mdl::log::getLogger("compiler");
+		mod = runPasses(
+				mod,
+				{
 						RT::LegalizeOps(legalizeMap(opts), std::nullopt, /*enable_warning=*/true),
 						RT::AnnotateTIROpPattern(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
@@ -308,6 +316,10 @@ namespace mdl::backend::tvm {
 		);
 		logger->info("Relax memory planning done");
 		return mod;
+	}
+
+	IRModule runRelaxPipeline(IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts) {
+		return lowerRelax(canonicalize(std::move(mod), target), target, opts);
 	}
 
 	void buildObject(
