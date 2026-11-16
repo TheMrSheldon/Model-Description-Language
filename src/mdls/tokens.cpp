@@ -1,4 +1,5 @@
 #include "./tokens.hpp"
+#include "./utf8.hpp"
 
 #include <mdlLexer.h>
 
@@ -10,15 +11,14 @@ bool mdls::Token::identifier() const { return type == mdlLexer::IDENT; }
 bool mdls::Token::comment() const { return type == mdlLexer::BLOCKCOMMENT || type == mdlLexer::LINECOMMENT; }
 
 std::vector<mdls::Token> mdls::tokenize(const std::string& text) {
-	antlr4::ANTLRInputStream input{text};
+	antlr4::ANTLRInputStream input;
+	input.load(text, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();
 	antlr4::CommonTokenStream stream{&lexer};
 	stream.fill();
-	// Columns in code points: count the UTF-8 lead bytes.
-	auto points = [](std::string_view v) {
-		return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; }));
-	};
+	// Columns in code points.
+	auto points = mdls::utf8::codePoints;
 	std::vector<Token> tokens;
 	for (auto* t : stream.getTokens()) {
 		if (t->getType() == mdlLexer::WS || t->getType() == antlr4::Token::EOF)

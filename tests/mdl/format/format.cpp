@@ -207,3 +207,12 @@ TEST_CASE("style files set the reflow and naming options", "[format][naming]") {
 	CHECK_FALSE(format::loadStyle(dir / "bad"));
 	fs::remove_all(dir);
 }
+
+TEST_CASE("invalid UTF-8 is reported and left unchanged", "[format]") {
+	const std::string source = "// caf\xE9\nfloat[...] f(x: float[...])=>x;\n"; // (Latin-1 é)
+	auto result = format::format(source);
+	CHECK(result.text == source);
+	REQUIRE(result.diagnostics.size() == 1);
+	CHECK(result.diagnostics[0].message == "Invalid UTF-8 (byte 0xE9): source files must be UTF-8");
+	CHECK(result.diagnostics[0].range.begin == SourcePosition{1, 6});
+}

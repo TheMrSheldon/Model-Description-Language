@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -663,4 +664,23 @@ TEST_CASE("mdls highlights `_` as a discarded value", "[mdls]") {
 	auto messages = session({open(text), request(1, "textDocument/hover", 2, 12)});
 	CHECK((*response(messages, 1))["result"]["contents"]["value"] ==
 		  "`_`: a discarded value (no value, type, or members)");
+}
+
+TEST_CASE("mdls counts columns like the parser, also for invalid UTF-8", "[mdls]") {
+	// `😀` is one code point and two UTF-16 units; the truncated sequence \xE2\x82 is two invalid bytes, i.e. two
+	// replacement characters for the parser (antlrcpp::Utf8).
+	const std::string line = "/* \xF0\x9F\x98\x80 \xE2\x82 */ float[...] f(x: float[...]) => y;";
+	const mdls::LineIndex lines{line};
+	CHECK(lines.toUtf16(0, 4) == 5); // after the emoji: 3 + 2 units
+	CHECK(lines.fromUtf16(0, 5) == 4);
+	CHECK(lines.toUtf16(0, 7) == 8); // after the two invalid bytes: one unit each
+	std::istringstream source{line};
+	auto result = mdl::parser::analyze(source, "<test>"); // (invalid UTF-8 is an error, the rest is analyzed)
+	std::map<std::string, size_t> columns;
+	for (const auto& d : result.diagnostics)
+		columns[d.message] = d.range.begin.column;
+	CHECK(columns.at("Invalid UTF-8 (byte 0xE2): source files must be UTF-8") == 5);
+	// `y`, in the parser's code points: its UTF-16 column is its byte offset minus the emoji's and the invalid
+	// bytes' extra bytes (4 - 2 for the emoji, none for the invalid bytes).
+	CHECK(line.substr(lines.toUtf16(0, columns.at("Variable y not defined")) + 2, 1) == "y");
 }

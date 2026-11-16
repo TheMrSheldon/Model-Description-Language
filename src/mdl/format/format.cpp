@@ -745,6 +745,8 @@ std::string mdl::format::convert(std::string_view name, Naming naming) {
 std::vector<mdl::Diagnostic>
 mdl::format::checkNaming(std::string_view source, const NamingOptions& naming, std::string_view sourcename) {
 	std::vector<Diagnostic> result;
+	if (invalidUtf8(source, std::string{sourcename}))
+		return result;
 	antlr4::ANTLRInputStream input{std::string{source}};
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();
@@ -763,6 +765,12 @@ mdl::format::format(std::string_view source, const FormatOptions& options, std::
 	FormatResult result;
 	DiagnosticSink sink = [&](const Diagnostic& d) { result.diagnostics.push_back(d); };
 	PrettyErrorListener errors{std::string{sourcename}, sink};
+	// Invalid UTF-8 is reported and the text is left unchanged (decoding it would replace bytes).
+	if (auto invalid = invalidUtf8(source, std::string{sourcename})) {
+		result.text = std::string{source};
+		result.diagnostics.push_back(std::move(*invalid));
+		return result;
+	}
 	antlr4::ANTLRInputStream input{std::string{source}};
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();

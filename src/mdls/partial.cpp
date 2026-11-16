@@ -1,4 +1,5 @@
 #include "./partial.hpp"
+#include "./utf8.hpp"
 
 #include "./tokens.hpp"
 
@@ -10,7 +11,8 @@
 namespace {
 	/** @brief Whether @p text parses as a program. */
 	bool parses(const std::string& text) {
-		antlr4::ANTLRInputStream input{text};
+		antlr4::ANTLRInputStream input;
+		input.load(text, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 		antlr4::mdlLexer lexer{&input};
 		lexer.removeErrorListeners();
 		antlr4::CommonTokenStream stream{&lexer};
@@ -30,13 +32,8 @@ namespace {
 					starts.push_back(i + 1);
 		}
 		size_t of(mdl::SourcePosition p) const {
-			size_t offset = p.line - 1 < starts.size() ? starts[p.line - 1] : text.size();
-			for (size_t points = 0; offset < text.size() && points < p.column; ++points) {
-				++offset;
-				while (offset < text.size() && (text[offset] & 0xC0) == 0x80)
-					++offset;
-			}
-			return offset;
+			const size_t start = p.line - 1 < starts.size() ? starts[p.line - 1] : text.size();
+			return mdls::utf8::advance(text, start, p.column);
 		}
 
 	private:
