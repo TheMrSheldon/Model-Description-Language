@@ -1,4 +1,5 @@
 #include "./pipeline.hpp"
+#include "./tvm_compat.hpp"
 
 #include "../../../logging.hpp"
 #include "./aot.hpp"
@@ -10,8 +11,8 @@
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
 #include <tvm/relax/expr_functor.h>
-#include <tvm/relax/struct_info.h>
 #include <tvm/relax/transform.h>
+#include <tvm/relax/type.h>
 #include <tvm/target/codegen.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/builtin.h>
@@ -43,127 +44,98 @@ namespace mdl::backend::tvm {
 		}
 
 		/**
-		 * @brief Stores bfloat16 as uint16 (for targets without native bfloat16, after tirx.transform.BF16ComputeLegalize,
-		 * which leaves bfloat16 only in buffers, accessed through reinterpret).
-		 * @details Replaces TVM 0.24's tirx.transform.BF16StorageLegalize, which fails on bfloat16 buffers whose data
-		 * variable it has not seen defined (AllocBuffer statements, constants of the AOT lowering, views created by
-		 * StorageRewrite: "Cannot find var remap"). Every bfloat16 buffer becomes a uint16 buffer over the same data
-		 * (variables of type bfloat16* become uint16*), and the reinterpretations between bfloat16 and uint16 vanish.
-		 * The tensors that entry functions pass to kernels keep their bfloat16 element type: packedArg (aot.cpp) marks
-		 * them with a uint16 zero, which becomes a bfloat16 one here (MDL tensors are never uint16).
+		 * @brief Prepares bfloat16 stores for tirx.transform.BF16StorageLegalize, which only converts stored values that
+		 * are reinterpretations: a bfloat16 value built from constants (e.g. a vectorized zero, `broadcast(reinterpret(
+		 * bfloat16, bits))`) becomes `reinterpret(bfloat16, <its uint16 bits>)`.
 		 */
-		Pass bf16Storage() {
+		Pass wrapBF16Stores() {
 			namespace tirx = ::tvm::tirx;
-			using ::tvm::DataType;
-			struct Rewriter : tirx::StmtExprMutator {
-				std::unordered_map<const tirx::VarNode*, tirx::Var> vars;
-				std::unordered_map<const tirx::BufferNode*, tirx::Buffer> buffers;
-
-				static bool isBF16Pointer(const tirx::Var& v) {
-					const auto* ptr = v->type_annotation.as<::tvm::PointerTypeNode>();
-					const auto* prim = ptr ? ptr->element_type.as<::tvm::PrimTypeNode>() : nullptr;
-					return prim != nullptr && prim->dtype.is_bfloat16();
-				}
-				tirx::Var var(const tirx::Var& v) {
-					if (auto it = vars.find(v.get()); it != vars.end())
-						return it->second;
-					if (!isBF16Pointer(v))
-						return v;
-					const auto* ptr = v->type_annotation.as<::tvm::PointerTypeNode>();
-					const auto lanes = ptr->element_type.as<::tvm::PrimTypeNode>()->dtype.lanes();
-					tirx::Var u(
-							v->name_hint,
-							::tvm::PointerType(::tvm::PrimType(DataType::UInt(16, lanes)), ptr->storage_scope)
-					);
-					vars.emplace(v.get(), u);
-					return u;
-				}
-				tirx::Buffer buffer(const tirx::Buffer& b) {
-					if (auto it = buffers.find(b.get()); it != buffers.end())
-						return it->second;
-					tirx::Var data = var(b->data);
-					if (!b->dtype.is_bfloat16() && data.same_as(b->data))
-						return b;
-					const DataType dtype = b->dtype.is_bfloat16() ? DataType::UInt(16, b->dtype.lanes()) : b->dtype;
-					tirx::Buffer u(
-							data, dtype, b->shape, b->strides, b->elem_offset, b->name, b->data_alignment,
-							b->offset_factor, b->buffer_type, b->axis_separators, b->span
-					);
-					buffers.emplace(b.get(), u);
-					return u;
-				}
-
-				::tvm::PrimExpr VisitExpr_(const tirx::VarNode* op) final {
-					return var(::tvm::ffi::GetRef<tirx::Var>(op));
-				}
-				::tvm::PrimExpr VisitExpr_(const tirx::BufferLoadNode* op) final {
-					auto load = ::tvm::Downcast<tirx::BufferLoad>(tirx::StmtExprMutator::VisitExpr_(op));
-					tirx::Buffer b = buffer(load->buffer);
-					if (b.same_as(load->buffer))
-						return load;
-					return tirx::BufferLoad(b, load->indices, load->predicate);
-				}
-				tirx::Stmt VisitStmt_(const tirx::BufferStoreNode* op) final {
-					auto store = ::tvm::Downcast<tirx::BufferStore>(tirx::StmtExprMutator::VisitStmt_(op));
-					tirx::Buffer b = buffer(store->buffer);
-					::tvm::PrimExpr value = store->value;
-					if (b->dtype != store->buffer->dtype && value.dtype().is_bfloat16())
-						value = ::tvm::reinterpret(b->dtype, value); // (collapsed below if it reinterprets a uint16)
-					if (b.same_as(store->buffer) && value.same_as(store->value))
-						return store;
-					return tirx::BufferStore(b, VisitExpr(value), store->indices, store->predicate);
-				}
-				::tvm::PrimExpr VisitExpr_(const tirx::CallNode* op) final {
-					auto call = ::tvm::Downcast<tirx::Call>(tirx::StmtExprMutator::VisitExpr_(op));
-					if (call->op.same_as(tirx::builtin::reinterpret())) {
-						const ::tvm::PrimExpr& x = call->args[0];
-						const DataType to =
-								call->dtype.is_bfloat16() ? DataType::UInt(16, call->dtype.lanes()) : call->dtype;
-						if (x.dtype() == to)
-							return x;
-						if (const auto* inner = x.as<tirx::CallNode>();
-							inner && inner->op.same_as(tirx::builtin::reinterpret()) && inner->args[0].dtype() == to)
-							return inner->args[0];
-						if (to != call->dtype)
-							return ::tvm::reinterpret(to, x);
-						return call;
+			using ::tvm::PrimType;
+			struct Wrap : tirx::StmtExprMutator {
+				using StmtExprMutator::Mutate_;
+				/**
+				 * @brief The uint16 bits of a bfloat16 value built from constants: a constant, a reinterpretation of bits,
+				 * or a broadcast of these (TVM's LLVM code generation has no bfloat16 vectors); std::nullopt for other
+				 * values (e.g. loads, which the legalization converts itself).
+				 */
+				static std::optional<::tvm::PrimExpr> bitsOf(const ::tvm::PrimExpr& value) {
+					if (const auto* c = value.as<::tvm::FloatImmNode>()) {
+						const float f = static_cast<float>(c->value);
+						uint32_t u;
+						std::memcpy(&u, &f, sizeof(u));
+						const auto bits = static_cast<int64_t>((u + 0x7fffu + ((u >> 16) & 1u)) >> 16); // round to even
+						return ::tvm::IntImm(PrimType::UInt(16), bits);
 					}
-					if (call->op.same_as(tirx::builtin::tvm_stack_make_array()) && call->args.size() == 6 &&
-						call->args[4].dtype() == DataType::UInt(16)) {
-						auto args = call->args;
-						args.Set(4, ::tvm::FloatImm(DataType::BFloat(16), 0.0));
-						return tirx::Call(call->dtype, call->op, args);
+					if (const auto* call = value.as<::tvm::CallNode>();
+						call && call->op.same_as(tirx::builtin::reinterpret()) && call->args.size() == 1) {
+						const auto arg = call->args[0].as_or_throw<::tvm::PrimExpr>();
+						if (arg.ty().MatchesElementType(kDLUInt, 16))
+							return arg;
 					}
-					return call;
+					if (const auto* b = value.as<::tvm::prim::BroadcastNode>())
+						if (auto bits = bitsOf(b->value))
+							return ::tvm::prim::Broadcast(*bits, b->lanes);
+					return std::nullopt;
 				}
-				tirx::Stmt VisitStmt_(const tirx::AllocBufferNode* op) final {
-					auto stmt = ::tvm::Downcast<tirx::AllocBuffer>(tirx::StmtExprMutator::VisitStmt_(op));
-					tirx::Buffer b = buffer(stmt->buffer);
-					return b.same_as(stmt->buffer) ? stmt : tirx::AllocBuffer(b, stmt->annotations);
-				}
-				tirx::Stmt VisitStmt_(const tirx::DeclBufferNode* op) final {
-					auto stmt = ::tvm::Downcast<tirx::DeclBuffer>(tirx::StmtExprMutator::VisitStmt_(op));
-					tirx::Buffer b = buffer(stmt->buffer);
-					return b.same_as(stmt->buffer) ? stmt : tirx::DeclBuffer(b);
-				}
-				tirx::Stmt VisitStmt_(const tirx::BindNode* op) final {
-					auto stmt = ::tvm::Downcast<tirx::Bind>(tirx::StmtExprMutator::VisitStmt_(op));
-					tirx::Var v = var(stmt->var);
-					return v.same_as(stmt->var) ? stmt : tirx::Bind(v, stmt->value);
+				::tvm::UnchangedOr<tirx::Stmt> Mutate_(const tirx::BufferStoreNode* op, ::tvm::InplaceMode mode) final {
+					auto result = StmtExprMutator::Mutate_(op, mode);
+					if (!result.IsUnchanged())
+						op = ::tvm::ffi::AnyView(result).as<tirx::BufferStoreNode>();
+					const PrimType type = op->value.ty();
+					const auto* call = op->value.as<::tvm::CallNode>();
+					if (!isBFloat16(op->buffer->dtype) || !type.MatchesElementType(kDLBfloat, 16) ||
+						(call != nullptr && call->op.same_as(tirx::builtin::reinterpret())))
+						return result;
+					auto bits = bitsOf(op->value);
+					if (!bits)
+						return result;
+					return tirx::BufferStore(op->buffer, ::tvm::prim::reinterpret(type, *bits), op->indices);
 				}
 			};
-			return ::tvm::tirx::transform::CreatePrimFuncPass(
+			return tirx::transform::CreatePrimFuncPass(
 					[](tirx::PrimFunc f, IRModule, ::tvm::transform::PassContext) {
-						Rewriter rewriter;
-						auto* n = f.CopyOnWrite();
-						Array<tirx::Var> params;
-						for (const auto& p : n->params)
-							params.push_back(rewriter.var(p));
-						n->params = params;
-						n->body = rewriter(std::move(n->body));
+						Wrap wrap;
+						auto body = wrap.Mutate(f->body).ValueOrUnchanged(f->body);
+						if (!body.same_as(f->body))
+							f.CopyOnWrite()->body = std::move(body);
 						return f;
 					},
-					0, "mdl.BF16Storage", {}
+					0, "mdl.WrapBF16Stores", {}
+			);
+		}
+
+		/**
+		 * @brief Restores the bfloat16 element type of the tensors that entry functions pass to kernels, after
+		 * tirx.transform.BF16StorageLegalize: the AOT lowering marks them with a uint16 zero (see typeMarker, aot.cpp).
+		 */
+		Pass restoreBF16ArrayTypes() {
+			namespace tirx = ::tvm::tirx;
+			using ::tvm::PrimType;
+			struct Restore : tirx::StmtExprMutator {
+				using StmtExprMutator::Mutate_;
+				::tvm::UnchangedOr<::tvm::Expr> Mutate_(const ::tvm::CallNode* op, ::tvm::InplaceMode mode) final {
+					auto result = StmtExprMutator::Mutate_(op, mode);
+					if (!result.IsUnchanged())
+						op = ::tvm::ffi::AnyView(result).as<::tvm::CallNode>();
+					if (!op->op.same_as(tirx::builtin::tvm_stack_make_array()) || op->args.size() < 5 ||
+						op->args[4]->ty.as<::tvm::PrimTypeNode>() == nullptr ||
+						op->args[4]->ty.as_or_throw<PrimType>() != PrimType::UInt(16))
+						return result;
+					auto copy = ::tvm::ffi::make_object<::tvm::CallNode>(*op);
+					copy->args.Set(4, ::tvm::prim::MakeConst(PrimType::BFloat(16), 0));
+					return ::tvm::Expr(std::move(copy));
+				}
+			};
+			return tirx::transform::CreatePrimFuncPass(
+					[](tirx::PrimFunc f, IRModule, ::tvm::transform::PassContext) {
+						Restore restore;
+						auto body = restore.Mutate(f->body).ValueOrUnchanged(f->body);
+						if (body.same_as(f->body))
+							return f;
+						f.CopyOnWrite()->body = std::move(body);
+						return f;
+					},
+					0, "mdl.RestoreBF16ArrayTypes", {}
 			);
 		}
 
@@ -175,7 +147,7 @@ namespace mdl::backend::tvm {
 		}
 
 		/**
-		 * @brief Replaces scalar float constants in elementwise arithmetic by PrimValues.
+		 * @brief Replaces scalar float constants in elementwise arithmetic by scalars (FloatImm).
 		 * @details Legalization then inlines them into the generated kernels instead of passing them as (0-d) tensor
 		 * arguments (which would require constant data in the compiled object).
 		 */
@@ -183,8 +155,8 @@ namespace mdl::backend::tvm {
 		public:
 			using ExprMutator::VisitExpr_;
 
-			::tvm::relax::Expr VisitExpr_(const ::tvm::relax::CallNode* op) final {
-				auto call = ::tvm::Downcast<::tvm::relax::Call>(ExprMutator::VisitExpr_(op));
+			::tvm::relax::Expr VisitExpr_(const ::tvm::CallNode* op) final {
+				auto call = (ExprMutator::VisitExpr_(op)).as_or_throw<::tvm::Call>();
 				static const std::vector<::tvm::Op> elementwise{
 						::tvm::Op::Get("relax.add"), ::tvm::Op::Get("relax.subtract"), ::tvm::Op::Get("relax.multiply"),
 						::tvm::Op::Get("relax.divide")
@@ -197,15 +169,15 @@ namespace mdl::backend::tvm {
 				Array<::tvm::relax::Expr> args;
 				bool changed = false;
 				for (const auto& arg : call->args) {
-					const auto* c = arg.as<::tvm::relax::ConstantNode>();
+					const auto c = tensorConstant(arg);
 					std::optional<double> value;
-					if (c && c->data.Shape().Product() == 1) {
-						const DLDataType t = c->data->dtype;
+					if (c && c->Shape().Product() == 1) {
+						const DLDataType t = (*c)->dtype;
 						uint16_t bits = 0;
 						if (t.bits == 16)
-							std::memcpy(&bits, c->data->data, sizeof(bits));
+							std::memcpy(&bits, (*c)->data, sizeof(bits));
 						if (t == DLDataType{kDLFloat, 32, 1}) {
-							value = static_cast<const float*>(c->data->data)[0];
+							value = static_cast<const float*>((*c)->data)[0];
 						} else if (t == DLDataType{kDLBfloat, 16, 1}) {
 							const uint32_t wide = static_cast<uint32_t>(bits) << 16;
 							float f;
@@ -218,8 +190,7 @@ namespace mdl::backend::tvm {
 						}
 					}
 					if (value) {
-						args.push_back(::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType(c->data->dtype), *value))
-						);
+						args.push_back(::tvm::FloatImm(::tvm::PrimType((*c)->dtype), *value));
 						changed = true;
 					} else {
 						args.push_back(arg);
@@ -229,11 +200,11 @@ namespace mdl::backend::tvm {
 					return call;
 				// Only valid if the other operand is a tensor (scalar-scalar arithmetic stays as it is).
 				bool hasTensor = std::any_of(args.begin(), args.end(), [](const auto& a) {
-					return ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(a) != nullptr;
+					return ::tvm::relax::GetTypeAs<::tvm::relax::TensorTypeNode>(a) != nullptr;
 				});
 				if (!hasTensor)
 					return call;
-				return ::tvm::relax::Call(call->op, args, call->attrs, call->sinfo_args);
+				return ::tvm::Call(call->ty, call->op, args, call->attrs, call->ty_args);
 			}
 		};
 
@@ -246,29 +217,31 @@ namespace mdl::backend::tvm {
 		public:
 			using ExprMutator::VisitExpr_;
 
-			::tvm::relax::Expr VisitExpr_(const ::tvm::relax::CallNode* op) final {
-				auto call = ::tvm::Downcast<::tvm::relax::Call>(ExprMutator::VisitExpr_(op));
+			::tvm::relax::Expr VisitExpr_(const ::tvm::CallNode* op) final {
+				auto call = (ExprMutator::VisitExpr_(op)).as_or_throw<::tvm::Call>();
 				static const ::tvm::Op sum = ::tvm::Op::Get("relax.sum");
 				if (!call->op.same_as(sum))
 					return call;
-				const auto* info = ::tvm::relax::GetStructInfoAs<::tvm::relax::TensorStructInfoNode>(call->args[0]);
-				if (info == nullptr || info->IsUnknownDtype() || info->dtype.bits() != 16 ||
-					!(info->dtype.is_float() || info->dtype.is_bfloat16()))
+				const auto* info = ::tvm::relax::GetTypeAs<::tvm::relax::TensorTypeNode>(call->args[0]);
+				if (info == nullptr || info->IsUnknownDtype() || info->dtype.value().bits() != 16 ||
+					!(info->dtype.value().MatchesCode(kDLFloat) || info->dtype.value().MatchesElementType(kDLBfloat, 16)
+					))
 					return call;
 				static const auto astype = ::tvm::ffi::Function::GetGlobalRequired("relax.op.astype");
 				auto wide = builder_->Emit(
-						astype(call->args[0], ::tvm::DataType::Float(32)).cast<::tvm::relax::Expr>(), "wide"
+						astype(call->args[0], ::tvm::PrimType::Float(32)->dtype).cast<::tvm::relax::Expr>(), "wide"
 				);
-				auto reduced =
-						builder_->Emit(::tvm::relax::Call(call->op, {wide}, call->attrs, call->sinfo_args), "sum32");
-				return astype(reduced, info->dtype).cast<::tvm::relax::Expr>();
+				auto reduced = builder_->Emit(
+						::tvm::Call(::tvm::Type::Missing(), call->op, {wide}, call->attrs, call->ty_args), "sum32"
+				);
+				return astype(reduced, info->dtype.value()->dtype).cast<::tvm::relax::Expr>();
 			}
 		};
 
 		Pass widenSumsPass() {
 			return RT::CreateFunctionPass(
 					[](::tvm::relax::Function f, IRModule, ::tvm::transform::PassContext) {
-						return ::tvm::Downcast<::tvm::relax::Function>(WidenSums().VisitExpr(f));
+						return (WidenSums().VisitExpr(f)).as_or_throw<::tvm::relax::Function>();
 					},
 					0, "mdl.WidenSums", {}
 			);
@@ -277,7 +250,7 @@ namespace mdl::backend::tvm {
 		Pass inlineScalarConstantsPass() {
 			return RT::CreateFunctionPass(
 					[](::tvm::relax::Function f, IRModule, ::tvm::transform::PassContext) {
-						return ::tvm::Downcast<::tvm::relax::Function>(InlineScalarConstants().VisitExpr(f));
+						return (InlineScalarConstants().VisitExpr(f)).as_or_throw<::tvm::relax::Function>();
 					},
 					0, "mdl.InlineScalarConstants", {}
 			);
@@ -366,7 +339,7 @@ namespace mdl::backend::tvm {
 						registeredPass("s_tir.transform.ConvertBlocksToOpaque"),
 						registeredPass("s_tir.transform.CompactBufferAllocation", true),
 						registeredPass("s_tir.transform.LowerMatchBuffer"),
-						registeredPass("tirx.transform.Simplify"),
+						registeredPass("tirx.transform.StmtSimplify"),
 						registeredPass("s_tir.transform.LowerOpaqueBlock"),
 				},
 				target
@@ -386,18 +359,19 @@ namespace mdl::backend::tvm {
 						registeredPass("s_tir.transform.HoistIfThenElse"),
 						registeredPass("tirx.transform.UnrollLoop"),
 						registeredPass("s_tir.transform.RenormalizeSplitPattern"),
-						registeredPass("tirx.transform.Simplify"),
+						registeredPass("tirx.transform.StmtSimplify"),
 						registeredPass("tirx.transform.RemoveNoOp"),
 						registeredPass("s_tir.transform.RewriteUnsafeSelect"),
 						registeredPass("tirx.transform.CommonSubexprElim"),
 						registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
 						registeredPass("tirx.transform.VerifyMemory"),
-						registeredPass("tirx.transform.AnnotateDeviceRegions"),
+						registeredPass("tirx.transform.AnnotateEntryFunc"),
 						registeredPass("tirx.transform.SplitHostDevice"),
 						registeredPass("tirx.transform.MakePackedAPI"),
 						registeredPass("tirx.transform.FP8StorageLegalize"),
-						bf16Storage(),
-						registeredPass("tirx.transform.LowerDeviceKernelLaunch"),
+						wrapBF16Stores(),
+						registeredPass("tirx.transform.BF16StorageLegalize"),
+						restoreBF16ArrayTypes(),
 						registeredPass("tirx.transform.LowerTVMBuiltin"),
 						registeredPass("tirx.transform.LowerIntrin"),
 				},

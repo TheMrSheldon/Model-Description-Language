@@ -18,7 +18,7 @@ namespace mdl::backend::tvm {
 				if (!fn)
 					continue;
 
-				::tvm::relax::Function func = ::tvm::Downcast<::tvm::relax::Function>(fn_obj);
+				auto func = fn_obj.as_or_throw<::tvm::relax::Function>();
 				try {
 					auto bindings = ::tvm::relax::AnalyzeVar2Value(func);
 					auto rewriter = ::tvm::ffi::TypedFunction<

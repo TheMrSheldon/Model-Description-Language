@@ -1,8 +1,8 @@
 #include "./legalize.hpp"
+#include "./tvm_compat.hpp"
 
 #include <mdl/computegraphv2/builtins.hpp>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/relax/attrs/datatype.h>
 #include <tvm/relax/attrs/index.h>
@@ -13,8 +13,10 @@
 #include <tvm/relax/expr.h>
 #include <tvm/relax/expr_functor.h>
 #include <tvm/relax/op_attr_types.h>
-#include <tvm/relax/struct_info.h>
 #include <tvm/relax/transform.h>
+#include <tvm/relax/type.h>
+#include <tvm/s_tir/stmt.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/te/operation.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -42,18 +44,17 @@
 
 namespace mdl::backend::tvm {
 
-	using ::tvm::Integer;
+	using ::tvm::Call;
 	using ::tvm::PrimExpr;
 	using ::tvm::ffi::Array;
 	using ::tvm::ffi::Function;
 	using ::tvm::ffi::Map;
 	using ::tvm::ffi::String;
 	using ::tvm::relax::BlockBuilder;
-	using ::tvm::relax::Call;
 	using ::tvm::relax::Expr;
 	using ::tvm::relax::ShapeExpr;
-	using ::tvm::relax::TensorStructInfo;
-	using ::tvm::relax::TensorStructInfoNode;
+	using ::tvm::relax::TensorType;
+	using ::tvm::relax::TensorTypeNode;
 	namespace te = ::tvm::te;
 	namespace tirx = ::tvm::tirx;
 	namespace topi = ::tvm::topi;
@@ -61,40 +62,24 @@ namespace mdl::backend::tvm {
 	// ── helpers ──────────────────────────────────────────────────────────────────
 
 	namespace {
-		const TensorStructInfoNode* tensorInfo(const Expr& e) {
-			return ::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(e);
-		}
-
 		Array<PrimExpr> shapeOf(const Expr& e) {
-			const auto* info = tensorInfo(e);
-			if (info == nullptr || !info->GetShape().defined())
-				throw std::runtime_error("mdl backend: expected a tensor with known shape");
-			return info->GetShape().value();
-		}
-
-		int64_t intValue(const Expr& e) {
-			const auto* pv = e.as<::tvm::relax::PrimValueNode>();
-			const auto* imm = pv ? pv->value.as<::tvm::IntImmNode>() : nullptr;
-			if (imm == nullptr)
-				throw std::runtime_error("mdl backend: expected an integer PrimValue");
-			return imm->value;
+			if (auto shape = knownShape(e))
+				return *shape;
+			throw std::runtime_error("mdl backend: expected a tensor with known shape");
 		}
 
 		double floatValue(const Expr& e) {
-			const auto* pv = e.as<::tvm::relax::PrimValueNode>();
-			if (pv != nullptr) {
-				if (const auto* f = pv->value.as<::tvm::FloatImmNode>())
-					return f->value;
-				if (const auto* i = pv->value.as<::tvm::IntImmNode>())
-					return static_cast<double>(i->value);
-			}
-			throw std::runtime_error("mdl backend: expected a scalar PrimValue");
+			if (const auto* f = e.as<::tvm::FloatImmNode>())
+				return f->value;
+			if (const auto* i = e.as<::tvm::IntImmNode>())
+				return static_cast<double>(static_cast<int64_t>(i->value));
+			throw std::runtime_error("mdl backend: expected a scalar");
 		}
 
 		PrimExpr product(const Array<PrimExpr>& dims, size_t begin, size_t end) {
-			PrimExpr result = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+			PrimExpr result = ::tvm::IntImm(::tvm::PrimType::Int(64), 1);
 			for (size_t i = begin; i < end; ++i)
-				result = result * ::tvm::cast(::tvm::DataType::Int(64), dims[i]);
+				result = result * ::tvm::prim::cast(::tvm::PrimType::Int(64), dims[i]);
 			return result;
 		}
 
@@ -105,7 +90,7 @@ namespace mdl::backend::tvm {
 		 * and `B1` of a flattened dimension `B0 * B1`. A kernel cannot recover them from its buffers, so they are passed
 		 * as extra arguments (`tir_vars` of `call_tir`).
 		 */
-		Array<tirx::Var>
+		Array<::tvm::Var>
 		unboundVars(const std::vector<Array<PrimExpr>>& shapes, const std::vector<PrimExpr>& scalars = {}) {
 			std::vector<const tirx::VarNode*> direct;
 			for (const auto& shape : shapes)
@@ -114,27 +99,30 @@ namespace mdl::backend::tvm {
 						direct.push_back(v);
 			std::vector<Array<PrimExpr>> all = shapes;
 			all.emplace_back(scalars.begin(), scalars.end()); // e.g. a runtime dimension as a divisor
-			Array<tirx::Var> unbound;
+			Array<::tvm::Var> unbound;
 			for (const auto& shape : all)
 				for (const auto& d : shape)
 					for (const auto& v : tirx::UndefinedVars(d))
 						if (std::find(direct.begin(), direct.end(), v.get()) == direct.end() &&
-							std::find_if(unbound.begin(), unbound.end(), [&](const tirx::Var& u) {
+							std::find_if(unbound.begin(), unbound.end(), [&](const ::tvm::Var& u) {
 								return u.same_as(v);
 							}) == unbound.end())
 							unbound.push_back(v);
 			return unbound;
 		}
 
-		/** @brief `call_tir(gv, inputs, out)`, with the unbound symbolic variables as `tir_vars`. */
+		/**
+		 * @brief `call_tir(gv, (inputs..., vars...), out)`: the unbound symbolic variables are scalar arguments after
+		 * the inputs (the PrimFunc's parameters: inputs, variables, output).
+		 */
 		Expr
-		callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const TensorStructInfo& out,
-				const Array<tirx::Var>& vars) {
+		callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const TensorType& out,
+				const Array<::tvm::Var>& vars) {
 			static const auto& op = ::tvm::Op::Get("relax.call_tir");
-			if (vars.empty())
-				return Call(op, {gv, ::tvm::relax::Tuple(inputs)}, ::tvm::Attrs(), {out});
-			Array<PrimExpr> values(vars.begin(), vars.end());
-			return Call(op, {gv, ::tvm::relax::Tuple(inputs), ShapeExpr(values)}, ::tvm::Attrs(), {out});
+			Array<Expr> args = inputs;
+			for (const auto& v : vars)
+				args.push_back(v);
+			return Call(::tvm::Type::Missing(), op, {gv, ::tvm::relax::Tuple(args)}, ::tvm::Attrs(), {out});
 		}
 
 		/**
@@ -148,32 +136,32 @@ namespace mdl::backend::tvm {
 			/** @brief A placeholder for a tensor argument. */
 			te::Tensor tensor(const Expr& arg, const std::string& argName = "x") {
 				const auto* info = tensorInfo(arg);
-				auto placeholder = te::placeholder(shapeOf(arg), info->dtype, argName);
+				auto placeholder = te::placeholder(shapeOf(arg), info->dtype.value(), argName);
 				shapes.push_back(placeholder->shape);
 				inputs.push_back(arg);
 				argList.push_back(placeholder);
 				return placeholder;
 			}
 
-			/** @brief The value of a scalar (PrimValue) argument (its symbolic variables become kernel arguments). */
-			PrimExpr scalar(const Expr& arg, ::tvm::DataType dtype) {
-				const auto* pv = arg.as<::tvm::relax::PrimValueNode>();
-				if (pv == nullptr)
-					throw std::runtime_error("mdl backend: expected a tensor or PrimValue operand");
-				scalars.push_back(pv->value);
-				return ::tvm::cast(dtype, pv->value);
+			/** @brief The value of a scalar argument (its symbolic variables become kernel arguments). */
+			PrimExpr scalar(const Expr& arg, ::tvm::PrimType dtype) {
+				auto value = scalarValue(arg);
+				if (!value)
+					throw std::runtime_error("mdl backend: expected a tensor or scalar operand");
+				scalars.push_back(*value);
+				return ::tvm::prim::cast(dtype, *value);
 			}
 
 			Expr finish(const te::Tensor& out) {
-				argList.push_back(out);
 				shapes.push_back(out->shape);
 				auto vars = unboundVars(shapes, scalars);
 				for (const auto& v : vars)
 					argList.push_back(v);
+				argList.push_back(out);
 				static const auto createPrimFunc = Function::GetGlobalRequired("te.CreatePrimFunc");
 				auto func = createPrimFunc(argList, nullptr).cast<tirx::PrimFunc>();
 				auto gv = bb->AddFunction(func, name);
-				return callTir(gv, inputs, TensorStructInfo(ShapeExpr(out->shape), out->dtype), vars);
+				return callTir(gv, inputs, TensorType(ShapeExpr(out->shape), out->dtype), vars);
 			}
 
 		private:
@@ -191,43 +179,42 @@ namespace mdl::backend::tvm {
 			ExternCall(BlockBuilder bb, std::string kernel) : bb(std::move(bb)), kernel(std::move(kernel)) {}
 
 			/** @brief Adds a tensor argument; returns the pointer expression to pass to the kernel. */
-			PrimExpr input(const Expr& arg, const std::string& argName) {
+			Expr input(const Expr& arg, const std::string& argName) {
 				inputs.push_back(arg);
-				return buffer(shapeOf(arg), tensorInfo(arg)->dtype, argName, /*write=*/false);
+				return buffer(shapeOf(arg), tensorInfo(arg)->dtype.value(), argName, /*write=*/false);
 			}
 
-			PrimExpr output(const Array<PrimExpr>& shape, ::tvm::DataType dtype) {
-				outInfo = TensorStructInfo(ShapeExpr(shape), dtype);
-				outputPtr = buffer(shape, dtype, "out", /*write=*/true);
-				outputHandle = params.back();
-				return outputPtr;
+			Expr output(const Array<PrimExpr>& shape, ::tvm::PrimType dtype) {
+				outInfo = TensorType(ShapeExpr(shape), dtype);
+				auto ptr = buffer(shape, dtype, "out", /*write=*/true);
+				outputBuffer = params.back();
+				return ptr;
 			}
 
-			Expr finish(std::vector<PrimExpr> kernelArgs) {
-				// The output buffer is the last parameter (destination passing style); it was added before the inputs'
-				// pointers were computed only if output() was called first, so reorder explicitly.
-				std::vector<tirx::Var> ordered;
+			Expr finish(std::vector<Expr> kernelArgs) {
+				// The parameters: the inputs, the unbound symbolic variables, then the output (destination passing style).
+				std::vector<::tvm::Var> ordered;
 				for (const auto& p : params)
-					if (!p.same_as(outputHandle))
+					if (!p.same_as(outputBuffer))
 						ordered.push_back(p);
-				ordered.push_back(outputHandle);
 				auto vars = unboundVars(shapes);
 				ordered.insert(ordered.end(), vars.begin(), vars.end());
-				Array<PrimExpr> callArgs{tirx::StringImm(kernel)};
+				ordered.push_back(outputBuffer);
+				Array<Expr> callArgs{::tvm::StringImm(kernel)};
 				for (auto& arg : kernelArgs)
 					callArgs.push_back(std::move(arg));
-				auto call = tirx::Call(::tvm::DataType::Int(32), tirx::builtin::call_extern(), callArgs);
+				auto call =
+						Call(::tvm::PrimType::Int(32), tirx::builtin::call_extern(), callArgs).as_or_throw<PrimExpr>();
 				auto check = tirx::AssertStmt(
-						call == 0, tirx::StringImm("RuntimeError"),
-						{tirx::StringImm("mdl kernel " + kernel + " failed")}
+						call == 0, ::tvm::StringImm("RuntimeError"),
+						{::tvm::StringImm("mdl kernel " + kernel + " failed")}
 				);
 				// Wrap the call in a root block like any other (TE-generated) PrimFunc; Relax analyses expect it.
-				auto body = tirx::SBlockRealize({}, ::tvm::Bool(true), tirx::SBlock({}, {}, {}, "root", check));
-				auto func = tirx::PrimFunc(
-						Array<tirx::Var>(ordered.begin(), ordered.end()), body, ::tvm::VoidType(), bufferMap
-				);
+				auto body =
+						::tvm::s_tir::SBlockRealize({}, ::tvm::IntImm::Bool(true), ::tvm::s_tir::SBlock("root", check));
+				auto func = tirx::PrimFunc(Array<::tvm::Var>(ordered.begin(), ordered.end()), body, ::tvm::VoidType());
 				// Opaque (kOpaque = 8): extern calls must not be fused with other kernels.
-				func = ::tvm::WithAttr(std::move(func), "op_pattern", ::tvm::Integer(8));
+				func = ::tvm::WithAttr(std::move(func), "op_pattern", 8);
 				auto gv = bb->AddFunction(func, kernel);
 				return callTir(gv, inputs, outInfo.value(), vars);
 			}
@@ -236,21 +223,19 @@ namespace mdl::backend::tvm {
 			BlockBuilder bb;
 			std::string kernel;
 			Array<Expr> inputs;
-			std::vector<tirx::Var> params;
-			Map<tirx::Var, tirx::Buffer> bufferMap;
+			std::vector<::tvm::Var> params; ///< the buffers
 			std::vector<Array<PrimExpr>> shapes;
-			std::optional<TensorStructInfo> outInfo;
-			PrimExpr outputPtr;
-			tirx::Var outputHandle;
+			std::optional<TensorType> outInfo;
+			::tvm::Var outputBuffer;
 
-			PrimExpr buffer(const Array<PrimExpr>& shape, ::tvm::DataType dtype, const std::string& n, bool write) {
-				// The parameter is the DLTensor handle; the buffer has its own data pointer (bound by MakePackedAPI).
-				auto handle = tirx::Var(n + "_handle", ::tvm::DataType::Handle());
+			Expr buffer(const Array<PrimExpr>& shape, ::tvm::PrimType dtype, const std::string& n, bool write) {
 				auto buf = tirx::decl_buffer(shape, dtype, n);
 				shapes.push_back(shape);
-				params.push_back(handle);
-				bufferMap.Set(handle, buf);
-				return buf.access_ptr(write ? 2 : 1);
+				params.push_back(buf);
+				(void
+				)write; // (the kernels get the plain data pointer: tvm_access_ptr carries a dtype marker that the bfloat16
+				// legalization would rewrite)
+				return buf.data();
 			}
 		};
 
@@ -277,13 +262,13 @@ namespace mdl::backend::tvm {
 				));
 			if (lhsInfo)
 				return te.finish(
-						TS(te.tensor(call->args[0], "lhs"), te.scalar(call->args[1], lhsInfo->dtype), "T_" + name,
-						   topi::kElementWise)
+						TS(te.tensor(call->args[0], "lhs"), te.scalar(call->args[1], lhsInfo->dtype.value()),
+						   "T_" + name, topi::kElementWise)
 				);
 			if (rhsInfo)
 				return te.finish(
-						ST(te.scalar(call->args[0], rhsInfo->dtype), te.tensor(call->args[1], "rhs"), "T_" + name,
-						   topi::kElementWise)
+						ST(te.scalar(call->args[0], rhsInfo->dtype.value()), te.tensor(call->args[1], "rhs"),
+						   "T_" + name, topi::kElementWise)
 				);
 			return call; // scalar arithmetic is handled by ComputePrimValue
 		}
@@ -297,7 +282,7 @@ namespace mdl::backend::tvm {
 			});
 		}
 
-		template <te::Tensor (*Reduce)(const te::Tensor&, const ::tvm::ffi::Optional<Array<Integer>>&, bool, bool)>
+		template <te::Tensor (*Reduce)(const te::Tensor&, const ::tvm::ffi::Optional<Array<int64_t>>&, bool, bool)>
 		Function reduction(std::string name) {
 			return wrap([name](const BlockBuilder& bb, const Call& call) {
 				const auto* attrs = call->attrs.as<::tvm::relax::StatisticalAttrs>();
@@ -331,11 +316,12 @@ namespace mdl::backend::tvm {
 			outShape.push_back(N);
 			auto k = te::reduce_axis(::tvm::Range(0, K), "k");
 			const auto dtype = a->dtype;
-			const auto f32 = ::tvm::DataType::Float(32);
-			const bool wide = dtype.bits() == 16 && (dtype.is_float() || dtype.is_bfloat16());
+			const auto f32 = ::tvm::PrimType::Float(32);
+			const bool wide =
+					dtype.bits() == 16 && (dtype.MatchesCode(kDLFloat) || dtype.MatchesElementType(kDLBfloat, 16));
 			te::Tensor product = te::compute(
 					outShape,
-					[&](const Array<tirx::Var>& idx) {
+					[&](const Array<::tvm::PrimVar>& idx) {
 						auto batchIndex = [&](const te::Tensor& t, size_t rank) {
 							Array<PrimExpr> index;
 							for (size_t i = 0; i + 2 < rank; ++i) {
@@ -364,8 +350,8 @@ namespace mdl::backend::tvm {
 						}
 						// 16-bit floats accumulate in float32.
 						if (wide)
-							return ::tvm::sum(::tvm::cast(f32, a(ai)) * ::tvm::cast(f32, b(bi)), {k});
-						return ::tvm::sum(a(ai) * b(bi), {k});
+							return ::tvm::prim::sum(::tvm::prim::cast(f32, a(ai)) * ::tvm::prim::cast(f32, b(bi)), {k});
+						return ::tvm::prim::sum(a(ai) * b(bi), {k});
 					},
 					"T_matmul", "opaque"
 			);
@@ -374,14 +360,14 @@ namespace mdl::backend::tvm {
 			// Epilogue as a separate stage (a reduction must be the top-level expression of a compute).
 			return te::compute(
 					outShape,
-					[&](const Array<tirx::Var>& idx) {
+					[&](const Array<::tvm::PrimVar>& idx) {
 						PrimExpr v = product(Array<PrimExpr>{idx.begin(), idx.end()});
 						const auto accumulator = wide ? f32 : dtype;
 						if (alpha != 1.0)
-							v = v * ::tvm::tirx::make_const(accumulator, alpha);
+							v = v * ::tvm::prim::MakeConst(accumulator, alpha);
 						if (bias)
-							v = v + ::tvm::cast(accumulator, (*bias)(Array<PrimExpr>{idx[batchRank + 1]}));
-						return wide ? ::tvm::cast(dtype, v) : v;
+							v = v + ::tvm::prim::cast(accumulator, (*bias)(Array<PrimExpr>{idx[batchRank + 1]}));
+						return wide ? ::tvm::prim::cast(dtype, v) : v;
 					},
 					"T_matmul_epilogue", topi::kElementWise
 			);
@@ -390,12 +376,12 @@ namespace mdl::backend::tvm {
 		// ── vendor kernels (mdl_kernels) ───────────────────────────────────────────
 
 		/** @brief The suffix of the vendor kernels for the element type @p dtype (`mdl_matmul_bf16`), if any. */
-		std::optional<std::string> kernelSuffix(::tvm::DataType dtype) {
-			if (dtype == ::tvm::DataType::Float(32))
+		std::optional<std::string> kernelSuffix(::tvm::PrimType dtype) {
+			if (dtype == ::tvm::PrimType::Float(32))
 				return "f32";
-			if (dtype == ::tvm::DataType::BFloat(16))
+			if (dtype == ::tvm::PrimType::BFloat(16))
 				return "bf16";
-			if (dtype == ::tvm::DataType::Float(16))
+			if (dtype == ::tvm::PrimType::Float(16))
 				return "f16";
 			return std::nullopt;
 		}
@@ -407,14 +393,14 @@ namespace mdl::backend::tvm {
 			Perm perm;
 			if (const auto* shape = e.as<::tvm::relax::ShapeExprNode>())
 				for (const auto& v : shape->values)
-					perm.push_back(v.as<::tvm::IntImmNode>()->value);
+					perm.push_back(intValue(v.as<::tvm::IntImmNode>()));
 			return perm;
 		}
 
 		Expr permExpr(const Perm& perm) {
 			Array<PrimExpr> values;
 			for (int64_t p : perm)
-				values.push_back(::tvm::IntImm(::tvm::DataType::Int(64), p));
+				values.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), p));
 			return ShapeExpr(values);
 		}
 
@@ -472,34 +458,33 @@ namespace mdl::backend::tvm {
 			std::optional<te::Tensor> z;
 			if (quant.zeros)
 				z = te.tensor(*quant.zeros, "zeros");
-			const auto f32 = ::tvm::DataType::Float(32), i32 = ::tvm::DataType::Int(32);
+			const auto f32 = ::tvm::PrimType::Float(32), i32 = ::tvm::PrimType::Int(32);
 			const int64_t group = quant.group;
 			const auto format = quant.format;
 			Array<PrimExpr> shape{q->shape[0], quant.packed() ? q->shape[1] * 2 : q->shape[1]};
 			return te::compute(
 					shape,
-					[&](const Array<tirx::Var>& i) {
+					[&](const Array<::tvm::PrimVar>& i) {
 						const PrimExpr n = i[0], k = i[1];
-						const PrimExpr g = ::tvm::floordiv(k, ::tvm::IntImm(k.dtype(), group));
+						const PrimExpr g = ::tvm::floordiv(k, ::tvm::IntImm(k.ty(), group));
 						PrimExpr value;
 						if (format == QuantFormat::int8) {
-							value = ::tvm::cast(i32, q(Array<PrimExpr>{n, k}));
+							value = ::tvm::prim::cast(i32, q(Array<PrimExpr>{n, k}));
 						} else {
-							const PrimExpr two = ::tvm::IntImm(k.dtype(), 2);
+							const PrimExpr two = ::tvm::IntImm(k.ty(), 2);
 							const PrimExpr byte =
-									::tvm::cast(i32, q(Array<PrimExpr>{n, ::tvm::floordiv(k, two)})) & 0xFF;
-							const PrimExpr nibble = ::tvm::tirx::Select(
-									::tvm::floormod(k, two) == ::tvm::IntImm(k.dtype(), 0), byte & 0xF,
-									(byte >> 4) & 0xF
+									::tvm::prim::cast(i32, q(Array<PrimExpr>{n, ::tvm::floordiv(k, two)})) & 0xFF;
+							const PrimExpr nibble = ::tvm::prim::Select(
+									::tvm::floormod(k, two) == ::tvm::IntImm(k.ty(), 0), byte & 0xF, (byte >> 4) & 0xF
 							);
 							value = format == QuantFormat::int4
-											? ::tvm::tirx::Select(nibble >= 8, nibble - 16, nibble) // signed
+											? ::tvm::prim::Select(nibble >= 8, nibble - 16, nibble) // signed
 											: nibble;
 						}
 						if (z)
-							value = value - ::tvm::cast(i32, (*z)(Array<PrimExpr>{g, n}));
-						const PrimExpr scale = ::tvm::cast(f32, scales(Array<PrimExpr>{g, n}));
-						return ::tvm::cast(scales->dtype, ::tvm::cast(f32, value) * scale);
+							value = value - ::tvm::prim::cast(i32, (*z)(Array<PrimExpr>{g, n}));
+						const PrimExpr scale = ::tvm::prim::cast(f32, scales(Array<PrimExpr>{g, n}));
+						return ::tvm::prim::cast(scales->dtype, ::tvm::prim::cast(f32, value) * scale);
 					},
 					"T_dequant", topi::kElementWise
 			);
@@ -573,10 +558,10 @@ namespace mdl::backend::tvm {
 		/** @brief Row-major strides of a contiguous tensor of shape @p shape. */
 		Array<PrimExpr> contiguousStrides(const Array<PrimExpr>& shape) {
 			std::vector<PrimExpr> strides(shape.size());
-			PrimExpr s = ::tvm::IntImm(::tvm::DataType::Int(64), 1);
+			PrimExpr s = ::tvm::IntImm(::tvm::PrimType::Int(64), 1);
 			for (size_t i = shape.size(); i-- > 0;) {
 				strides[i] = s;
-				s = s * ::tvm::cast(::tvm::DataType::Int(64), shape[i]);
+				s = s * ::tvm::prim::cast(::tvm::PrimType::Int(64), shape[i]);
 			}
 			return Array<PrimExpr>(strides.begin(), strides.end());
 		}
@@ -589,7 +574,7 @@ namespace mdl::backend::tvm {
 		std::optional<Expr> matmulKernel(const BlockBuilder& bb, const MatmulArgs& m) {
 			const auto* ai = tensorInfo(m.a);
 			const auto* bi = tensorInfo(m.quant ? m.quant->scales : m.b);
-			if (!ai || !bi || ai->dtype != bi->dtype || !kernelSuffix(ai->dtype))
+			if (!ai || !bi || ai->dtype.value() != bi->dtype.value() || !kernelSuffix(ai->dtype.value()))
 				return std::nullopt;
 			const auto as = shapeOf(m.a), bs = m.bShape();
 			const auto la = permuted(as, m.permA), lb = permuted(bs, m.permB);
@@ -597,7 +582,7 @@ namespace mdl::backend::tvm {
 			const size_t ra = la.size(), rb = lb.size();
 			if (ra < 2 || rb < 2 || ra < rb || (rb > 2 && ra != rb))
 				return std::nullopt;
-			if (m.addend && (tensorInfo(*m.addend)->dtype != ai->dtype ||
+			if (m.addend && (tensorInfo(*m.addend)->dtype.value() != ai->dtype.value() ||
 							 !::tvm::ffi::StructuralEqual()(shapeOf(*m.addend), permuted(m.productShape(), m.permOut))))
 				return std::nullopt;
 			// The result: the product's dimension j is the result's dimension at position p with perm_out[p] == j.
@@ -608,9 +593,9 @@ namespace mdl::backend::tvm {
 			for (size_t p = 0; p < lo.size(); ++p)
 				so[m.permOut.empty() ? p : static_cast<size_t>(m.permOut[p])] = rs[p];
 
-			const PrimExpr zero = ::tvm::IntImm(::tvm::DataType::Int(64), 0);
-			::tvm::arith::Analyzer analyzer;
-			auto equal = [&](const PrimExpr& x, const PrimExpr& y) { return analyzer.CanProveEqual(x, y); };
+			const PrimExpr zero = ::tvm::IntImm(::tvm::PrimType::Int(64), 0);
+			::tvm::sym::Analyzer analyzer;
+			auto equal = [&](const PrimExpr& x, const PrimExpr& y) { return analyzer->CanProveEqual(x, y); };
 			struct Dim {
 				PrimExpr size, a, b, out; // the size and the strides in A, B, and the result
 			};
@@ -644,16 +629,16 @@ namespace mdl::backend::tvm {
 				// The quantized weights W [N, K] as B = W^T (a linear layer): a single GEMM with B[k, n] at n * K + k.
 				if (!batch.empty() || rb != 2 || !equal(bK, 1) || !equal(bN, K))
 					return std::nullopt;
-				ExternCall ext{bb, "mdl_matmul_q_" + *kernelSuffix(ai->dtype)};
+				ExternCall ext{bb, "mdl_matmul_q_" + *kernelSuffix(ai->dtype.value())};
 				auto pa = ext.input(m.a, "A");
 				auto pq = ext.input(m.b, "q");
 				auto pscales = ext.input(m.quant->scales, "scales");
-				PrimExpr pzeros = m.quant->zeros ? ext.input(*m.quant->zeros, "zeros") : pq; // ignored without zeros
-				PrimExpr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;
-				PrimExpr paddend = m.addend ? ext.input(*m.addend, "addend") : pa;
-				auto pout = ext.output(resultShape, ai->dtype);
-				auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
-				auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::DataType::Int(32), v); };
+				Expr pzeros = m.quant->zeros ? ext.input(*m.quant->zeros, "zeros") : pq; // ignored without zeros
+				Expr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;
+				Expr paddend = m.addend ? ext.input(*m.addend, "addend") : pa;
+				auto pout = ext.output(resultShape, ai->dtype.value());
+				auto i64 = [](PrimExpr e) { return ::tvm::prim::cast(::tvm::PrimType::Int(64), e); };
+				auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::PrimType::Int(32), v); };
 				return ext.finish(
 						{pout,
 						 pa,
@@ -662,7 +647,7 @@ namespace mdl::backend::tvm {
 						 pzeros,
 						 i32(m.quant->zeros ? 1 : 0),
 						 i32(static_cast<int>(m.quant->format)),
-						 i64(::tvm::IntImm(::tvm::DataType::Int(64), m.quant->group)),
+						 i64(::tvm::IntImm(::tvm::PrimType::Int(64), m.quant->group)),
 						 pbias,
 						 i32(m.bias ? 1 : 0),
 						 i64(M),
@@ -675,7 +660,7 @@ namespace mdl::backend::tvm {
 						 paddend,
 						 i32(m.addend ? 1 : 0),
 						 i32(m.activation),
-						 ::tvm::FloatImm(::tvm::DataType::Float(32), m.alpha)}
+						 ::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha)}
 				);
 			}
 			if (batch.size() > 2)
@@ -683,19 +668,19 @@ namespace mdl::backend::tvm {
 			while (batch.size() < 2) { // outer dimensions of size 1 (with the strides of a contiguous outer dimension)
 				const Dim next = batch.empty() ? Dim{M, aM, zero, oM} : batch.front();
 				batch.insert(
-						batch.begin(), Dim{::tvm::IntImm(::tvm::DataType::Int(64), 1), next.a * next.size,
+						batch.begin(), Dim{::tvm::IntImm(::tvm::PrimType::Int(64), 1), next.a * next.size,
 										   next.b * next.size, next.out * next.size}
 				);
 			}
 
-			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype)};
+			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype.value())};
 			auto pa = ext.input(m.a, "A");
 			auto pb = ext.input(m.b, "B");
-			PrimExpr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;		   // ignored if has_bias == 0
-			PrimExpr paddend = m.addend ? ext.input(*m.addend, "addend") : pa; // ignored if has_addend == 0
-			auto pout = ext.output(resultShape, ai->dtype);
-			auto i64 = [](PrimExpr e) { return ::tvm::cast(::tvm::DataType::Int(64), e); };
-			auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::DataType::Int(32), v); };
+			Expr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;		   // ignored if has_bias == 0
+			Expr paddend = m.addend ? ext.input(*m.addend, "addend") : pa; // ignored if has_addend == 0
+			auto pout = ext.output(resultShape, ai->dtype.value());
+			auto i64 = [](PrimExpr e) { return ::tvm::prim::cast(::tvm::PrimType::Int(64), e); };
+			auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::PrimType::Int(32), v); };
 			return ext.finish(
 					{pout,
 					 pa,
@@ -722,7 +707,7 @@ namespace mdl::backend::tvm {
 					 paddend,
 					 i32(m.addend ? 1 : 0),
 					 i32(m.activation),
-					 ::tvm::FloatImm(::tvm::DataType::Float(32), m.alpha)}
+					 ::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha)}
 			);
 		}
 
@@ -742,12 +727,7 @@ namespace mdl::backend::tvm {
 			TECall te{bb, "matmul"};
 			auto ta = te.tensor(m.a, "A");
 			auto tb = te.tensor(m.b, "B");
-			auto axes = [](const Perm& p) {
-				Array<Integer> result;
-				for (int64_t x : p)
-					result.push_back(Integer(static_cast<int>(x)));
-				return result;
-			};
+			auto axes = [](const Perm& p) { return Array<int64_t>(p.begin(), p.end()); };
 			if (!m.permA.empty() && !isIdentity(m.permA))
 				ta = topi::transpose(ta, axes(m.permA));
 			if (!m.permB.empty() && !isIdentity(m.permB))
@@ -759,11 +739,14 @@ namespace mdl::backend::tvm {
 			if (m.activation == 1)
 				out = te::compute(
 						out->shape,
-						[&](const Array<tirx::Var>& i) {
-							PrimExpr v =
-									::tvm::cast(::tvm::DataType::Float(32), out(Array<PrimExpr>{i.begin(), i.end()}));
-							auto c = [](double d) { return ::tvm::tirx::make_const(::tvm::DataType::Float(32), d); };
-							return ::tvm::cast(out->dtype, v * c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2))));
+						[&](const Array<::tvm::PrimVar>& i) {
+							PrimExpr v = ::tvm::prim::cast(
+									::tvm::PrimType::Float(32), out(Array<PrimExpr>{i.begin(), i.end()})
+							);
+							auto c = [](double d) { return ::tvm::prim::MakeConst(::tvm::PrimType::Float(32), d); };
+							return ::tvm::prim::cast(
+									out->dtype, v * c(0.5) * (c(1.0) + ::tvm::prim::erf(v * c(M_SQRT1_2)))
+							);
 						},
 						"T_gelu", topi::kElementWise
 				);
@@ -776,24 +759,25 @@ namespace mdl::backend::tvm {
 
 		// ── mdl.matmul operator ───────────────────────────────────────────────────
 
-		::tvm::relax::StructInfo inferMatmul(const Call& call, const BlockBuilder& ctx) {
+		::tvm::Type inferMatmul(const Call& call, const BlockBuilder& ctx) {
 			MatmulArgs args{call};
 			const auto* ai = tensorInfo(args.a);
-			return TensorStructInfo(ShapeExpr(permuted(args.productShape(), args.permOut)), ai->dtype, ai->vdevice);
+			return TensorType(ShapeExpr(permuted(args.productShape(), args.permOut)), ai->dtype.value(), ai->vdevice);
 		}
 
 		Expr makeCall(const MatmulArgs& m) {
 			static const auto& op = ::tvm::Op::Get("mdl.matmul");
-			Expr bias = m.bias ? *m.bias : Expr(::tvm::relax::PrimValue::Int64(0));
-			Expr addend = m.addend ? *m.addend : Expr(::tvm::relax::PrimValue::Int64(0));
-			const Expr none = ::tvm::relax::PrimValue::Int64(0);
+			Expr bias = m.bias ? *m.bias : Expr(::tvm::IntImm(::tvm::PrimType::Int(64), 0));
+			Expr addend = m.addend ? *m.addend : Expr(::tvm::IntImm(::tvm::PrimType::Int(64), 0));
+			const Expr none = ::tvm::IntImm(::tvm::PrimType::Int(64), 0);
 			Expr scales = m.quant ? m.quant->scales : none;
 			Expr zeros = m.quant && m.quant->zeros ? *m.quant->zeros : none;
 			Expr quant = permExpr(m.quant ? Perm{static_cast<int64_t>(m.quant->format), m.quant->group} : Perm{});
 			return Call(
-					op, {m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
-						 ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), m.alpha)),
-						 ::tvm::relax::PrimValue::Int64(m.activation), addend, scales, zeros, quant}
+					::tvm::Type::Missing(), op,
+					{m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
+					 ::tvm::FloatImm(::tvm::PrimType::Float(64), m.alpha),
+					 ::tvm::IntImm(::tvm::PrimType::Int(64), m.activation), addend, scales, zeros, quant}
 			);
 		}
 
@@ -806,8 +790,8 @@ namespace mdl::backend::tvm {
 		public:
 			explicit FoldPermutes(const ::tvm::relax::Function& f) {
 				struct Counter : ::tvm::relax::ExprVisitor {
-					std::unordered_map<const ::tvm::relax::VarNode*, int>* uses = nullptr;
-					void VisitExpr_(const ::tvm::relax::VarNode* op) final { ++(*uses)[op]; }
+					std::unordered_map<const ::tvm::VarNode*, int>* uses = nullptr;
+					void VisitExpr_(const ::tvm::VarNode* op) final { ++(*uses)[op]; }
 					void VisitExpr_(const ::tvm::relax::DataflowVarNode* op) final { ++(*uses)[op]; }
 				} counter;
 				counter.uses = &uses;
@@ -816,15 +800,15 @@ namespace mdl::backend::tvm {
 
 			using ExprMutator::VisitExpr_;
 
-			Expr VisitExpr_(const ::tvm::relax::CallNode* op) final {
+			Expr VisitExpr_(const ::tvm::CallNode* op) final {
 				static const auto& matmul = ::tvm::Op::Get("mdl.matmul");
 				static const auto& permute = ::tvm::Op::Get("relax.permute_dims");
-				auto call = ::tvm::Downcast<Call>(ExprMutator::VisitExpr_(op));
+				auto call = (ExprMutator::VisitExpr_(op)).as_or_throw<Call>();
 				if (call->op.same_as(matmul)) {
 					MatmulArgs m{call};
 					bool changed = false;
 					auto fold = [&](Expr& x, Perm& perm) {
-						const ::tvm::relax::CallNode* p = boundCall(x, permute);
+						const ::tvm::CallNode* p = boundCall(x, permute);
 						if (p == nullptr)
 							return;
 						auto axes = axesOf(p);
@@ -839,7 +823,7 @@ namespace mdl::backend::tvm {
 					// A dequantized operand: the kernel reads the quantized values (the dequantization becomes dead
 					// if no other operation uses it).
 					static const auto& dequant = ::tvm::Op::Get("mdl.dequant");
-					if (const ::tvm::relax::CallNode* d = m.quant ? nullptr : boundCall(m.b, dequant)) {
+					if (const ::tvm::CallNode* d = m.quant ? nullptr : boundCall(m.b, dequant)) {
 						const Call dq = ::tvm::ffi::GetRef<Call>(d);
 						m.b = dq->args[0];
 						m.quant = Quantized{
@@ -854,7 +838,7 @@ namespace mdl::backend::tvm {
 				static const auto& add = ::tvm::Op::Get("relax.add");
 				// The product's single use: an activation (before a permutation or an addend is applied).
 				if (call->op.same_as(gelu) && singleUse(op->args[0])) {
-					const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[0], matmul);
+					const ::tvm::CallNode* matmulOp = boundCall(call->args[0], matmul);
 					if (matmulOp == nullptr)
 						return call;
 					MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
@@ -868,11 +852,11 @@ namespace mdl::backend::tvm {
 					for (size_t i = 0; i < 2; ++i) {
 						if (!singleUse(op->args[i]))
 							continue;
-						const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[i], matmul);
+						const ::tvm::CallNode* matmulOp = boundCall(call->args[i], matmul);
 						const Expr& other = call->args[1 - i];
 						const auto* product =
-								matmulOp ? ::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(call->args[i]) : nullptr;
-						const auto* addend = ::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(other);
+								matmulOp ? ::tvm::relax::GetTypeAs<TensorTypeNode>(call->args[i]) : nullptr;
+						const auto* addend = ::tvm::relax::GetTypeAs<TensorTypeNode>(other);
 						if (product == nullptr || addend == nullptr || addend->dtype != product->dtype ||
 							!product->shape.defined() || !addend->shape.defined() ||
 							!::tvm::ffi::StructuralEqual()(product->shape, addend->shape))
@@ -885,9 +869,9 @@ namespace mdl::backend::tvm {
 					}
 					return call;
 				}
-				const auto* arg = op->args.empty() ? nullptr : op->args[0].as<::tvm::relax::VarNode>();
+				const auto* arg = op->args.empty() ? nullptr : op->args[0].as<::tvm::VarNode>();
 				if (call->op.same_as(permute) && arg != nullptr && uses[arg] == 1) {
-					const ::tvm::relax::CallNode* matmulOp = boundCall(call->args[0], matmul);
+					const ::tvm::CallNode* matmulOp = boundCall(call->args[0], matmul);
 					auto axes = axesOf(call.get());
 					if (matmulOp == nullptr || !axes)
 						return call;
@@ -901,39 +885,37 @@ namespace mdl::backend::tvm {
 			}
 
 		private:
-			std::unordered_map<const ::tvm::relax::VarNode*, int> uses;
+			std::unordered_map<const ::tvm::VarNode*, int> uses;
 
 			bool singleUse(const Expr& e) {
-				const auto* var = e.as<::tvm::relax::VarNode>();
+				const auto* var = e.as<::tvm::VarNode>();
 				return var != nullptr && uses[var] == 1;
 			}
 
 			/** @brief The call of @p op bound to the variable @p e (in the rewritten function), if any. */
-			const ::tvm::relax::CallNode* boundCall(const Expr& e, const ::tvm::Op& op) {
-				const auto* var = e.as<::tvm::relax::VarNode>();
+			const ::tvm::CallNode* boundCall(const Expr& e, const ::tvm::Op& op) {
+				const auto* var = e.as<::tvm::VarNode>();
 				if (var == nullptr)
 					return nullptr;
-				auto value = builder_->LookupBinding(::tvm::ffi::GetRef<::tvm::relax::Var>(var));
-				const auto* call = value ? value.value().as<::tvm::relax::CallNode>() : nullptr;
+				auto value = builder_->LookupBinding(::tvm::ffi::GetRef<::tvm::Var>(var));
+				const auto* call = value ? value.value().as<::tvm::CallNode>() : nullptr;
 				return call != nullptr && call->op.same_as(op) ? call : nullptr;
 			}
 
-			static std::optional<Perm> axesOf(const ::tvm::relax::CallNode* permute) {
+			static std::optional<Perm> axesOf(const ::tvm::CallNode* permute) {
 				const auto* attrs = permute->attrs.as<::tvm::relax::PermuteDimsAttrs>();
 				if (attrs == nullptr || !attrs->axes.defined())
 					return std::nullopt;
 				Perm axes;
 				for (const auto& a : attrs->axes.value())
-					axes.push_back(a->value);
+					axes.push_back(a);
 				return axes;
 			}
 		};
 	} // namespace
 
 	Expr makeMatmul(Expr a, Expr b, std::optional<Expr> bias, bool transB, double alpha, bool transA) {
-		auto rank = [](const Expr& e) {
-			return static_cast<size_t>(::tvm::relax::GetStructInfoAs<TensorStructInfoNode>(e)->ndim);
-		};
+		auto rank = [](const Expr& e) { return static_cast<size_t>(::tvm::relax::GetTypeAs<TensorTypeNode>(e)->ndim); };
 		MatmulArgs m{a, b};
 		m.bias = std::move(bias);
 		if (transA)
@@ -947,8 +929,9 @@ namespace mdl::backend::tvm {
 	Expr makeDequant(Expr q, Expr scales, Expr zeros, int64_t format, int64_t group) {
 		static const auto& op = ::tvm::Op::Get("mdl.dequant");
 		return Call(
-				op, {std::move(q), std::move(scales), std::move(zeros), ::tvm::relax::PrimValue::Int64(format),
-					 ::tvm::relax::PrimValue::Int64(group)}
+				::tvm::Type::Missing(), op,
+				{std::move(q), std::move(scales), std::move(zeros), ::tvm::IntImm(::tvm::PrimType::Int(64), format),
+				 ::tvm::IntImm(::tvm::PrimType::Int(64), group)}
 		);
 	}
 
@@ -959,39 +942,39 @@ namespace mdl::backend::tvm {
 			.add_argument("zeros", "Tensor | PrimValue", "The zero points [K/group, N] int8, or PrimValue(0).")
 			.add_argument("format", "PrimValue", "The format (builtins::QuantFormat).")
 			.add_argument("group", "PrimValue", "The number of values of K per scale.")
-			.set_attr<::tvm::relax::FInferStructInfo>(
-					"FInferStructInfo",
-					[](const Call& call, const BlockBuilder&) -> ::tvm::relax::StructInfo {
+			.set_attr<::tvm::relax::FInferType>(
+					"FInferType",
+					[](const Call& call, const BlockBuilder&) -> ::tvm::Type {
 						auto q = shapeOf(call->args[0]);
 						const int64_t format = intValue(call->args[3]);
 						const bool packed = format != static_cast<int64_t>(mdl::builtins::QuantFormat::int8);
 						Array<PrimExpr> shape{q[0], packed ? q[1] * 2 : q[1]};
-						return TensorStructInfo(ShapeExpr(shape), tensorInfo(call->args[1])->dtype);
+						return TensorType(ShapeExpr(shape), tensorInfo(call->args[1])->dtype.value());
 					}
 			)
-			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
+			.set_attr<bool>("FPurity", true);
 
 	Expr makeGeluBackward(Expr x, Expr dy) {
 		static const auto& op = ::tvm::Op::Get("mdl.gelu_backward");
-		return Call(op, {std::move(x), std::move(dy)});
+		return Call(::tvm::Type::Missing(), op, {std::move(x), std::move(dy)});
 	}
 
 	TVM_REGISTER_OP("mdl.gelu_backward")
 			.set_num_inputs(2)
 			.add_argument("x", "Tensor", "The input of GELU.")
 			.add_argument("dy", "Tensor", "The cotangent of GELU's result (same shape).")
-			.set_attr<::tvm::relax::FInferStructInfo>(
-					"FInferStructInfo",
-					[](const Call& call, const BlockBuilder&) -> ::tvm::relax::StructInfo {
-						return ::tvm::relax::GetStructInfo(call->args[1]);
+			.set_attr<::tvm::relax::FInferType>(
+					"FInferType",
+					[](const Call& call, const BlockBuilder&) -> ::tvm::Type {
+						return ::tvm::relax::GetType(call->args[1]);
 					}
 			)
-			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
+			.set_attr<bool>("FPurity", true);
 
 	::tvm::transform::Pass foldPermutesIntoMatmul() {
 		return ::tvm::relax::transform::CreateFunctionPass(
 				[](::tvm::relax::Function f, ::tvm::IRModule, ::tvm::transform::PassContext) {
-					return ::tvm::Downcast<::tvm::relax::Function>(FoldPermutes(f).VisitExpr(f));
+					return (FoldPermutes(f).VisitExpr(f)).as_or_throw<::tvm::relax::Function>();
 				},
 				0, "mdl.FoldPermutesIntoMatmul", {}
 		);
@@ -1013,8 +996,8 @@ namespace mdl::backend::tvm {
 			)
 			.add_argument("zeros", "Tensor | PrimValue", "If b is quantized: the zero points or PrimValue(0).")
 			.add_argument("quant", "ShapeExpr", "If b is quantized: [format, group] of mdl.dequant, else empty.")
-			.set_attr<::tvm::relax::FInferStructInfo>("FInferStructInfo", inferMatmul)
-			.set_attr<::tvm::Bool>("FPurity", ::tvm::Bool(true));
+			.set_attr<::tvm::relax::FInferType>("FInferType", inferMatmul)
+			.set_attr<bool>("FPurity", true);
 
 	// ── handler map ──────────────────────────────────────────────────────────────
 
@@ -1053,7 +1036,7 @@ namespace mdl::backend::tvm {
 		map.Set("relax.reshape", wrap([](const BlockBuilder& bb, const Call& call) {
 					TECall te{bb, "reshape"};
 					auto x = te.tensor(call->args[0]);
-					return te.finish(topi::reshape(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
+					return te.finish(topi::reshape(x, (call->args[1]).as_or_throw<ShapeExpr>()->values));
 				}));
 		map.Set("relax.permute_dims", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::PermuteDimsAttrs>();
@@ -1063,14 +1046,14 @@ namespace mdl::backend::tvm {
 		map.Set("relax.broadcast_to", wrap([](const BlockBuilder& bb, const Call& call) {
 					TECall te{bb, "broadcast_to"};
 					auto x = te.tensor(call->args[0]);
-					return te.finish(topi::broadcast_to(x, ::tvm::Downcast<ShapeExpr>(call->args[1])->values));
+					return te.finish(topi::broadcast_to(x, (call->args[1]).as_or_throw<ShapeExpr>()->values));
 				}));
 
 		map.Set("relax.concat", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::ConcatAttrs>();
 					TECall te{bb, "concat"};
 					Array<te::Tensor> parts;
-					for (const auto& field : ::tvm::Downcast<::tvm::relax::Tuple>(call->args[0])->fields)
+					for (const auto& field : (call->args[0]).as_or_throw<::tvm::relax::Tuple>()->fields)
 						parts.push_back(te.tensor(field));
 					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
 					return te.finish(topi::concatenate(parts, axis));
@@ -1078,19 +1061,19 @@ namespace mdl::backend::tvm {
 		map.Set("relax.collapse_sum_to", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					// Sums over leading dimensions (e.g. the gradient of a bias): a column sum of [M, N] by the kernel.
 					const auto& x = call->args[0];
-					const auto dtype = tensorInfo(x)->dtype;
+					const auto dtype = tensorInfo(x)->dtype.value();
 					auto shape = shapeOf(x);
-					auto target = ::tvm::Downcast<ShapeExpr>(call->args[1])->values;
-					::tvm::arith::Analyzer analyzer;
+					auto target = (call->args[1]).as_or_throw<ShapeExpr>()->values;
+					::tvm::sym::Analyzer analyzer;
 					size_t lead = 0; // leading 1s of the target
-					while (lead < target.size() && analyzer.CanProveEqual(target[lead], 1))
+					while (lead < target.size() && analyzer->CanProveEqual(target[lead], 1))
 						++lead;
 					const size_t t = target.size() - lead;
 					// (A sum of a product, e.g. the gradient of LayerNorm's scale, fuses with the product instead.)
 					bool ofProduct = false;
-					if (const auto* var = x.as<::tvm::relax::VarNode>())
-						if (auto value = bb->LookupBinding(::tvm::ffi::GetRef<::tvm::relax::Var>(var)))
-							if (const auto* producer = value.value().as<::tvm::relax::CallNode>()) {
+					if (const auto* var = x.as<::tvm::VarNode>())
+						if (auto value = bb->LookupBinding(::tvm::ffi::GetRef<::tvm::Var>(var)))
+							if (const auto* producer = value.value().as<::tvm::CallNode>()) {
 								static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
 								const auto* kernel = producer->op.same_as(callTir) && !producer->args.empty()
 															 ? producer->args[0].as<::tvm::GlobalVarNode>()
@@ -1101,7 +1084,7 @@ namespace mdl::backend::tvm {
 							}
 					bool suffix = vendor && !ofProduct && kernelSuffix(dtype) && t > 0 && t < shape.size();
 					for (size_t i = 0; suffix && i < t; ++i)
-						suffix = analyzer.CanProveEqual(target[lead + i], shape[shape.size() - t + i]);
+						suffix = analyzer->CanProveEqual(target[lead + i], shape[shape.size() - t + i]);
 					if (suffix) {
 						ExternCall ext{bb, "mdl_sum_rows_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
@@ -1166,7 +1149,7 @@ namespace mdl::backend::tvm {
 					const auto* attrs = call->attrs.as<::tvm::relax::SoftmaxAttrs>();
 					const auto& x = call->args[0];
 					auto shape = shapeOf(x);
-					const auto dtype = tensorInfo(x)->dtype;
+					const auto dtype = tensorInfo(x)->dtype.value();
 					if (vendor && isLastAxis(attrs->axis, shape.size()) && kernelSuffix(dtype)) {
 						ExternCall ext{bb, "mdl_softmax_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
@@ -1182,7 +1165,7 @@ namespace mdl::backend::tvm {
 		map.Set("relax.nn.gelu", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto& x = call->args[0];
 					auto shape = shapeOf(x);
-					const auto dtype = tensorInfo(x)->dtype;
+					const auto dtype = tensorInfo(x)->dtype.value();
 					if (vendor && kernelSuffix(dtype)) {
 						ExternCall ext{bb, "mdl_gelu_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
@@ -1193,10 +1176,10 @@ namespace mdl::backend::tvm {
 					auto t = te.tensor(x);
 					return te.finish(te::compute(
 							t->shape,
-							[&](const Array<tirx::Var>& i) {
+							[&](const Array<::tvm::PrimVar>& i) {
 								PrimExpr v = t(Array<PrimExpr>{i.begin(), i.end()});
-								auto c = [&](double d) { return ::tvm::tirx::make_const(t->dtype, d); };
-								return v * c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2)));
+								auto c = [&](double d) { return ::tvm::prim::MakeConst(t->dtype, d); };
+								return v * c(0.5) * (c(1.0) + ::tvm::prim::erf(v * c(M_SQRT1_2)));
 							},
 							"T_gelu", topi::kElementWise
 					));
@@ -1215,8 +1198,8 @@ namespace mdl::backend::tvm {
 		map.Set("mdl.gelu_backward", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto &x = call->args[0], &dy = call->args[1];
 					auto shape = shapeOf(dy);
-					const auto dtype = tensorInfo(dy)->dtype;
-					if (vendor && kernelSuffix(dtype) && tensorInfo(x)->dtype == dtype &&
+					const auto dtype = tensorInfo(dy)->dtype.value();
+					if (vendor && kernelSuffix(dtype) && tensorInfo(x)->dtype.value() == dtype &&
 						::tvm::ffi::StructuralEqual()(shapeOf(x), shape)) {
 						ExternCall ext{bb, "mdl_gelu_backward_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
@@ -1230,14 +1213,14 @@ namespace mdl::backend::tvm {
 					auto tdy = te.tensor(dy, "dy");
 					return te.finish(te::compute(
 							tdy->shape,
-							[&](const Array<tirx::Var>& i) {
-								const auto f32 = ::tvm::DataType::Float(32);
+							[&](const Array<::tvm::PrimVar>& i) {
+								const auto f32 = ::tvm::PrimType::Float(32);
 								Array<PrimExpr> index{i.begin(), i.end()};
-								PrimExpr v = ::tvm::cast(f32, tx(index));
-								auto c = [&](double d) { return ::tvm::tirx::make_const(f32, d); };
-								PrimExpr grad = c(0.5) * (c(1.0) + ::tvm::erf(v * c(M_SQRT1_2))) +
-												v * ::tvm::exp(c(-0.5) * v * v) * c(0.3989422804014327);
-								return ::tvm::cast(tdy->dtype, ::tvm::cast(f32, tdy(index)) * grad);
+								PrimExpr v = ::tvm::prim::cast(f32, tx(index));
+								auto c = [&](double d) { return ::tvm::prim::MakeConst(f32, d); };
+								PrimExpr grad = c(0.5) * (c(1.0) + ::tvm::prim::erf(v * c(M_SQRT1_2))) +
+												v * ::tvm::prim::exp(c(-0.5) * v * v) * c(0.3989422804014327);
+								return ::tvm::prim::cast(tdy->dtype, ::tvm::prim::cast(f32, tdy(index)) * grad);
 							},
 							"T_gelu_backward", topi::kElementWise
 					));
@@ -1259,24 +1242,21 @@ namespace mdl::backend::tvm {
 				}));
 		map.Set("relax.one_hot", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::OneHotAttrs>();
-					const auto* on = call->args[1].as<::tvm::relax::PrimValueNode>();
-					const auto* off = call->args[2].as<::tvm::relax::PrimValueNode>();
+					const PrimExpr on = scalarValue(call->args[1]).value(), off = scalarValue(call->args[2]).value();
 					TECall te{bb, "one_hot"};
 					auto labels = te.tensor(call->args[0], "labels");
 					// The output shape as Relax inferred it (int64 dims; TOPI would use an int32 depth).
-					return te.finish(topi::one_hot(
-							labels, on->value, off->value, attrs->depth, attrs->axis, on->value.dtype(), shapeOf(call)
-					));
+					return te.finish(topi::one_hot(labels, on, off, attrs->depth, attrs->axis, on.ty(), shapeOf(call)));
 				}));
 
 		map.Set("relax.nn.layer_norm", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto* attrs = call->attrs.as<::tvm::relax::LayerNormAttrs>();
 					const auto &x = call->args[0], &gamma = call->args[1], &beta = call->args[2];
 					auto shape = shapeOf(x);
-					const bool lastAxis = attrs->axes.size() == 1 && isLastAxis(attrs->axes[0]->value, shape.size());
-					const auto dtype = tensorInfo(x)->dtype;
+					const bool lastAxis = attrs->axes.size() == 1 && isLastAxis(attrs->axes[0], shape.size());
+					const auto dtype = tensorInfo(x)->dtype.value();
 					if (vendor && lastAxis && attrs->center && attrs->scale && kernelSuffix(dtype) &&
-						tensorInfo(gamma)->dtype == dtype && tensorInfo(beta)->dtype == dtype) {
+						tensorInfo(gamma)->dtype.value() == dtype && tensorInfo(beta)->dtype.value() == dtype) {
 						ExternCall ext{bb, "mdl_layer_norm_" + *kernelSuffix(dtype)};
 						auto px = ext.input(x, "x");
 						auto pg = ext.input(gamma, "gamma");
@@ -1285,7 +1265,7 @@ namespace mdl::backend::tvm {
 						return ext.finish(
 								{pout, px, pg, pb, product(shape, 0, shape.size() - 1),
 								 product(shape, shape.size() - 1, shape.size()),
-								 ::tvm::FloatImm(::tvm::DataType::Float(32), attrs->epsilon)}
+								 ::tvm::FloatImm(::tvm::PrimType::Float(32), attrs->epsilon)}
 						);
 					}
 					TECall te{bb, "layer_norm"};
