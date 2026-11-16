@@ -1,0 +1,42 @@
+# A test package: a scaled addition `2 * x + y` as one C function (the library is built by the tests).
+schema: 1
+package: scaled_add
+version: "1.0"
+description: Test kernel for the kernel-package tests.
+
+artifacts:
+  host-linux:
+    kind: static-library
+    path: lib/libscaled_add.a
+    platform: { os: linux, arch: x86_64, abi: gnu }
+    dependencies:
+      - { kind: system-library, name: m }
+
+patterns:
+  scaled-add:
+    op: relax.add
+    args:
+      - op: relax.multiply
+        args: [{ capture: x }, { const: 2.0 }]
+      - { capture: y }
+
+implementations:
+  scaled-add-f32:
+    pattern: scaled-add
+    artifacts: [host-linux]
+    priority: 10
+    symbol: test_scaled_add_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data, align: 64 }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $y.data }
+        - { type: int64, value: "prod($x.shape)" }
+      outputs:
+        - { shape: $x.shape, dtype: $x.dtype }
+    applicability:
+      dtype: { x: float32, y: float32 }
+      layout: { x: row-major, y: row-major }
+      where: ["$x.shape == $y.shape"]
+    guarantees: { numerics: { exact: true } }

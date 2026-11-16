@@ -11,4 +11,5 @@ mdl_add_command(mdls mdls.cpp mdls_lib)               # the language server
 if(MDL_ENABLE_COMPILER)
 	mdl_add_command(mdlc mdlc.cpp mdl)         # the compiler
 	mdl_add_command(mdl-info mdl-info.cpp mdl) # information about TVM targets
+	mdl_add_command(mdl-kernels mdl-kernels.cpp mdl) # inspects kernel packages
 endif()

@@ -1,0 +1,22 @@
+# A package with only a CUDA artifact (reserved: listed as not supported; compilation continues without it).
+schema: 1
+package: cuda_only
+version: "0.1"
+artifacts:
+  sm80:
+    kind: cubin
+    path: kernels.cubin
+    device-arch: sm_80
+patterns:
+  relu:
+    op: relax.nn.relu
+    args: [{ capture: x }]
+implementations:
+  relu-f32:
+    pattern: relu
+    artifacts: [sm80]
+    symbol: relu_f32
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
