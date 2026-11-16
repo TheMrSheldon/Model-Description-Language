@@ -2346,7 +2346,7 @@ namespace mdl {
 				return mem.value().get();
 			} else if (auto* nodePtr =
 							   std::get_if<const Node*>(&baseObj)) { // Module function access: node of BoundModuleType.
-				if (std::holds_alternative<mdl::ErrorNode>(**nodePtr)) {
+				if (isErroneous(**nodePtr)) {
 					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
 					return &graph().addErrorNode();
 				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
@@ -2706,25 +2706,39 @@ namespace mdl {
 			return result;
 		}
 
+		/** @brief Whether @p node is an error (already reported): an error node, or a value of erroneous type. */
+		static bool isErroneous(const Node& node) {
+			if (std::holds_alternative<ErrorNode>(node))
+				return true;
+			const auto* p = std::get_if<PrimitiveType>(&getDataType(node));
+			return p != nullptr && *p == PrimitiveType::error;
+		}
+
 		std::any methodcallExpression(mdlParser::MethodcallExpressionContext* ctx) {
 			if (auto converted = conversion(ctx))
 				return *converted;
+			// After an error in the callee (already reported), the arguments are still checked (and their uses
+			// recorded, e.g. for -Wunused).
+			auto failed = [&]() -> std::any {
+				for (auto* arg : ctx->args)
+					arg->accept(this);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			};
 			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
 			// `instance(...)`. Without this, the function would reference the module's unqualified weights.
 			const Node* receiver = nullptr;
 			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func)) {
 				auto baseObj = asObject(access->expr()->accept(this), access->expr()->start);
 				if (auto* base = std::get_if<const Node*>(&baseObj)) {
-					if (std::holds_alternative<ErrorNode>(**base))
-						return &graph().addErrorNode(); // already reported
+					if (isErroneous(**base))
+						return failed(); // already reported
 					if (std::holds_alternative<BoundModuleType>(mdl::getDataType(**base)))
 						receiver = *base;
 				}
 			}
 			auto calleeObj = asObject(ctx->func->accept(this), ctx->func->start);
-			if (std::holds_alternative<const Node*>(calleeObj) &&
-				std::holds_alternative<ErrorNode>(*std::get<const Node*>(calleeObj)))
-				return &graph().addErrorNode();
+			if (std::holds_alternative<const Node*>(calleeObj) && isErroneous(*std::get<const Node*>(calleeObj)))
+				return failed();
 
 			// Evaluate argument expressions.
 			std::vector<std::reference_wrapper<const Node>> args;
