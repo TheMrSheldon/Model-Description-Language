@@ -46,7 +46,7 @@ namespace mdl::backend::tvm {
 		 * @brief The symbolic dimensions of `...` (the arguments of the size function). The producer writes them into
 		 * the header of the context buffer; the consumer reads those that its other arguments do not determine.
 		 */
-		::tvm::ffi::Array<::tvm::tirx::Var> dims;
+		::tvm::ffi::Array<::tvm::PrimVar> dims;
 	};
 
 	/** @param packing the packed tensors of the exported functions by global symbol (see EntrySignature). */

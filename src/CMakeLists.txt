@@ -59,10 +59,12 @@ if(MDL_ENABLE_COMPILER)
 	#   BLAS contrib is not needed.
 	# - TVM's parallel loops use OpenMP so that TVM-generated kernels and oneDNN share one thread pool (no
 	#   oversubscription).
-	# - Pinned to 0.24: TVM 0.25+ replaces Relax StructInfo by a new type system and removes TIR buffer maps, which
-	#   requires porting the whole backend (planned as a separate upgrade).
+	# - Pinned to v0.27.0.post1 (= v0.27.0 + one CUDA fix) by commit, so that the exact revision is reproducible.
 	CPMAddPackage(
-		URI "gh:apache/tvm@0.24.0"
+		NAME tvm
+		VERSION 0.27.0
+		GITHUB_REPOSITORY apache/tvm
+		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
 		OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"

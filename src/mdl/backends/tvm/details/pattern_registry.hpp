@@ -29,7 +29,7 @@ namespace mdl::backend::tvm {
 	 */
 	using RewriterFn = std::function<::tvm::relax::Expr(
 			::tvm::relax::Expr, ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr>,
-			const ::tvm::ffi::Map<::tvm::relax::Var, ::tvm::relax::Expr>& /* bindings of the function */
+			const ::tvm::ffi::Map<::tvm::Var, ::tvm::relax::Expr>& /* bindings of the function */
 	)>;
 
 	/** @brief One recognizable decomposition and its replacement. */

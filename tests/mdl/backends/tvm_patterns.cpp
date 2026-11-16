@@ -10,7 +10,7 @@
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/expr_functor.h>
-#include <tvm/relax/struct_info.h>
+#include <tvm/relax/type.h>
 #include <tvm/runtime/tensor.h>
 
 #include <functional>
@@ -18,20 +18,24 @@
 #include <vector>
 
 using namespace tvm::relax;
+using tvm::Call;
+using tvm::CallNode;
+using tvm::Expr;
+using tvm::Var;
 using tvm::ffi::Array;
 
 namespace {
 	Expr constant(float value) {
-		auto data = tvm::runtime::Tensor::Empty(tvm::ffi::Shape{}, tvm::DataType::Float(32), DLDevice{kDLCPU, 0});
+		auto data = tvm::runtime::Tensor::Empty(tvm::ffi::Shape{}, tvm::PrimType::Float(32)->dtype, DLDevice{kDLCPU, 0});
 		data.CopyFromBytes(&value, sizeof(float));
-		return Constant(data);
+		return MakeTensorConst(data);
 	}
 
-	Expr op(const char* name, Array<Expr> args) { return Call(tvm::Op::Get(name), args); }
+	Expr op(const char* name, Array<Expr> args) { return Call(tvm::Type::Missing(), tvm::Op::Get(name), args); }
 
 	Expr reduce(const char* name, Expr x, bool keepdims) {
 		auto fn = tvm::ffi::Function::GetGlobalRequired(std::string("relax.op.") + name);
-		return fn(x, Array<tvm::Integer>{-1}, keepdims).cast<Expr>();
+		return fn(x, Array<int64_t>{-1}, keepdims).cast<Expr>();
 	}
 
 	/** Builds `f(x[, gamma, beta]) = body(...)` with x of shape [rows, 8] and applies the backend patterns. */
@@ -40,18 +44,18 @@ namespace {
 			int64_t rows = 4
 	) {
 		auto bb = BlockBuilder::Create(std::nullopt);
-		std::vector<Var> params{Var("x", TensorStructInfo(ShapeExpr(Array<tvm::PrimExpr>{tvm::IntImm(tvm::DataType::Int(64), rows), 8}), tvm::DataType::Float(32)))};
+		std::vector<Var> params{Var("x", TensorType(ShapeExpr(Array<tvm::PrimExpr>{tvm::IntImm(tvm::PrimType::Int(64), rows), 8}), tvm::PrimType::Float(32)))};
 		for (size_t i = 1; i < numParams; ++i)
-			params.push_back(Var("p" + std::to_string(i), TensorStructInfo(ShapeExpr({8}), tvm::DataType::Float(32))));
+			params.push_back(Var("p" + std::to_string(i), TensorType(ShapeExpr({8}), tvm::PrimType::Float(32))));
 		bb->BeginScope(Array<Var>(params.begin(), params.end()));
 		bb->BeginDataflowBlock();
 		auto out = bb->EmitOutput(body(bb, params));
 		auto block = bb->EndBlock();
 		bb->EndScope();
-		Function func(Array<Var>(params.begin(), params.end()), SeqExpr({block}, out), GetStructInfo(out));
+		Function func(Array<Var>(params.begin(), params.end()), SeqExpr({block}, out), GetType(out));
 		auto mod = tvm::IRModule({{tvm::GlobalVar("main"), func}});
 		mod = mdl::backend::tvm::applyPatterns(mod, mdl::backend::tvm::defaultPatterns());
-		return tvm::Downcast<Function>(mod->Lookup("main"));
+		return (mod->Lookup("main")).as_or_throw<Function>();
 	}
 
 	/** All calls of operator @p name in @p func. */
@@ -120,28 +124,28 @@ TEST_CASE("x @ W^T + b becomes mdl.matmul with transposed weight and bias", "[tv
 	auto bb = BlockBuilder::Create(std::nullopt);
 	auto f = [](BlockBuilder& bb, const std::vector<Var>& p) -> Expr {
 		static const auto permute = tvm::ffi::Function::GetGlobalRequired("relax.op.permute_dims");
-		auto wt = bb->Emit(permute(p[1], Array<tvm::Integer>{1, 0}).template cast<Expr>());
+		auto wt = bb->Emit(permute(p[1], Array<int64_t>{1, 0}).template cast<Expr>());
 		static const auto matmul = tvm::ffi::Function::GetGlobalRequired("relax.op.matmul");
-		auto prod = bb->Emit(matmul(p[0], wt, tvm::ffi::Optional<tvm::DataType>()).template cast<Expr>());
+		auto prod = bb->Emit(matmul(p[0], wt, tvm::ffi::Optional<tvm::PrimType>()).template cast<Expr>());
 		return op("relax.add", {prod, p[2]});
 	};
 	// Build with a [8, 8] weight (the generic helper only creates 1-D extra parameters, so do it manually).
 	std::vector<Var> params{
-			Var("x", TensorStructInfo(ShapeExpr({4, 8}), tvm::DataType::Float(32))),
-			Var("W", TensorStructInfo(ShapeExpr({8, 8}), tvm::DataType::Float(32))),
-			Var("b", TensorStructInfo(ShapeExpr({8}), tvm::DataType::Float(32))),
+			Var("x", TensorType(ShapeExpr({4, 8}), tvm::PrimType::Float(32))),
+			Var("W", TensorType(ShapeExpr({8, 8}), tvm::PrimType::Float(32))),
+			Var("b", TensorType(ShapeExpr({8}), tvm::PrimType::Float(32))),
 	};
 	bb->BeginScope(Array<Var>(params.begin(), params.end()));
 	bb->BeginDataflowBlock();
 	auto out = bb->EmitOutput(f(bb, params));
 	auto block = bb->EndBlock();
 	bb->EndScope();
-	Function func(Array<Var>(params.begin(), params.end()), SeqExpr({block}, out), GetStructInfo(out));
+	Function func(Array<Var>(params.begin(), params.end()), SeqExpr({block}, out), GetType(out));
 	auto mod = mdl::backend::tvm::applyPatterns(
 			tvm::IRModule({{tvm::GlobalVar("main"), func}}), mdl::backend::tvm::defaultPatterns()
 	);
-	auto rewritten = tvm::Downcast<Function>(mod->Lookup("main"));
+	auto rewritten = (mod->Lookup("main")).as_or_throw<Function>();
 	auto calls = callsOf(rewritten, "mdl.matmul");
 	REQUIRE(calls.size() == 1);
-	CHECK(GetStructInfoAs<TensorStructInfoNode>(calls[0]->args[2]) != nullptr); // bias fused
+	CHECK(GetTypeAs<TensorTypeNode>(calls[0]->args[2]) != nullptr); // bias fused
 }
