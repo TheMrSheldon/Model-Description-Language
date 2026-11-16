@@ -1,8 +1,8 @@
 // mdl-kernels: inspects the kernel packages of the kernel directories (see docs/kernels.md).
+#include "compile_cli.hpp"
+
 #include <mdl/kernels.hpp>
 #include <mdl/version.hpp>
-
-#include <CLI/CLI.hpp>
 
 #include <cstdio>
 #include <format>
@@ -100,6 +100,22 @@ int main(int argc, char* argv[]) {
 	auto* listCommand = app.add_subcommand("list", "Lists the kernel directories, packages, and their problems");
 	listCommand->add_option("source", source, "A source file: its project's .mdl/kernels is searched too");
 
+	// check and dump compile the model like mdlc (with the same options) up to the matching boundary.
+	CompileArgs checkArgs, dumpArgs;
+	bool explainAll = false;
+	auto* checkCommand = app.add_subcommand(
+			"check", "Matches the kernel packages against a model: the selected implementations (no code is generated)"
+	);
+	auto* checkConfig = addCompileOptions(*checkCommand, checkArgs);
+	checkCommand->add_flag(
+			"--explain", explainAll,
+			"Show every candidate with the verdict of each constraint and why it is (not) selected"
+	);
+	auto* dumpCommand = app.add_subcommand(
+			"dump", "Prints the model's Relax module at the matching boundary (what patterns match)"
+	);
+	auto* dumpConfig = addCompileOptions(*dumpCommand, dumpArgs);
+
 	try {
 		app.parse(argc, argv);
 	} catch (const CLI::ParseError& e) {
@@ -107,5 +123,26 @@ int main(int argc, char* argv[]) {
 	}
 	if (listCommand->parsed())
 		return list(explicitDirs, source);
+	auto inspect = [&](CompileArgs& args, CLI::Option* config, mdl::CompileOptions::KernelInspection mode) {
+		if (config->count() > 0)
+			args.argvals = config->as<std::string>();
+		args.compileOpts.kernelDirs.insert(
+				args.compileOpts.kernelDirs.begin(), explicitDirs.begin(), explicitDirs.end()
+		);
+		args.compileOpts.inspectKernels = mode;
+		args.compileOpts.inspectOut = &std::cout;
+		try {
+			runCompileCommand(args);
+		} catch (const std::exception& e) {
+			std::cerr << "mdl-kernels: error: " << e.what() << "\n";
+			return 1;
+		}
+		return 0;
+	};
+	using Inspection = mdl::CompileOptions::KernelInspection;
+	if (checkCommand->parsed())
+		return inspect(checkArgs, checkConfig, explainAll ? Inspection::explain : Inspection::brief);
+	if (dumpCommand->parsed())
+		return inspect(dumpArgs, dumpConfig, Inspection::dump);
 	return 0;
 }

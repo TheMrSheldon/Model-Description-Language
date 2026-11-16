@@ -39,38 +39,6 @@ namespace mdl::backend::tvm {
 			return e;
 		}
 
-		/** @brief The value of a scalar constant (0-d / single-element float constant or PrimValue). */
-		std::optional<double> scalarConstant(const Expr& e) {
-			if (auto tensor = tensorConstant(e)) {
-				const auto& data = *tensor;
-				if (data.Shape().Product() != 1 || (data->dtype.code != kDLFloat && data->dtype.code != kDLBfloat))
-					return std::nullopt;
-				if (data->dtype.code == kDLBfloat && data->dtype.bits == 16) {
-					const uint32_t bits = static_cast<uint32_t>(static_cast<const uint16_t*>(data->data)[0]) << 16;
-					float value;
-					std::memcpy(&value, &bits, sizeof(value));
-					return value;
-				}
-				if (data->dtype.bits == 16) {
-					_Float16 half;
-					std::memcpy(&half, data->data, sizeof(half));
-					return static_cast<double>(half);
-				}
-				if (data->dtype.bits == 32)
-					return static_cast<const float*>(data->data)[0];
-				if (data->dtype.bits == 64)
-					return static_cast<const double*>(data->data)[0];
-				return std::nullopt;
-			}
-			if (scalarValue(e)) {
-				if (const auto* f = e.as<::tvm::FloatImmNode>())
-					return f->value;
-				if (const auto* i = e.as<::tvm::IntImmNode>())
-					return static_cast<double>(i->value);
-			}
-			return std::nullopt;
-		}
-
 		bool near(std::optional<double> value, double expected) {
 			return value && std::abs(*value - expected) <= 1e-6 * std::max(1.0, std::abs(expected));
 		}

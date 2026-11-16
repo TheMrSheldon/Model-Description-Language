@@ -3,6 +3,8 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,6 +57,20 @@ namespace mdl {
 
 		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/kernels.h). */
 		bool profile = false;
+
+		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/kernels.md and kernels::kernelDirs). */
+		std::vector<std::filesystem::path> kernelDirs;
+
+		/** @brief The source file (its project's `.mdl/kernels` is a kernel directory), if known. */
+		std::optional<std::filesystem::path> source;
+
+		/**
+		 * @brief Inspection of kernel packages (`mdl-kernels`): the compiler stops at the matching boundary and writes to
+		 * inspectOut instead of an output file: the selected implementations (brief), also every candidate with the
+		 * verdicts of its constraints (explain), or the Relax module at the boundary (dump).
+		 */
+		enum class KernelInspection { none, brief, explain, dump } inspectKernels = KernelInspection::none;
+		std::ostream* inspectOut = nullptr;
 
 		/** Directory for intermediate debug artifacts (IR dumps); empty to disable. */
 		std::filesystem::path dumpDir;

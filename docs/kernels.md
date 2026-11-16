@@ -4,9 +4,10 @@ Optimized kernels come from **kernel packages** in kernel directories. A package
 model, how to call its prebuilt implementation (a C function), and which binaries provide it for which platforms. The
 compiler selects implementations and falls back to TVM's code generation for everything else.
 
-**Status:** the package format (`schema: 1`), the kernel directories, and `mdl-kernels list` are implemented. Matching
-(`mdl-kernels check --explain`), selection, and linking follow; the built-in oneDNN kernels move into a package after
-that. Until then, the format's expressions and patterns are validated for structure only.
+**Status:** the package format (`schema: 1`), the kernel directories, matching and selection (`mdl-kernels list`,
+`check`, `dump`) are implemented. Compiling with the selected implementations, the link report, and the CMake
+integration follow (until then, `mdlc` compiles without packages); the built-in oneDNN kernels move into a package
+after that.
 
 ## Kernel directories
 Each immediate subdirectory of a kernel directory that contains a `package.yml` is a package. Its directory must have
@@ -28,6 +29,39 @@ $ mdl-kernels list [--kernels-dir DIR]... [model.dlm]
 lists the directories, the packages with their artifacts (and whether they can be used on this host) and
 implementations, the hidden packages, and the problems. The exit code is 1 if a package has problems. Listing never
 opens an artifact.
+
+## Matching a model: `mdl-kernels check` and `dump`
+```
+$ mdl-kernels check [--explain] [--kernels-dir DIR]... model.dlm [mdlc options]
+$ mdl-kernels dump model.dlm [mdlc options]
+```
+Both compile the model like `mdlc` (with the same options, e.g. `-a model.yml --ellipsis-rank 2 --grad forward`) up to
+the **matching boundary**: the Relax module after constant folding and the compiler's canonical forms (`relax.nn.*`
+operators, `mdl.matmul` with folded permutations), before legalization. No code is generated.
+
+- `dump` prints the module at the boundary: the representation that patterns are written against. (`mdlc --dump-dir`
+  writes it too, as `<stem>.relax-match.txt`.)
+- `check` lists the selected implementations per function. With `--explain`, it lists every candidate: the bindings it
+  would replace, its captures, the verdict of each constraint (proven, not met, or unknown, i.e. undecided at compile
+  time), and why it is selected or not:
+  ```
+  function M__forward
+    competing/scaled-add-aligned (priority 20) at v4
+      replaces v3, v4; captures $x = x, $y = y
+      proven   v3 is used only inside the region
+      proven   a usable artifact (host)
+      unknown  where $x.shape[0] % 16 == 0 (undecided at compile time: B % 16 == 0) [could be checked at runtime]
+      => ineligible: 1 constraint(s) undecided at compile time
+  ```
+
+**Selection.** All candidates are collected first (every pattern at every binding), so a small match cannot hide a
+larger one. A candidate is eligible if all its constraints are proven; an undecided constraint makes it ineligible
+(runtime checks for shape arithmetic are planned). Eligible candidates are selected by priority, then the number of
+replaced bindings (larger regions first), then the package and implementation names; a candidate is not selected if it
+replaces a binding that a selected one replaces. Captured inputs may be shared.
+
+**Region rules.** The bindings of a region are replaced by one call: an intermediate result that is also used outside
+the region makes the candidate ineligible.
 
 ## `package.yml`
 ```yaml

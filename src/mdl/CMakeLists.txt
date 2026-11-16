@@ -56,6 +56,7 @@ add_library(mdl
 	argvals.cpp
 	backends/tvm/tvm.cpp
 	backends/tvm/details/aot.cpp
+	backends/tvm/details/kernel_match.cpp
 	backends/tvm/details/legalize.cpp
 	backends/tvm/details/pattern_registry.cpp
 	backends/tvm/details/patterns.cpp
@@ -65,6 +66,7 @@ add_library(mdl
 	compiler.cpp
 	exports.cpp
 	kernels/discovery.cpp
+	kernels/expr.cpp
 	kernels/package.cpp
 	passes/autodiff.cpp
 	passes/masking.cpp
