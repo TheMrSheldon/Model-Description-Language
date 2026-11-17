@@ -20,4 +20,6 @@ module Pool[dim: uint] {
     /** The mean and sum of all valid elements (the flattened tensor: its masked rows are ignored). */
     float meanAll(x: masked float[..., dim]) => mean_flat(x);
     float sumAll(x: masked float[..., dim]) => sum_flat(x);
+    /** The same mean with the dimensions flattened in another order. */
+    float meanReordered(x: masked float[..., dim]) => mean(x[... d -> (d ...)]);
 }

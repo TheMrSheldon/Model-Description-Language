@@ -26,7 +26,9 @@ namespace mdl::masking {
 	 * The pass zeroes the masked positions of the floating-point inputs (so that all values at masked positions are
 	 * finite, whatever the caller passed there) and inserts masking where masked elements would mix with valid ones:
 	 *  - reductions over a masked dimension: `max`/`min` ignore masked elements, `sum` adds zeros, `mean` divides by the
-	 *    number of valid elements (likewise for reductions over flattened masked dimensions, e.g. `mean_flat`);
+	 *    number of valid elements. Likewise for a reduction over a flattening that merges the masked dimension with
+	 *    others (e.g. `mean_flat`, in any order of the merged dimensions); other operations between the flattening and
+	 *    the reduction are an error (the masked elements cannot be told apart after them);
 	 *  - contractions (`@`) over a masked dimension: masked elements are zero;
 	 *  - the outputs: zero at masked positions.
 	 * Elementwise operations need nothing: their masked elements stay masked. A function that does not use the mask has
