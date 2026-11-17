@@ -244,7 +244,7 @@ TEST_CASE("the gradient of an objective (scalar output) has no cotangent inputs"
 		module M[] {
 			W: float[4, 4]
 			float[..., 4] forward(x: float[..., 4]) => x @ W.T();
-			float loss(x: float[..., 4], target: float[..., 4]) => __builtin_mean_all((forward(x) - target) * (forward(x) - target));
+			float loss(x: float[..., 4], target: float[..., 4]) => __builtin_mean(((forward(x) - target) * (forward(x) - target))[... -> (...)]);
 		}
 	)");
 	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));

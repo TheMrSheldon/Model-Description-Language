@@ -77,7 +77,7 @@ index_item
       ;
 
 einops
-      : einops_spec_full '->' einops_spec_full ('|' (keyvalue (',' keyvalue)*)?)?
+      : einops_spec_full '->' einops_spec_full? ('|' (keyvalue (',' keyvalue)*)?)? // (no output axes: a scalar)
       ;
 
 einops_spec_full

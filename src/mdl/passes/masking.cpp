@@ -231,6 +231,45 @@ namespace mdl::masking {
 				return graph.addInvocationNode(FIDs::WHERE, {cond, x, graph.addConstNode(Atomic{value})});
 			}
 
+			/**
+			 * @brief A reduction over a last dimension @p last that flattens the masked dimensions together with others
+			 * (e.g. `mean(x[... -> (...)])` over all elements): the masked positions are filled with @p value in the
+			 * shape before the flattening; a mean divides by the fraction of valid elements. Assumes that the
+			 * dimensions of `...` come first in the flattened dimension (row-major, like `(... n)`). Null if the
+			 * argument is not such a flattening.
+			 */
+			const Node* reduceFlattened(const InvocationNode& inv, const shapes::Dim& last, double value) {
+				const auto* flat = std::get_if<InvocationNode>(&inv.arguments[0].get());
+				if (flat == nullptr || flat->id != FIDs::RESHAPE)
+					return nullptr;
+				if (!(last / merged).known)
+					return nullptr; // (not all dimensions of `...` are in the flattened dimension)
+				const Node& x = flat->arguments[0].get();
+				const auto& sx = shapeOf(x);
+				const auto dims = maskedDims(sx);
+				if (dims.empty())
+					return nullptr;
+				auto reshaped = [&](const Node& input) -> const Node& {
+					std::vector<NodeRef> args{std::cref(input)};
+					for (size_t i = 1; i < flat->arguments.size(); ++i)
+						args.push_back(std::cref(rebuild(flat->arguments[i].get())));
+					return graph.addInvocationNode(FIDs::RESHAPE, std::move(args));
+				};
+				const Node& filled = reshaped(fill(rebuild(x), sx, dims, value));
+				std::vector<NodeRef> args{std::cref(filled)};
+				for (size_t i = 1; i < inv.arguments.size(); ++i)
+					args.push_back(std::cref(rebuild(inv.arguments[i].get())));
+				const Node& reduced = graph.addInvocationNode(inv.id, std::move(args));
+				if (inv.id != FIDs::MEAN)
+					return &reduced;
+				// mean = sum / valid count = mean(filled) / (fraction of valid elements)
+				const Node& valid = graph.addInvocationNode(
+						FIDs::BROADCAST_LIKE, {indicator(combinedMask(sx, dims), x), rebuild(x)}
+				);
+				const Node& fraction = graph.addInvocationNode(FIDs::MEAN, {reshaped(valid)});
+				return &graph.addInvocationNode(FIDs::TENSOR_DIV, {reduced, fraction});
+			}
+
 			const Node& rebuildInvocation(const Node& node, const InvocationNode& inv) {
 				std::vector<NodeRef> args;
 				bool changed = false;
@@ -260,11 +299,14 @@ namespace mdl::masking {
 				case FIDs::MEAN: {
 					const auto& s = argShape(0);
 					const size_t last = s.size() - 1;
-					if (s.empty() || !isMasked(s[last]) || plain(0))
-						return make();
 					const double value = inv.id == FIDs::MAX   ? std::numeric_limits<float>::lowest()
 										 : inv.id == FIDs::MIN ? std::numeric_limits<float>::max()
 															   : 0.0;
+					if (!s.empty() && !isMasked(s[last]) && !plain(0))
+						if (const Node* r = reduceFlattened(inv, s[last], value))
+							return *r;
+					if (s.empty() || !isMasked(s[last]) || plain(0))
+						return make();
 					args[0] = std::cref(fill(args[0].get(), s, {last}, value));
 					const Node& reduced = graph.addInvocationNode(inv.id, std::vector<NodeRef>(args));
 					if (inv.id != FIDs::MEAN)
@@ -273,22 +315,6 @@ namespace mdl::masking {
 					const Node& indicator = this->indicator(dimMask(s, last), inv.arguments[0].get());
 					const Node& fraction = graph.addInvocationNode(FIDs::MEAN, {indicator});
 					return graph.addInvocationNode(FIDs::TENSOR_DIV, {reduced, fraction});
-				}
-				case FIDs::SUM_ALL:
-				case FIDs::MEAN_ALL: {
-					const auto& s = argShape(0);
-					auto dims = maskedDims(s);
-					if (dims.empty() || plain(0))
-						return make();
-					const Node& filled = fill(args[0].get(), s, dims, 0.0);
-					const Node& sum = graph.addInvocationNode(FIDs::SUM_ALL, {filled});
-					if (inv.id == FIDs::SUM_ALL)
-						return sum;
-					const Node& indicator = this->indicator(combinedMask(s, dims), inv.arguments[0].get());
-					const Node& count = graph.addInvocationNode(
-							FIDs::SUM_ALL, {graph.addInvocationNode(FIDs::BROADCAST_LIKE, {indicator, args[0]})}
-					);
-					return graph.addInvocationNode(FIDs::TENSOR_DIV, {sum, count});
 				}
 				case FIDs::TENSOR_DOT: {
 					// Contraction over K: the last dimension of a and the second-to-last (or only) one of b.

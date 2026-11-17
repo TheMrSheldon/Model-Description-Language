@@ -19,8 +19,8 @@ import std.statistics;
  * @return The softmax of \p x .
  */
 float[...] softmax(x: float[...]) {
-    auto power = exp(x - max(x));
-    return power / sum(power);
+    auto power = exp(x - max(x)[... -> ... 1]);
+    return power / sum(power)[... -> ... 1];
 }
 
 /**
@@ -29,7 +29,7 @@ float[...] softmax(x: float[...]) {
  */
 float[...] softmax_gradient(x: float[...], dy: float[...]) {
     auto y = softmax(x);  // the forward pass's node (common subexpression)
-    return y * (dy - sum(dy * y));
+    return y * (dy - sum(dy * y)[... -> ... 1]);
 }
 
 /**

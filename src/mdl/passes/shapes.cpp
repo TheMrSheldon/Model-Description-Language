@@ -273,16 +273,7 @@ namespace mdl::shapes {
 				// part of a group, the group keeps the others.)
 				case FIDs::MAX:
 				case FIDs::MIN:
-				case FIDs::SUM: {
-					Shape s = arg(0);
-					if (s.empty())
-						fail("reduction of a scalar");
-					if (s.back().group)
-						s.push_back(Dim::constant(1));
-					else
-						s.back() = Dim::constant(1);
-					return s;
-				}
+				case FIDs::SUM:
 				case FIDs::MEAN: {
 					Shape s = arg(0);
 					if (s.empty())
@@ -291,8 +282,6 @@ namespace mdl::shapes {
 						s.pop_back();
 					return s;
 				}
-				case FIDs::SUM_ALL:
-				case FIDs::MEAN_ALL:
 				case FIDs::VAR:
 					arg(0); // (the shapes of the whole function are inferred)
 					return {};
@@ -612,8 +601,6 @@ namespace mdl::shapes {
 							return static_cast<PrimitiveType>(*code);
 				return PrimitiveType::error;
 			case FIDs::MASK_OF:
-			case FIDs::SUM_ALL:
-			case FIDs::MEAN_ALL:
 			case FIDs::EQUAL_MASK:
 				return floatOf(0);
 			case FIDs::ONE_HOT_LIKE:
@@ -821,7 +808,7 @@ namespace mdl::shapes {
 		static const ConstantEvaluator evaluate = constantInteger;
 		try {
 			Shape shape = Rules{evaluate, true}.apply(id, args, [&](size_t i) -> const Shape& { return shapes[i]; });
-			if (id == FIDs::SUM_ALL || id == FIDs::MEAN_ALL || (!anyTensor && shape.empty()))
+			if (!anyTensor && shape.empty())
 				return element;
 			return TensorType{element, typeShape(shape)};
 		} catch (const ShapeError&) {

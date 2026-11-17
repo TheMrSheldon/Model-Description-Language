@@ -10,7 +10,8 @@ tensor[lhs -> rhs]
 tensor[lhs -> rhs | key=value, ...]
 ```
 
-`lhs` describes the current layout of the tensor; `rhs` describes the desired layout.
+`lhs` describes the current layout of the tensor; `rhs` describes the desired layout. An empty `rhs` makes a scalar
+of a tensor whose dimensions all have size 1 (e.g. `x[1 -> ]`, `x[... 1 -> ...]` to drop a trailing size-1 dimension).
 `key=value` pairs supply the sizes of named dimensions that cannot be inferred from the tensor shape alone (e.g. individual dims inside a merged group).
 
 ## Atoms
@@ -47,6 +48,10 @@ x[a b -> (a b)]             // flatten last two dims
 ```
 
 Emits a `RESHAPE` node with output shape `[a*b]`.
+
+```mdl
+x[... -> (...)]             // flatten all dimensions (e.g. mean_flat(x) = mean(x[... -> (...)]))
+```
 
 ### Split a dimension
 

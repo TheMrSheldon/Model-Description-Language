@@ -12,8 +12,12 @@ float[...] average(x: masked float[...]) => mean(x.data) / mean(x.mask);
 /**
  * @brief Averages the vectors of a masked sequence (`...` is the sequence; its masked elements are ignored).
  * `withOverload` uses the masked overload of `average`, `generic` the generic masking of `mean`; both must agree.
+ * `meanAll` and `sumAll` reduce all valid elements to a scalar.
  */
 module Pool[dim: uint] {
     float[dim] withOverload(x: masked float[..., dim]) => average(x[... d -> d ...]);
     float[dim] generic(x: masked float[..., dim]) => mean(x[... d -> d ...]);
+    /** The mean and sum of all valid elements (the flattened tensor: its masked rows are ignored). */
+    float meanAll(x: masked float[..., dim]) => mean_flat(x);
+    float sumAll(x: masked float[..., dim]) => sum_flat(x);
 }

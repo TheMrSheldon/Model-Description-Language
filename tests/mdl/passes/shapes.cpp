@@ -54,10 +54,10 @@ TEST_CASE("reductions, reshapes, and embeddings", "[shapes]") {
 		module M[] {
 			table: float[10, 4]
 			float[...] means(x: float[..., 4]) => __builtin_mean(x);
-			float[..., 4] sums(x: float[..., 4]) => x - __builtin_sum(x);
+			float[..., 4] sums(x: float[..., 4]) => x - __builtin_sum(x)[... -> ... 1];
 			float[..., 4] embed(ids: int[...]) => table[ids];
 			float[...] flat(x: float[..., 4]) => x[... d -> (...) d];
-			float total(x: float[..., 4]) => __builtin_mean_all(x);
+			float total(x: float[..., 4]) => __builtin_mean(x[... -> (...)]);
 		}
 	)");
 	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
@@ -74,16 +74,21 @@ TEST_CASE("reductions, reshapes, and embeddings", "[shapes]") {
 	check("total", "[]");
 }
 
-TEST_CASE("the graph types of max/min/sum keep the reduced axis like the backend", "[shapes]") {
+TEST_CASE("max/min/sum remove the reduced axis like mean (as their types say)", "[shapes]") {
 	auto unit = parseOrFail(R"(
 		module M[] {
-			float[...] squeezed(x: float[..., 4]) => __builtin_sum(x)[... 1 -> ...];
+			float[...] sums(x: float[..., 4]) => __builtin_sum(x);
+			float[...] maxima(x: float[..., 4]) => __builtin_max(x);
+			float total(x: float[4]) => __builtin_sum(x);
 		}
 	)");
-	const auto& f = std::get<ModuleType>(unit.definitions.at("M")).functions.at("squeezed");
-	auto r = shapes::infer(f, 2, evaluate);
-	REQUIRE(r.has_value());
-	CHECK(shapes::str(shapeAt(*r, f.outputs[0].get())) == "[B0, B1]");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	for (const auto& [fn, expected] : {std::pair{"sums", "[B0, B1]"}, {"maxima", "[B0, B1]"}, {"total", "[]"}}) {
+		const auto& f = m.functions.at(fn);
+		auto r = shapes::infer(f, 2, evaluate);
+		REQUIRE(r.has_value());
+		CHECK(shapes::str(shapeAt(*r, f.outputs[0].get())) == expected);
+	}
 }
 
 TEST_CASE("tensor indexing selects and removes axes like NumPy", "[shapes][indexing]") {

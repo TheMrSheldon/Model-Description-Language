@@ -10,7 +10,7 @@ import std.statistics;
  * @brief Mean squared error over all elements.
  * @ingroup Losses
  */
-float mse(prediction: float[...], target: float[...]) => mean_all((prediction - target) * (prediction - target));
+float mse(prediction: float[...], target: float[...]) => mean_flat((prediction - target) * (prediction - target));
 
 /**
  * @brief One-hot encoding of the integer `labels` with the shape of `like` (the number of classes is its last
@@ -25,7 +25,7 @@ float[...] one_hot_like(labels: int[...], like: float[...]) => __builtin_one_hot
  */
 float[...] logsumexp(x: float[...]) {
     auto m = max(x);
-    return m + log(sum(exp(x - m)));
+    return m + log(sum(exp(x - m[... -> ... 1])));
 }
 
 /**
@@ -34,4 +34,4 @@ float[...] logsumexp(x: float[...]) {
  * @ingroup Losses
  */
 float cross_entropy(logits: float[...], labels: int[...]) =>
-    mean_all(logsumexp(logits) - sum(one_hot_like(labels, logits) * logits));
+    mean_flat(logsumexp(logits) - sum(one_hot_like(labels, logits) * logits));

@@ -117,14 +117,24 @@ namespace mdl::backend::tvm {
 		// ── softmax: exp(x - max(x)) / sum(exp(x - max(x))) ────────────────────────────────────────────────
 
 		PatternEntry makeSoftmax() {
+			// The reductions keep the last axis: with keepdims, or (as MDL emits them) without and restored by a
+			// reshape to [..., 1].
 			auto x = Wildcard();
 			auto maxX = IsOp("relax.max")(x);
-			auto e = IsOp("relax.exp")(IsOp("relax.subtract")(x, maxX));
+			auto maxKept = IsOp("relax.reshape")(maxX, Wildcard());
+			auto e = IsOp("relax.exp")(IsOp("relax.subtract")(x, maxX | maxKept));
 			auto sumE = IsOp("relax.sum")(e);
-			DFPattern pattern = IsOp("relax.divide")(e, sumE);
+			auto sumKept = IsOp("relax.reshape")(sumE, Wildcard());
+			DFPattern pattern = IsOp("relax.divide")(e, sumE | sumKept);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
-				if (!reducesLastAxis(at(maxX), true) || !reducesLastAxis(at(sumE), true))
+				auto kept = [&](const DFPattern& reduction, const DFPattern& reshape) {
+					if (!m.count(reshape))
+						return reducesLastAxis(at(reduction), true);
+					return reducesLastAxis(at(reduction), false) && rankOf(m.at(reshape)) == rankOf(m.at(x)) &&
+						   lastDimEquals(m.at(reshape), 1);
+				};
+				if (!kept(maxX, maxKept) || !kept(sumE, sumKept))
 					return call;
 				static const auto softmax = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.softmax");
 				return softmax(m.at(x), -1).cast<Expr>();

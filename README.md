@@ -72,7 +72,7 @@ float loss(ids: int[..., seq], labels: int[...]) => cross_entropy(forward(ids), 
 ```
 `int` tensors (token ids, labels) are passed as int32 (`mdl::runtime::IntTensor`); they get no gradients. `std` provides
 `Embedding` (a lookup table; its gradient adds the selected rows), `cross_entropy`, `one_hot_like`, `mse`, `logsumexp`,
-and `sum_all`/`mean_all`. See [examples/05_classification](examples/05_classification/).
+and `sum_flat`/`mean_flat`. See [examples/05_classification](examples/05_classification/).
 
 **The caller computes the objective** (e.g. the trainer) and provides the cotangent `dL/d_output`:
 - `forward(x) -> output` also saves the values the backward pass needs in a context buffer `ctx`,

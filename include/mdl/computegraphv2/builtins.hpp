@@ -56,8 +56,6 @@ namespace mdl::builtins {
 		/** Differentiation **/
 		STOP_GRADIENT, /**< (x): x; no gradient flows through it (std `nograd`) */
 		/** Full reductions (e.g. objectives) **/
-		SUM_ALL,  /**< (x): the sum of all elements (a scalar) */
-		MEAN_ALL, /**< (x): the mean of all elements (a scalar) */
 		/** Indexing (integer tensors) **/
 		TAKE,			  /**< (table [V, ...], ids int[...]): the rows table[ids] ([..., ...]), e.g. embeddings */
 		SCATTER_ADD_ROWS, /**< (g [..., ...], ids int[...], like [V, ...]): zeros like `like`, plus g's rows added at ids

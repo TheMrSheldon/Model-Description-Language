@@ -26,7 +26,8 @@ using tvm::ffi::Array;
 
 namespace {
 	Expr constant(float value) {
-		auto data = tvm::runtime::Tensor::Empty(tvm::ffi::Shape{}, tvm::PrimType::Float(32)->dtype, DLDevice{kDLCPU, 0});
+		auto data =
+				tvm::runtime::Tensor::Empty(tvm::ffi::Shape{}, tvm::PrimType::Float(32)->dtype, DLDevice{kDLCPU, 0});
 		data.CopyFromBytes(&value, sizeof(float));
 		return MakeTensorConst(data);
 	}
@@ -39,12 +40,16 @@ namespace {
 	}
 
 	/** Builds `f(x[, gamma, beta]) = body(...)` with x of shape [rows, 8] and applies the backend patterns. */
-	Function rewrite(
-			const std::function<Expr(BlockBuilder&, const std::vector<Var>&)>& body, size_t numParams = 1,
-			int64_t rows = 4
-	) {
+	Function
+	rewrite(const std::function<Expr(BlockBuilder&, const std::vector<Var>&)>& body, size_t numParams = 1,
+			int64_t rows = 4) {
 		auto bb = BlockBuilder::Create(std::nullopt);
-		std::vector<Var> params{Var("x", TensorType(ShapeExpr(Array<tvm::PrimExpr>{tvm::IntImm(tvm::PrimType::Int(64), rows), 8}), tvm::PrimType::Float(32)))};
+		std::vector<Var> params{
+				Var("x", TensorType(
+								 ShapeExpr(Array<tvm::PrimExpr>{tvm::IntImm(tvm::PrimType::Int(64), rows), 8}),
+								 tvm::PrimType::Float(32)
+						 ))
+		};
 		for (size_t i = 1; i < numParams; ++i)
 			params.push_back(Var("p" + std::to_string(i), TensorType(ShapeExpr({8}), tvm::PrimType::Float(32))));
 		bb->BeginScope(Array<Var>(params.begin(), params.end()));
@@ -97,6 +102,23 @@ TEST_CASE("softmax is only recognized for reductions with keepdims", "[tvm][patt
 	CHECK(callsOf(rewrite(softmax(true)), "relax.nn.softmax").size() == 1);
 	// Without keepdims, x - max(x) broadcasts the row maxima along the wrong axis (valid for square inputs only).
 	CHECK(callsOf(rewrite(softmax(false), 1, 8), "relax.nn.softmax").empty());
+}
+
+TEST_CASE("softmax is recognized for reductions whose axis a reshape restores (as MDL emits them)", "[tvm][patterns]") {
+	static const auto reshape = tvm::ffi::Function::GetGlobalRequired("relax.op.reshape");
+	auto f = rewrite(
+			[](BlockBuilder& bb, const std::vector<Var>& p) -> Expr {
+				auto keep = [&](const Expr& r) {
+					const auto i64 = [](int64_t v) { return tvm::IntImm(tvm::PrimType::Int(64), v); };
+					return bb->Emit(reshape(bb->Emit(r), ShapeExpr(Array<tvm::PrimExpr>{i64(8), i64(1)})).cast<Expr>());
+				};
+				auto max = keep(reduce("max", p[0], false));
+				auto e = bb->Emit(op("relax.exp", {bb->Emit(op("relax.subtract", {p[0], max}))}));
+				return op("relax.divide", {e, keep(reduce("sum", e, false))});
+			},
+			1, 8
+	);
+	CHECK(callsOf(f, "relax.nn.softmax").size() == 1);
 }
 
 TEST_CASE("layer norm keeps the model's epsilon and checks the divisor", "[tvm][patterns]") {
