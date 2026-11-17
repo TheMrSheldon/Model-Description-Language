@@ -1,10 +1,12 @@
 // Matching kernel packages at the matching boundary (see kernel_match.hpp and docs/kernels.md).
 #include "./kernel_match.hpp"
 #include "./extern_call.hpp"
+#include "./legalize.hpp"
 #include "./tvm_compat.hpp"
 
 #include <mdl/kernels/expr.hpp>
 
+#include <tvm/ffi/reflection/accessor.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/dataflow_matcher.h>
 #include <tvm/relax/dataflow_pattern.h>
@@ -59,6 +61,7 @@ namespace mdl::backend::tvm {
 			std::vector<std::pair<std::string, relax::DFPattern>> captures; ///< by name (one pattern per name)
 			std::vector<std::pair<const kernels::PatternNode*, relax::DFPattern>> constants;
 			std::vector<relax::DFPattern> ops; ///< the operator nodes (their matches are the replaced bindings)
+			std::vector<std::pair<std::string, std::string>> notOps; ///< (capture, operator that must not produce it)
 		};
 
 		relax::DFPattern compileNode(const kernels::PatternNode& node, CompiledPattern& out) {
@@ -70,6 +73,10 @@ namespace mdl::backend::tvm {
 					return it->second; // the same name: the same value
 				auto w = relax::WildcardPattern();
 				out.captures.emplace_back(node.capture, w);
+				for (const auto& op : node.notOps) {
+					(void)::tvm::Op::Get(op); // (throws for an unknown operator)
+					out.notOps.emplace_back(node.capture, op);
+				}
 				return w;
 			}
 			case kernels::PatternNode::Kind::constant: {
@@ -89,6 +96,8 @@ namespace mdl::backend::tvm {
 					p = p.HasAttr(attrs);
 				}
 				out.ops.push_back(p);
+				if (!node.capture.empty())
+					out.captures.emplace_back(node.capture, p);
 				return p;
 			}
 			}
@@ -98,7 +107,7 @@ namespace mdl::backend::tvm {
 		/** @brief A value of the expression language during evaluation. */
 		struct Value {
 			expr::Type type;
-			PrimExpr scalar; ///< integer or boolean
+			PrimExpr scalar; ///< integer, boolean, or real
 			Array<PrimExpr> shape;
 			::tvm::PrimType dtype = ::tvm::PrimType::Void();
 			std::vector<::tvm::PrimType> dtypes; ///< a list of element types (for `in`)
@@ -127,7 +136,11 @@ namespace mdl::backend::tvm {
 		/** @brief Evaluates expressions over the captures of a match (symbolic dimensions stay symbolic). */
 		class Evaluator {
 		public:
-			explicit Evaluator(const std::map<std::string, Expr>& captures) : captures(captures) {}
+			/** @param calls the operator calls whose attributes are available (`out` and the captured operators) */
+			explicit Evaluator(
+					const std::map<std::string, Expr>& captures, const std::map<std::string, Expr>& calls = {}
+			)
+					: captures(captures), calls(calls) {}
 
 			Value eval(const expr::Node& n) {
 				using K = expr::Node::Kind;
@@ -208,8 +221,34 @@ namespace mdl::backend::tvm {
 
 		private:
 			const std::map<std::string, Expr>& captures;
+			const std::map<std::string, Expr>& calls;
+
+			/** @brief A numeric attribute of a captured operator call (by reflection, as TVM's matcher reads them). */
+			Value attribute(const std::string& capture, const std::string& name) {
+				auto it = calls.find(capture);
+				const auto* call = it == calls.end() ? nullptr : it->second.as<::tvm::CallNode>();
+				if (call == nullptr || !call->attrs.defined())
+					throw EvalError{std::format("${} is not an operator with attributes", capture)};
+				std::optional<double> value;
+				const auto* info = TVMFFIGetTypeInfo(call->attrs->type_index());
+				::tvm::ffi::reflection::ForEachFieldInfoWithEarlyStop(info, [&](const TVMFFIFieldInfo* field) {
+					if (std::string_view(field->name.data, field->name.size) != name)
+						return false;
+					::tvm::ffi::Any v = ::tvm::ffi::reflection::FieldGetter(field)(call->attrs.get());
+					if (auto d = v.try_cast<double>())
+						value = *d;
+					else if (auto i = v.try_cast<int64_t>())
+						value = static_cast<double>(*i);
+					return true;
+				});
+				if (!value)
+					throw EvalError{std::format("${} has no numeric attribute '{}'", capture, name)};
+				return {.type = expr::Type::real, .scalar = ::tvm::FloatImm(::tvm::PrimType::Float(64), *value)};
+			}
 
 			Value access(const expr::Node& n) {
+				if (n.field.starts_with("attr."))
+					return attribute(n.name, n.field.substr(5));
 				auto it = captures.find(n.name);
 				if (it == captures.end())
 					throw EvalError{std::format("${} is not available", n.name)};
@@ -342,6 +381,19 @@ namespace mdl::backend::tvm {
 		}
 	} // namespace
 
+	namespace {
+		/** @brief The plan of a named adapter (see `adapter:` in docs/kernels.md) for the root call of a region. */
+		std::expected<ExternPlan, std::string> adapterPlan(const std::string& adapter, const Expr& root) {
+			const auto* call = root.as<::tvm::CallNode>();
+			if (call == nullptr)
+				return std::unexpected("the region's result is not an operator call");
+			const auto c = ::tvm::ffi::GetRef<Call>(call);
+			if (adapter == "matmul-strided" || adapter == "matmul-quantized")
+				return matmulAdapter(c, adapter == "matmul-quantized");
+			return std::unexpected("unknown adapter " + adapter);
+		}
+	} // namespace
+
 	MatchResult matchKernels(
 			const ::tvm::IRModule& mod, const std::vector<kernels::Package>& packages, const kernels::Platform& target
 	) {
@@ -399,16 +451,37 @@ namespace mdl::backend::tvm {
 								c.replaced.push_back(var);
 						}
 						std::ranges::stable_partition(c.replaced, [&](const Var& v) { return !v.same_as(vb->var); });
-						std::map<std::string, Expr> captures;
+						std::map<std::string, Expr> captures, calls{{"out", vb->value}};
+						c.calls.emplace_back("out", vb->value);
 						for (const auto& [name, pattern] : e.compiled.captures) {
 							// A value bound to a variable is captured as the variable (the matcher looks through it).
 							Expr value = m.at(pattern);
+							if (value.as<::tvm::CallNode>() != nullptr) { // a captured operator (its attributes)
+								calls[name] = value;
+								c.calls.emplace_back(name, value);
+							}
 							if (auto it = varOf.find(value.get()); it != varOf.end())
 								value = it->second;
 							captures[name] = value;
 							c.captures.emplace_back(name, value);
 						}
 						captures["out"] = vb->var;
+
+						// Captures that must not be produced by certain operators.
+						for (const auto& [name, op] : e.compiled.notOps) {
+							Expr value = captures.at(name);
+							if (const auto* var = value.as<::tvm::VarNode>())
+								if (auto it = bindings.find(::tvm::ffi::GetRef<Var>(var)); it != bindings.end())
+									value = (*it).second;
+							const auto* producer = value.as<::tvm::CallNode>();
+							const bool produced = producer != nullptr && producer->op.same_as(::tvm::Op::Get(op));
+							c.verdicts.push_back(
+									{std::format("${} is not produced by {}", name, op),
+									 produced ? Verdict::Result::refuted : Verdict::Result::proven,
+									 "",
+									 {}}
+							);
+						}
 
 						// Region rules: an intermediate result must not be used outside the region.
 						std::unordered_set<const ::tvm::VarNode*> region;
@@ -481,7 +554,7 @@ namespace mdl::backend::tvm {
 						);
 
 						// Applicability and the declared outputs.
-						Evaluator eval{captures};
+						Evaluator eval{captures, calls};
 						for (const auto& [name, allowed] : e.impl->dtypes) {
 							const auto* info = tensorInfo(captures.at(name));
 							const std::string actual =
@@ -519,17 +592,44 @@ namespace mdl::backend::tvm {
 						for (const auto& w : e.impl->where)
 							evaluate(w, "where " + w);
 						// The arguments: integers must be computable, and fit their type (a checked conversion).
-						if (!e.impl->adapter.empty())
+						if (!e.impl->adapter.empty()) {
+							auto plan = adapterPlan(e.impl->adapter, vb->value);
 							c.verdicts.push_back(
-									{"the argument adapter " + e.impl->adapter,
-									 Verdict::Result::refuted,
-									 "adapters are not supported yet",
+									{"the argument adapter " + e.impl->adapter + " applies",
+									 plan ? Verdict::Result::proven : Verdict::Result::refuted,
+									 plan ? "" : plan.error(),
 									 {}}
 							);
+						}
 						for (size_t i = 0; i < e.impl->arguments.size(); ++i) {
 							const auto& arg = e.impl->arguments[i];
 							if (arg.type == "pointer")
 								continue;
+							if (arg.type == "float32" || arg.type == "float64") {
+								const std::string what =
+										std::format("argument {} ({}) can be computed", i + 1, arg.value);
+								try {
+									auto parsed = expr::parse(arg.value, [&] {
+										std::vector<std::string> names;
+										for (const auto& [n, _] : captures)
+											names.push_back(n);
+										return names;
+									}());
+									if (!parsed)
+										throw EvalError{parsed.error()};
+									auto v = ::tvm::sym::Analyzer()->Simplify(eval.eval(**parsed).scalar);
+									const bool constant = v.as<::tvm::FloatImmNode>() || v.as<::tvm::IntImmNode>();
+									c.verdicts.push_back(
+											{what,
+											 constant ? Verdict::Result::proven : Verdict::Result::unknown,
+											 constant ? "" : "not a constant",
+											 {}}
+									);
+								} catch (const EvalError& err) {
+									c.verdicts.push_back({what, Verdict::Result::unknown, err.message, {}});
+								}
+								continue;
+							}
 							if (arg.type == "int32")
 								evaluate(
 										std::format("{} >= -2147483648 and {} <= 2147483647", arg.value, arg.value),
@@ -723,9 +823,33 @@ namespace mdl::backend::tvm {
 				std::vector<std::string> names;
 				for (const auto& [name, _] : captures)
 					names.push_back(name);
-				Evaluator eval{captures};
+				std::map<std::string, Expr> calls(c.calls.begin(), c.calls.end());
+				Evaluator eval{captures, calls};
 
 				ExternCall ext{builder_, impl.symbol};
+				if (!impl.adapter.empty()) {
+					auto plan = adapterPlan(impl.adapter, valueOf.at(root.get())).value(); // (checked when matching)
+					std::vector<Expr> pointers;
+					for (const auto& input : plan.inputs)
+						pointers.push_back(ext.input(VisitExpr(input), "in" + std::to_string(pointers.size())));
+					auto out = ext.output(plan.outShape, plan.outDtype);
+					std::vector<Expr> args;
+					std::vector<PrimExpr> scalars;
+					for (const auto& arg : plan.args)
+						switch (arg.kind) {
+						case ExternPlan::Arg::Kind::input:
+							args.push_back(pointers[arg.input]);
+							break;
+						case ExternPlan::Arg::Kind::output:
+							args.push_back(out);
+							break;
+						case ExternPlan::Arg::Kind::scalar:
+							scalars.push_back(arg.value);
+							args.push_back(arg.value);
+							break;
+						}
+					return ext.finish(std::move(args), scalars);
+				}
 				const auto outShape = knownShape(root).value();
 				const auto outDtype = tensorInfo(root)->dtype.value();
 				auto out = ext.output(outShape, outDtype);

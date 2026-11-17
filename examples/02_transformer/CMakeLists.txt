@@ -8,7 +8,7 @@ target_link_libraries(02_transformer PRIVATE transformer_model)
 add_test(NAME example_02_transformer COMMAND 02_transformer --seq 16 --iters 1)
 
 # A 2-layer model with TVM-generated kernels only (no oneDNN): tests the TVM legalizations and CPU schedules.
-mdl_add_model(transformer_model_tvm SOURCE model.dlm CONFIG model_test.yml KERNELS tvm)
+mdl_add_model(transformer_model_tvm SOURCE model.dlm CONFIG model_test.yml KERNELS none)
 add_executable(02_transformer_tvm main.cpp)
 target_link_libraries(02_transformer_tvm PRIVATE transformer_model_tvm)
 add_test(NAME example_02_transformer_tvm COMMAND 02_transformer_tvm --seq 16 --iters 2)

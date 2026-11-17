@@ -3,7 +3,7 @@
 schema: 1
 package: onednn
 version: "3.13.4-mdl1"
-description: oneDNN kernels (softmax; the others follow).
+description: oneDNN kernels (matrix products, softmax, gelu, layer norm, column sums).
 
 artifacts:
   mdl-kernels:
@@ -25,6 +25,37 @@ patterns:
     op: relax.nn.softmax
     args: [{ capture: x }]
     attrs: { axis: -1 }
+  gelu:
+    op: relax.nn.gelu
+    args: [{ capture: x }]
+  gelu-backward:
+    op: mdl.gelu_backward
+    args: [{ capture: x }, { capture: dy }]
+  layer-norm:   # over the last axis, with scale and shift
+    op: relax.nn.layer_norm
+    args: [{ capture: x }, { capture: gamma }, { capture: beta }]
+    attrs: { axes: [-1], center: true, scale: true }
+  matmul:   # mdl.matmul: permutations, bias, scale, activation and addend (see the legalizer's MatmulArgs)
+    op: mdl.matmul
+    args:
+      - { capture: a }
+      - { capture: b }
+      - { capture: bias }
+      - { capture: perm_a }
+      - { capture: perm_b }
+      - { capture: perm_out }
+      - { capture: alpha }
+      - { capture: activation }
+      - { capture: addend }
+      - { capture: scales }
+      - { capture: zeros }
+      - { capture: quant }
+  relax-matmul:
+    op: relax.matmul
+    args: [{ capture: a }, { capture: b }]
+  sum-rows:   # (not of a product, e.g. the gradient of LayerNorm's scale: TVM fuses that with the product)
+    op: relax.collapse_sum_to
+    args: [{ capture: x, not: relax.multiply }, { capture: shape }]
 
 implementations:
   softmax-f32: &softmax
@@ -56,3 +87,167 @@ implementations:
     applicability:
       dtype: { x: float16 }
       layout: { x: row-major }
+  gelu-f32: &gelu
+    pattern: gelu
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_gelu_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: int64, value: "prod($x.shape)" }
+      outputs:
+        - { shape: $x.shape, dtype: $x.dtype }
+    applicability:
+      dtype: { x: float32 }
+      layout: { x: row-major }
+  gelu-bf16:
+    <<: *gelu
+    symbol: mdl_gelu_bf16
+    applicability: { dtype: { x: bfloat16 }, layout: { x: row-major } }
+  gelu-f16:
+    <<: *gelu
+    symbol: mdl_gelu_f16
+    applicability: { dtype: { x: float16 }, layout: { x: row-major } }
+
+  gelu-backward-f32: &gelu-backward
+    pattern: gelu-backward
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_gelu_backward_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $dy.data }
+        - { type: int64, value: "prod($dy.shape)" }
+      outputs:
+        - { shape: $dy.shape, dtype: $dy.dtype }
+    applicability:
+      dtype: { x: float32, dy: float32 }
+      layout: { x: row-major, dy: row-major }
+      where: ["$x.shape == $dy.shape"]
+  gelu-backward-bf16:
+    <<: *gelu-backward
+    symbol: mdl_gelu_backward_bf16
+    applicability:
+      dtype: { x: bfloat16, dy: bfloat16 }
+      layout: { x: row-major, dy: row-major }
+      where: ["$x.shape == $dy.shape"]
+  gelu-backward-f16:
+    <<: *gelu-backward
+    symbol: mdl_gelu_backward_f16
+    applicability:
+      dtype: { x: float16, dy: float16 }
+      layout: { x: row-major, dy: row-major }
+      where: ["$x.shape == $dy.shape"]
+
+  layer-norm-f32: &layer-norm
+    pattern: layer-norm
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_layer_norm_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $gamma.data }
+        - { type: pointer, access: read, value: $beta.data }
+        - { type: int64, value: "prod($x.shape[:-1])" }
+        - { type: int64, value: "$x.shape[-1]" }
+        - { type: float32, value: "$out.attr.epsilon" }
+      outputs:
+        - { shape: $x.shape, dtype: $x.dtype }
+    applicability:
+      dtype: { x: float32, gamma: float32, beta: float32 }
+      layout: { x: row-major }
+  layer-norm-bf16:
+    <<: *layer-norm
+    symbol: mdl_layer_norm_bf16
+    applicability:
+      dtype: { x: bfloat16, gamma: bfloat16, beta: bfloat16 }
+      layout: { x: row-major }
+  layer-norm-f16:
+    <<: *layer-norm
+    symbol: mdl_layer_norm_f16
+    applicability:
+      dtype: { x: float16, gamma: float16, beta: float16 }
+      layout: { x: row-major }
+
+  sum-rows-f32: &sum-rows   # column sums over the leading dimensions, e.g. the gradient of a bias
+    pattern: sum-rows
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_sum_rows_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: int64, value: "prod($x.shape[:-1])" }
+        - { type: int64, value: "$x.shape[-1]" }
+    applicability:
+      dtype: { x: float32 }
+      layout: { x: row-major }
+      where: ["$x.ndim > 1", "$out.ndim == 1", "$out.shape[0] == $x.shape[-1]"]
+  sum-rows-bf16:
+    <<: *sum-rows
+    symbol: mdl_sum_rows_bf16
+    applicability:
+      dtype: { x: bfloat16 }
+      layout: { x: row-major }
+      where: ["$x.ndim > 1", "$out.ndim == 1", "$out.shape[0] == $x.shape[-1]"]
+  sum-rows-f16:
+    <<: *sum-rows
+    symbol: mdl_sum_rows_f16
+    applicability:
+      dtype: { x: float16 }
+      layout: { x: row-major }
+      where: ["$x.ndim > 1", "$out.ndim == 1", "$out.shape[0] == $x.shape[-1]"]
+
+  # Matrix products: the adapters compute the strided views (see docs/kernels.md, adapters).
+  matmul-f32: &matmul
+    pattern: matmul
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_matmul_f32
+    adapter: matmul-strided
+    applicability:
+      dtype: { a: float32 }
+  matmul-bf16:
+    <<: *matmul
+    symbol: mdl_matmul_bf16
+    applicability: { dtype: { a: bfloat16 } }
+  matmul-f16:
+    <<: *matmul
+    symbol: mdl_matmul_f16
+    applicability: { dtype: { a: float16 } }
+  relax-matmul-f32:
+    <<: *matmul
+    pattern: relax-matmul
+  relax-matmul-bf16:
+    <<: *matmul
+    pattern: relax-matmul
+    symbol: mdl_matmul_bf16
+    applicability: { dtype: { a: bfloat16 } }
+  relax-matmul-f16:
+    <<: *matmul
+    pattern: relax-matmul
+    symbol: mdl_matmul_f16
+    applicability: { dtype: { a: float16 } }
+  matmul-quantized-f32: &matmul-quantized   # quantized weights (a linear layer)
+    <<: *matmul
+    symbol: mdl_matmul_q_f32
+    adapter: matmul-quantized
+  matmul-quantized-bf16:
+    <<: *matmul-quantized
+    symbol: mdl_matmul_q_bf16
+    applicability: { dtype: { a: bfloat16 } }
+  matmul-quantized-f16:
+    <<: *matmul-quantized
+    symbol: mdl_matmul_q_f16
+    applicability: { dtype: { a: float16 } }

@@ -40,7 +40,8 @@ namespace mdl::backend::tvm {
 		std::string function;			  ///< the Relax function
 		std::vector<::tvm::Var> replaced; ///< the bindings the region replaces (root last)
 		std::vector<std::pair<std::string, ::tvm::Expr>> captures;
-		std::string artifact; ///< the artifact that would be used (empty: none)
+		std::vector<std::pair<std::string, ::tvm::Expr>> calls; ///< `out` and the captured operators (attributes)
+		std::string artifact;									///< the artifact that would be used (empty: none)
 		std::vector<Verdict> verdicts;
 		bool eligible = false;
 		bool guarded = false; ///< eligible only if its runtime guard holds (the original region is the fallback)

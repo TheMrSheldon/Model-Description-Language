@@ -4,10 +4,10 @@ Optimized kernels come from **kernel packages** in kernel directories. A package
 model, how to call its prebuilt implementation (a C function), and which binaries provide it for which platforms. The
 compiler selects implementations and falls back to TVM's code generation for everything else.
 
-**Status:** the package format (`schema: 1`), the kernel directories, matching, selection, compiling with the selected
-implementations, the link report, and the CMake integration are implemented. Of the built-in oneDNN kernels, softmax
-is a package (`kernels/onednn`); the others are still called by the compiler directly. Undecided constraints make an
-implementation ineligible (runtime checks are planned); CUDA artifacts are not supported yet.
+**Status:** the package format (`schema: 1`), the kernel directories, matching, selection, runtime guards, compiling
+with the selected implementations, the link report, and the CMake integration are implemented. The built-in oneDNN
+kernels are the package `kernels/onednn` (matrix products, also quantized; softmax; GELU and its gradient; layer
+normalization; column sums); the compiler calls no kernel directly. CUDA artifacts are not supported yet.
 
 ## Kernel directories
 Each immediate subdirectory of a kernel directory that contains a `package.yml` is a package. Its directory must have
@@ -95,8 +95,8 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
 ### CMake
 - `mdl_add_model(... KERNEL_PACKAGES <name>...)` lets the model use these packages and links their libraries (and
   their dependencies) into the model's target, so that they propagate to the executable. Without it, the model uses no
-  kernel packages (a package that CMake does not link could not be linked). The `onednn` package is added whenever the
-  model uses the oneDNN kernels (`KERNELS onednn`, the default).
+  kernel packages (a package that CMake does not link could not be linked). The `onednn` package is added unless
+  `KERNELS none` (TVM-generated kernels only; `mdlc --kernels none`).
 - `mdl_kernel_package(<name> MANIFEST package.yml.in SOURCES ...)` builds a package in the project (the library and
   the manifest, into the build tree's kernel directory); with `TARGETS` instead of `SOURCES`, existing targets are the
   libraries (see `kernels/onednn`).
@@ -177,9 +177,13 @@ line). YAML anchors and merge keys work, e.g. for implementations that differ in
 A pattern is a tree of operator nodes over the Relax graph at the matching boundary (after canonicalization, before
 legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
 - `{op: <operator>, args: [...], attrs: {...}}`: a call of the operator (e.g. `relax.nn.softmax`, `mdl.matmul`) with
-  attributes that must match (e.g. `attrs: { axis: -1 }`);
+  attributes that must match (e.g. `attrs: { axis: -1 }`, `axes: [-1]`). `capture: name` names the call's result,
+  whose attributes are then available as `$name.attr.<attribute>`; the root's are `$out.attr.<attribute>` (e.g. the
+  epsilon of a layer normalization);
 - `{capture: x}`: any value, named `x` in the implementation. The same name twice must be the same value. A capture
-  may be used by other operations outside the region; the operations of the region itself must not be;
+  may be used by other operations outside the region; the operations of the region itself must not be.
+  `not: relax.multiply` (or a list) requires that the value is not the result of these operators (e.g. a sum of a
+  product, which TVM fuses with the product instead);
 - `{const: 2.0}`: a constant, matched exactly; `{const: 1e-6, tolerance: 1e-12}` allows a deviation (e.g. for
   constants that float32 cannot represent exactly). The value can be an integer expression over the captures, e.g.
   `{const: "$x.shape[-1]"}` for the division of a mean. A constant that does not match is a constraint that is not
@@ -197,13 +201,19 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
   cannot be decided at compile time makes the implementation ineligible for that match (`check --explain` says why).
 - **Priority:** among overlapping candidates, the higher priority wins, then the larger region, then the package and
   implementation names (deterministic).
-- **Adapters:** argument lists that are impractical to write as expressions (e.g. oneDNN's strided matrix products)
-  use a named adapter of the compiler instead of `arguments` (`adapter: matmul-strided`).
+- **Adapters:** argument lists that are impractical to write as expressions use a named adapter of the compiler
+  instead of `arguments`. Whether the adapter applies is a constraint of its own (`check --explain` says why not):
+  - `matmul-strided`: `mdl_matmul_<type>`'s arguments (`include/mdl/runtime/kernels.h`) for `mdl.matmul` and
+    `relax.matmul`: the permutations of the operands and the result become strides (at most two batch dimensions after
+    merging), with bias, scale, activation, and addend;
+  - `matmul-quantized`: `mdl_matmul_q_<type>`'s arguments for an `mdl.matmul` with quantized weights (a linear layer;
+    other layouts use TVM's code).
 
 ### Expressions
 Values and conditions are written in one small typed language:
 - types: `int64`, `bool`, `dtype`, `shape` (a list of `int64`);
-- accessors: `$x.shape`, `$x.shape[i]` (negative from the end), `$x.ndim`, `$x.dtype`, `$x.attr.<name>`, `$x.data`
+- accessors: `$x.shape`, `$x.shape[i]` (negative from the end), `$x.ndim`, `$x.dtype`, `$x.attr.<name>` (a number,
+  only as the value of a `float32` or `float64` argument; `$x` must be a captured operator or `$out`), `$x.data`
   (pointers only), and `$out` for the result;
 - operators: `+ - * // %`, comparisons, `and`, `or`, `not`, `prod(shape[a:b])`, `x in [...]`;
 - integer overflow and division by zero are errors; a value that may not fit its argument type (e.g. `int32`) is a

@@ -263,7 +263,7 @@ int main(int argc, char* argv[]) {
 	auto* checkCommand = app.add_subcommand(
 			"check", "Matches the kernel packages against a model: the selected implementations (no code is generated)"
 	);
-	auto* checkConfig = addCompileOptions(*checkCommand, checkArgs);
+	addCompileOptions(*checkCommand, checkArgs); // (for --help; parsed below)
 	checkCommand->add_flag(
 			"--explain", explainAll,
 			"Show every candidate with the verdict of each constraint and why it is (not) selected"
@@ -271,19 +271,8 @@ int main(int argc, char* argv[]) {
 	auto* dumpCommand = app.add_subcommand(
 			"dump", "Prints the model's Relax module at the matching boundary (what patterns match)"
 	);
-	auto* dumpConfig = addCompileOptions(*dumpCommand, dumpArgs);
+	addCompileOptions(*dumpCommand, dumpArgs);
 
-	try {
-		app.parse(argc, argv);
-	} catch (const CLI::ParseError& e) {
-		return app.exit(e);
-	}
-	if (listCommand->parsed())
-		return list(explicitDirs, source);
-	if (depsCommand->parsed())
-		return deps(explicitDirs, depsPackages, depsFormat);
-	if (linkCommand->parsed())
-		return linkArgs(reportFile, linkStyle);
 	auto inspect = [&](CompileArgs& args, CLI::Option* config, mdl::CompileOptions::KernelInspection mode) {
 		if (config->count() > 0)
 			args.argvals = config->as<std::string>();
@@ -300,10 +289,48 @@ int main(int argc, char* argv[]) {
 		}
 		return 0;
 	};
-	using Inspection = mdl::CompileOptions::KernelInspection;
-	if (checkCommand->parsed())
-		return inspect(checkArgs, checkConfig, explainAll ? Inspection::explain : Inspection::brief);
-	if (dumpCommand->parsed())
-		return inspect(dumpArgs, dumpConfig, Inspection::dump);
+
+	// check and dump are parsed by an app of their own: CLI11 reads configuration files (the argument values, `-a`) of
+	// the main app only.
+	for (int i = 1; i < argc; ++i) {
+		const std::string_view word = argv[i];
+		if (word == "--kernels-dir") {
+			++i; // (its value)
+			continue;
+		}
+		if (word != "check" && word != "dump")
+			continue;
+		const bool check = word == "check";
+		CLI::App sub{check ? "mdl-kernels check" : "mdl-kernels dump", "mdl-kernels " + std::string(word)};
+		CompileArgs args;
+		auto* config = addCompileOptions(sub, args);
+		if (check)
+			sub.add_flag(
+					"--explain", explainAll,
+					"Show every candidate with the verdict of each constraint and why it is (not) selected"
+			);
+		// The command's arguments, then the options before the command (mdlc's --kernels-dir takes several values).
+		std::vector<char*> rest{argv[0]};
+		rest.insert(rest.end(), argv + i + 1, argv + argc);
+		rest.insert(rest.end(), argv + 1, argv + i);
+		try {
+			sub.parse(static_cast<int>(rest.size()), rest.data());
+		} catch (const CLI::ParseError& e) {
+			return sub.exit(e);
+		}
+		using Inspection = mdl::CompileOptions::KernelInspection;
+		return inspect(args, config, check ? (explainAll ? Inspection::explain : Inspection::brief) : Inspection::dump);
+	}
+	try {
+		app.parse(argc, argv);
+	} catch (const CLI::ParseError& e) {
+		return app.exit(e);
+	}
+	if (listCommand->parsed())
+		return list(explicitDirs, source);
+	if (depsCommand->parsed())
+		return deps(explicitDirs, depsPackages, depsFormat);
+	if (linkCommand->parsed())
+		return linkArgs(reportFile, linkStyle);
 	return 0;
 }

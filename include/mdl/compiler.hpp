@@ -18,10 +18,10 @@ namespace mdl {
 		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
 	};
 
-	/** Which kernels the backend may call for recognized subgraphs (matmul, softmax, layer norm, ...). */
+	/** Whether the backend calls optimized kernels of kernel packages (e.g. oneDNN, see docs/kernels.md). */
 	enum class Kernels {
-		OneDnn, ///< Vendor kernels of the mdl_kernels library (oneDNN); the model must be linked against mdl_kernels
-		Tvm,	///< Only TVM-generated kernels; the model has no dependency on mdl_kernels
+		Packages, ///< The selected implementations of the kernel packages (the rest is TVM-generated)
+		None,	  ///< Only TVM-generated kernels; the model depends on no kernel package
 	};
 
 	/** @brief A library of a kernel package that must be linked (see docs/kernels.md). */
@@ -55,7 +55,7 @@ namespace mdl {
 		Backend backend = Backend::Tvm;
 
 		/** Kernels that the backend may call. */
-		Kernels kernels = Kernels::OneDnn;
+		Kernels kernels = Kernels::Packages;
 
 		/**
 		 * Number of dimensions that `...` stands for in the signatures of compiled functions (e.g. 2 for `[B, S, D]`

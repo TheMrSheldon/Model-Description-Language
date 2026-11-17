@@ -694,7 +694,7 @@ void mdl::backends::tvm::compileToFile(
 		logger->warn("kernel package skipped: {}", problem.str());
 	std::erase_if(discovery.packages, [&](const mdl::kernels::Package& p) {
 		const bool allowed = opts.kernelPackages.empty() || std::ranges::contains(opts.kernelPackages, p.name);
-		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::Tvm || !allowed ||
+		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::None || !allowed ||
 			   std::ranges::contains(opts.noKernelPackages, p.name);
 	});
 	auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());

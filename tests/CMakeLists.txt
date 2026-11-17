@@ -73,6 +73,14 @@ add_test(NAME mdl_kernels_deps_unknown COMMAND mdl-kernels deps --kernel-package
 set_tests_properties(mdl_kernels_deps_unknown PROPERTIES WILL_FAIL TRUE)
 add_test(NAME mdl_kernels_link_args COMMAND mdl-kernels link-args "${CMAKE_CURRENT_BINARY_DIR}/kernels/e2e/kernel-report.json")
 set_tests_properties(mdl_kernels_link_args PROPERTIES PASS_REGULAR_EXPRESSION "scaled_add_c")
+# check reads the argument values like mdlc (-a, --build): quantized weights select the quantized oneDNN kernel.
+if(TARGET mdl_kernel_package_onednn)
+	set(_quantized "${CMAKE_CURRENT_LIST_DIR}/../examples/09_quantization")
+	add_test(NAME mdl_kernels_check_build COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		"${_quantized}/model.dlm" -a "${_quantized}/model.yml" --build mixed --kernel-package onednn)
+	set_tests_properties(mdl_kernels_check_build PROPERTIES PASS_REGULAR_EXPRESSION
+		"onednn/matmul-quantized-f32.*2 selected")
+endif()
 add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
 set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")
 

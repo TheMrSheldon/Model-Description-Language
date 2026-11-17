@@ -217,9 +217,16 @@ namespace mdl::kernels {
 				if (!isMap(n, "a pattern node"))
 					return node;
 				if (n["capture"]) {
-					onlyKeys(n, {"capture"}, "a capture");
+					onlyKeys(n, {"capture", "not"}, "a capture");
 					node.kind = PatternNode::Kind::capture;
 					node.capture = string(n["capture"], "capture");
+					if (const auto no = n["not"]) { // e.g. `not: relax.multiply` (fused with it by TVM instead)
+						if (no.IsSequence())
+							for (const auto& op : no)
+								node.notOps.push_back(string(op, "not"));
+						else
+							node.notOps.push_back(string(no, "not"));
+					}
 					captures.insert(node.capture);
 				} else if (n["const"]) {
 					onlyKeys(n, {"const", "tolerance"}, "a constant");
@@ -233,9 +240,13 @@ namespace mdl::kernels {
 					if (n["tolerance"])
 						node.tolerance = number(n["tolerance"], "tolerance");
 				} else if (n["op"]) {
-					onlyKeys(n, {"op", "args", "attrs"}, "an operator node");
+					onlyKeys(n, {"op", "args", "attrs", "capture"}, "an operator node");
 					node.kind = PatternNode::Kind::op;
 					node.op = string(n["op"], "op");
+					if (n["capture"]) { // the operator's result (and its attributes: $name.attr.<name>)
+						node.capture = string(n["capture"], "capture");
+						captures.insert(node.capture);
+					}
 					if (const auto args = n["args"]) {
 						if (!args.IsSequence())
 							problem(args, "'args' must be a list");
@@ -299,7 +310,7 @@ namespace mdl::kernels {
 				if (n["abi"])
 					impl.abi = choice(n["abi"], "abi", {"c"});
 				if (n["adapter"])
-					impl.adapter = choice(n["adapter"], "adapter", {"matmul-strided"});
+					impl.adapter = choice(n["adapter"], "adapter", {"matmul-strided", "matmul-quantized"});
 				if (const auto sig = n["signature"]; sig && isMap(sig, "'signature'")) {
 					onlyKeys(sig, {"returns", "arguments", "aliasing", "outputs"}, "a signature");
 					if (const auto ret = sig["returns"]) {
@@ -464,7 +475,7 @@ namespace mdl::kernels {
 			}
 
 			static void collectCaptures(const PatternNode& node, std::vector<std::string>& out) {
-				if (node.kind == PatternNode::Kind::capture && std::ranges::find(out, node.capture) == out.end())
+				if (!node.capture.empty() && std::ranges::find(out, node.capture) == out.end())
 					out.push_back(node.capture);
 				for (const auto& arg : node.args)
 					collectCaptures(arg, out);
@@ -488,7 +499,14 @@ namespace mdl::kernels {
 				const auto sig = at["signature"];
 				for (size_t i = 0; i < impl.arguments.size(); ++i) {
 					const auto& arg = impl.arguments[i];
-					check(arg.value, arg.type == "pointer" ? expr::Type::pointer : expr::Type::integer,
+					const bool real = arg.type == "float32" || arg.type == "float64";
+					auto parsed = real ? expr::parse(arg.value, captures) : std::expected<expr::NodePtr, std::string>{};
+					if (real && parsed && (*parsed)->type == expr::Type::integer)
+						continue; // an integer converts to a float argument
+					check(arg.value,
+						  arg.type == "pointer" ? expr::Type::pointer
+						  : real				? expr::Type::real
+												: expr::Type::integer,
 						  sig["arguments"][i]["value"], std::format("argument {}", i + 1));
 				}
 				for (size_t i = 0; i < impl.outputs.size(); ++i) {
