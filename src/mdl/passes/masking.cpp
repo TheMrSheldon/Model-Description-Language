@@ -231,19 +231,21 @@ namespace mdl::masking {
 				return graph.addInvocationNode(FIDs::WHERE, {cond, x, graph.addConstNode(Atomic{value})});
 			}
 
+			/** @brief Whether @p d merges the masked dimension with others (e.g. `(...)` or `(n ...)`). */
+			bool mergesMask(const shapes::Dim& d) const {
+				return std::ranges::find(d.symbols, maskSymbol) != d.symbols.end();
+			}
+
 			/**
-			 * @brief A reduction over a last dimension @p last that flattens the masked dimensions together with others
-			 * (e.g. `mean(x[... -> (...)])` over all elements): the masked positions are filled with @p value in the
-			 * shape before the flattening; a mean divides by the fraction of valid elements. Assumes that the
-			 * dimensions of `...` come first in the flattened dimension (row-major, like `(... n)`). Null if the
-			 * argument is not such a flattening.
+			 * @brief A reduction whose argument flattens the masked dimension together with others (e.g.
+			 * `mean(x[... -> (...)])` over all elements): the masked positions are filled with @p value in the shape
+			 * before the flattening (so any order of the merged dimensions works); a mean divides by the fraction of
+			 * valid elements, flattened the same way. Null if the argument is not such a flattening.
 			 */
-			const Node* reduceFlattened(const InvocationNode& inv, const shapes::Dim& last, double value) {
+			const Node* reduceFlattened(const InvocationNode& inv, double value) {
 				const auto* flat = std::get_if<InvocationNode>(&inv.arguments[0].get());
 				if (flat == nullptr || flat->id != FIDs::RESHAPE)
 					return nullptr;
-				if (!(last / merged).known)
-					return nullptr; // (not all dimensions of `...` are in the flattened dimension)
 				const Node& x = flat->arguments[0].get();
 				const auto& sx = shapeOf(x);
 				const auto dims = maskedDims(sx);
@@ -302,9 +304,17 @@ namespace mdl::masking {
 					const double value = inv.id == FIDs::MAX   ? std::numeric_limits<float>::lowest()
 										 : inv.id == FIDs::MIN ? std::numeric_limits<float>::max()
 															   : 0.0;
-					if (!s.empty() && !isMasked(s[last]) && !plain(0))
-						if (const Node* r = reduceFlattened(inv, s[last], value))
+					if (!s.empty() && !isMasked(s[last]) && !plain(0) && mergesMask(s[last])) {
+						if (const Node* r = reduceFlattened(inv, value))
 							return *r;
+						// (Its elements cannot be told apart once other operations work on the flattened values.)
+						throw MaskError{std::format(
+								"cannot mask a reduction over the dimension {}, which merges the masked dimension with "
+								"others: reduce the flattened tensor directly (e.g. mean_flat(x * 2) instead of "
+								"mean(x[... -> (...)] * 2))",
+								s[last].str()
+						)};
+					}
 					if (s.empty() || !isMasked(s[last]) || plain(0))
 						return make();
 					args[0] = std::cref(fill(args[0].get(), s, {last}, value));

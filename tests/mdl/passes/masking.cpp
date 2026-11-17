@@ -84,6 +84,45 @@ TEST_CASE("a reduction over a masked dimension ignores the masked elements", "[m
 	CHECK(argumentIs(*maxima.front(), FIDs::WHERE));
 }
 
+TEST_CASE("a reduction over a flattening fills the masked elements before it (in any order)", "[masking]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			float all(x: masked float[..., 4]) => __builtin_mean(x[... -> (...)]);
+			float reordered(x: masked float[..., 4]) => __builtin_mean(x[... d -> (d ...)]);
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	for (const char* name : {"all", "reordered"}) {
+		auto f = masked(unit, m.functions.at(name));
+		// The mean of the filled values, divided by the fraction of valid elements (both flattened).
+		auto divisions = reachable(f, FIDs::TENSOR_DIV);
+		REQUIRE(divisions.size() == 1);
+		auto means = reachable(f, FIDs::MEAN);
+		REQUIRE(means.size() == 2);
+		for (const auto* mean : means) {
+			REQUIRE(argumentIs(*mean, FIDs::RESHAPE));
+			const auto& reshape = std::get<InvocationNode>(mean->arguments[0].get());
+			const auto* filled = std::get_if<InvocationNode>(&reshape.arguments[0].get());
+			REQUIRE(filled != nullptr);
+			CHECK((filled->id == FIDs::WHERE || filled->id == FIDs::BROADCAST_LIKE)); // values or the valid indicator
+		}
+	}
+}
+
+TEST_CASE("a reduction over a flattened masked dimension after other operations is an error", "[masking]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			float scaled(x: masked float[..., 4]) => __builtin_mean(x[... -> (...)] * 2.0);
+		}
+	)");
+	const auto& f = std::get<ModuleType>(unit.definitions.at("M")).functions.at("scaled");
+	auto shapes = shapes::infer(f, 2, evaluate);
+	REQUIRE(shapes.has_value());
+	auto result = masking::apply(unit.graph(), f, *shapes);
+	REQUIRE_FALSE(result.has_value());
+	CHECK(result.error().find("merges the masked dimension") != std::string::npos);
+}
+
 TEST_CASE("values computed from x.data and x.mask are plain: the code took care of the mask", "[masking]") {
 	auto unit = parseOrFail(attention);
 	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));

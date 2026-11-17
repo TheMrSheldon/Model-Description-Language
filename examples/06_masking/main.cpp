@@ -47,6 +47,10 @@ int main() {
 			expectedSum
 	);
 	ok &= std::abs(meanOut.data()[0] - expectedMean) < 1e-4 && std::abs(sumOut.data()[0] - expectedSum) < 1e-3;
+	mdl::runtime::Tensor reorderedOut(std::vector<int64_t>{});
+	Model::meanReordered(x, mask, weights, reorderedOut);
+	std::printf("all, flattened as (d ...): mean %g\n", reorderedOut.data()[0]);
+	ok &= std::abs(reorderedOut.data()[0] - expectedMean) < 1e-4;
 	std::puts(ok ? "OK" : "FAILED");
 	return ok ? 0 : 1;
 }
