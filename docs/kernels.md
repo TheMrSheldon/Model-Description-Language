@@ -100,6 +100,8 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
 - `mdl_kernel_package(<name> MANIFEST package.yml.in SOURCES ...)` builds a package in the project (the library and
   the manifest, into the build tree's kernel directory); with `TARGETS` instead of `SOURCES`, existing targets are the
   libraries (see `kernels/onednn`).
+- The `onednn` package is installed (`cmake --install`, component `kernels`) as `share/mdl/kernels/onednn`, a global
+  kernel directory of the installed compiler; in the build tree, `mdl-kernels/onednn` refers to the built libraries.
 - Packages that the project does not build (e.g. installed ones) are imported at configure time with
   `mdl-kernels deps --kernel-package <name>`: it prints the package's libraries for this host as CMake `IMPORTED`
   targets (`mdl_kernel_package_<name>`) with their link dependencies (`--format json` for other tools).

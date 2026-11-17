@@ -586,7 +586,8 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,
-			"Time every kernel call; the times per kernel are printed at program exit (requires mdl_kernels)."
+			"Time every kernel call; the times per kernel are printed at program exit (link mdl_profile; "
+			"mdl_add_model does)."
 	);
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
 	app.add_option(
