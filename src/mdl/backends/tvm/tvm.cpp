@@ -687,11 +687,70 @@ void mdl::backends::tvm::compileToFile(
 		*opts.inspectOut << mod;
 		return;
 	}
+	// Kernel packages: match at the boundary, then call the selected implementations (see docs/kernels.md).
+	auto discovery = mdl::kernels::discover(mdl::kernels::kernelDirs(opts.kernelDirs, opts.source));
+	for (const auto& problem : discovery.problems)
+		logger->warn("kernel package skipped: {}", problem.str());
+	std::erase_if(discovery.packages, [&](const mdl::kernels::Package& p) {
+		const bool allowed = opts.kernelPackages.empty() || std::ranges::contains(opts.kernelPackages, p.name);
+		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::Tvm || !allowed ||
+			   std::ranges::contains(opts.noKernelPackages, p.name);
+	});
+	const auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
 	if (opts.inspectKernels != Inspection::none) {
-		const auto discovery = mdl::kernels::discover(mdl::kernels::kernelDirs(opts.kernelDirs, opts.source));
-		const auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
 		backend::explain(*opts.inspectOut, matches, discovery, opts.inspectKernels == Inspection::explain);
 		return;
+	}
+	mod = backend::applyKernels(mod, matches);
+	for (const auto& c : matches.candidates) {
+		if (c.outcome != backend::Candidate::Outcome::selected)
+			continue;
+		logger->info(
+				"{}: {}/{} at {}", c.function, c.package->name, c.implementation->id,
+				std::string(c.replaced.back()->name)
+		);
+		if (opts.selectedKernels == nullptr)
+			continue;
+		mdl::SelectedKernel k{
+				.function = c.function,
+				.package = c.package->name,
+				.version = c.package->version,
+				.implementation = c.implementation->id,
+				.symbol = c.implementation->symbol,
+				.manifest = c.package->manifest,
+				.artifacts = {}
+		};
+		// The artifact and (transitively) the artifacts it depends on.
+		std::vector<std::string> pending{c.artifact};
+		while (!pending.empty()) {
+			const auto* artifact = c.package->artifact(pending.front());
+			pending.erase(pending.begin());
+			if (artifact == nullptr || std::ranges::contains(k.artifacts, artifact->id, &mdl::LinkedArtifact::id))
+				continue;
+			mdl::LinkedArtifact linked{
+					.package = c.package->name,
+					.id = artifact->id,
+					.path = artifact->path,
+					.kind = artifact->kind == mdl::kernels::Artifact::Kind::sharedLibrary ? "shared-library"
+																						  : "static-library",
+					.dependencies = {}
+			};
+			for (const auto& d : artifact->dependencies) {
+				using Kind = mdl::kernels::Dependency::Kind;
+				linked.dependencies.push_back(
+						std::string(
+								d.kind == Kind::runtime	   ? "runtime:"
+								: d.kind == Kind::artifact ? "artifact:"
+														   : "system-library:"
+						) +
+						d.name
+				);
+				if (d.kind == Kind::artifact)
+					pending.push_back(d.name);
+			}
+			k.artifacts.push_back(std::move(linked));
+		}
+		opts.selectedKernels->push_back(std::move(k));
 	}
 	mod = backend::lowerRelax(mod, target, opts);
 	dump(mod, "relax-lowered");

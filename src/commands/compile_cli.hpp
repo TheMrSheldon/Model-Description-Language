@@ -14,6 +14,7 @@
 #include <mdl/utils/pathpattern.hpp>
 #include <mdl/utils/utils.hpp>
 
+#include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include <format>
@@ -173,6 +174,7 @@ struct CompileArgs {
 	std::optional<std::filesystem::path> output;
 	std::optional<std::filesystem::path> argvals;
 	std::optional<std::filesystem::path> depfile;
+	std::optional<std::filesystem::path> kernelReport;
 	std::vector<std::string> gradFunctions;
 	std::vector<std::string> trainable;
 	std::optional<std::filesystem::path> trainableFile;
@@ -213,6 +215,54 @@ inline void writeDepfile(
 	for (const auto& source : sources)
 		out << " \\\n  " << escape(source.string());
 	out << "\n";
+}
+
+/** @brief A 64-bit FNV-1a hash of a file's contents (`fnv1a64:<hex>`), to identify the exact package files. */
+inline std::string fileHash(const std::filesystem::path& file) {
+	std::ifstream in{file, std::ios::binary};
+	uint64_t hash = 0xcbf29ce484222325ull;
+	for (char c; in.get(c);) {
+		hash ^= static_cast<unsigned char>(c);
+		hash *= 0x100000001b3ull;
+	}
+	return std::format("fnv1a64:{:016x}", hash);
+}
+
+/**
+ * @brief Writes the kernel report (`--kernel-report`): the implementations of kernel packages that the compiled code
+ * calls, and what must be linked (structured; integrations translate it, see docs/kernels.md).
+ */
+inline void writeKernelReport(const std::filesystem::path& file, const std::vector<mdl::SelectedKernel>& kernels) {
+	nlohmann::json report{{"schema", 1}, {"kernels", nlohmann::json::array()}, {"link", nlohmann::json::array()}};
+	std::vector<std::string> linked;
+	for (const auto& k : kernels) {
+		report["kernels"].push_back(
+				{{"function", k.function},
+				 {"package", k.package},
+				 {"version", k.version},
+				 {"implementation", k.implementation},
+				 {"symbol", k.symbol},
+				 {"manifest", k.manifest.string()},
+				 {"manifest_hash", fileHash(k.manifest)},
+				 {"artifact", k.artifacts.front().id}}
+		);
+		// The libraries in link order: an artifact before the artifacts it depends on.
+		for (const auto& a : k.artifacts) {
+			const std::string key = a.package + "/" + a.id;
+			if (std::ranges::contains(linked, key))
+				continue;
+			linked.push_back(key);
+			report["link"].push_back(
+					{{"package", a.package},
+					 {"artifact", a.id},
+					 {"kind", a.kind},
+					 {"path", a.path.string()},
+					 {"hash", fileHash(a.path)},
+					 {"dependencies", a.dependencies}}
+			);
+		}
+	}
+	std::ofstream{file} << report.dump(2) << "\n";
 }
 
 /** @brief Parses --quantize values FORMAT[:GROUP]=PATTERN[,PATTERN...]. */
@@ -330,6 +380,8 @@ inline void runCompileCommand(const CompileArgs& args) {
 	}
 	mdl::CompileOptions compileOpts = args.compileOpts;
 	compileOpts.source = args.inputs[0]; // its project's .mdl/kernels is a kernel directory
+	std::vector<mdl::SelectedKernel> selectedKernels;
+	compileOpts.selectedKernels = &selectedKernels;
 	for (const auto& value : args.ellipsisRanks) {
 		const auto eq = value.find('=');
 		const std::string number = eq == std::string::npos ? value : value.substr(eq + 1);
@@ -375,8 +427,21 @@ inline void runCompileCommand(const CompileArgs& args) {
 			std::filesystem::create_directories(path.parent_path());
 		generator->generate(exports, path);
 	}
-	if (args.depfile)
-		writeDepfile(*args.depfile, output, program.sources);
+	if (args.kernelReport)
+		writeKernelReport(*args.kernelReport, selectedKernels);
+	if (args.depfile) {
+		// Changing a used package (its manifest or library) rebuilds the model too.
+		auto sources = program.sources;
+		for (const auto& k : selectedKernels) {
+			std::vector<std::filesystem::path> files{k.manifest};
+			for (const auto& a : k.artifacts)
+				files.push_back(a.path);
+			for (const auto& file : files)
+				if (!std::ranges::contains(sources, file))
+					sources.push_back(file);
+		}
+		writeDepfile(*args.depfile, output, sources);
+	}
 }
 
 /**
@@ -524,6 +589,22 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	app.add_option(
 			"--kernels-dir", args.compileOpts.kernelDirs,
 			"A kernel directory with kernel packages (searched first; repeatable; see docs/kernels.md)."
+	);
+	app.add_option(
+			"--kernel-package", args.compileOpts.kernelPackages,
+			"Use only these kernel packages (repeatable; all packages of the kernel directories if not given)."
+	);
+	app.add_option(
+			"--no-kernel-package", args.compileOpts.noKernelPackages, "Do not use this kernel package (repeatable)."
+	);
+	app.add_flag(
+			"!--no-kernel-packages", args.compileOpts.useKernelPackages,
+			"Use no kernel packages (only the built-in kernels and TVM's code generation)."
+	);
+	app.add_option(
+			"--kernel-report", args.kernelReport,
+			"Write a JSON report of the implementations of kernel packages that the compiled code calls and of the "
+			"libraries to link (see docs/kernels.md)."
 	);
 	return config;
 }

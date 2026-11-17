@@ -4,10 +4,10 @@ Optimized kernels come from **kernel packages** in kernel directories. A package
 model, how to call its prebuilt implementation (a C function), and which binaries provide it for which platforms. The
 compiler selects implementations and falls back to TVM's code generation for everything else.
 
-**Status:** the package format (`schema: 1`), the kernel directories, matching and selection (`mdl-kernels list`,
-`check`, `dump`) are implemented. Compiling with the selected implementations, the link report, and the CMake
-integration follow (until then, `mdlc` compiles without packages); the built-in oneDNN kernels move into a package
-after that.
+**Status:** the package format (`schema: 1`), the kernel directories, matching, selection, compiling with the selected
+implementations, the link report, and the CMake integration are implemented. Of the built-in oneDNN kernels, softmax
+is a package (`kernels/onednn`); the others are still called by the compiler directly. Undecided constraints make an
+implementation ineligible (runtime checks are planned); CUDA artifacts are not supported yet.
 
 ## Kernel directories
 Each immediate subdirectory of a kernel directory that contains a `package.yml` is a package. Its directory must have
@@ -63,6 +63,40 @@ replaces a binding that a selected one replaces. Captured inputs may be shared.
 **Region rules.** The bindings of a region are replaced by one call: an intermediate result that is also used outside
 the region makes the candidate ineligible.
 
+## Compiling with kernel packages
+`mdlc` matches the packages of the kernel directories at the matching boundary and replaces every selected region by a
+call of its implementation: a C function call (`call_extern`) with the evaluated arguments, whose nonzero return value
+is a runtime error naming the kernel. Everything else is compiled by TVM as before.
+
+- `--kernel-package NAME` (repeatable) uses only these packages, `--no-kernel-package NAME` excludes one, and
+  `--no-kernel-packages` uses none.
+- `--kernel-report FILE` writes what the compiled code calls and what must be linked (the structured dependency
+  information; integrations translate it):
+  ```json
+  { "schema": 1,
+    "kernels": [ { "function": "M__forward", "package": "scaled_add_c", "version": "1.0",
+                   "implementation": "scaled-add-f32", "symbol": "test_scaled_add_f32", "artifact": "host",
+                   "manifest": ".../package.yml", "manifest_hash": "fnv1a64:..." } ],
+    "link": [ { "package": "scaled_add_c", "artifact": "host", "kind": "static-library", "path": ".../libscaled_add_c.a",
+                "hash": "fnv1a64:...", "dependencies": ["system-library:m"] } ] }
+  ```
+  `link` lists every library in link order (an artifact before the artifacts it depends on).
+- The depfile (`--depfile`) also lists the manifests and libraries of the used packages, so changing a package
+  rebuilds the model.
+- `mdl-kernels link-args REPORT [--style gnu|msvc]` prints linker arguments for a report (for builds without CMake).
+
+### CMake
+- `mdl_add_model(... KERNEL_PACKAGES <name>...)` lets the model use these packages and links their libraries (and
+  their dependencies) into the model's target, so that they propagate to the executable. Without it, the model uses no
+  kernel packages (a package that CMake does not link could not be linked). The `onednn` package is added whenever the
+  model uses the oneDNN kernels (`KERNELS onednn`, the default).
+- `mdl_kernel_package(<name> MANIFEST package.yml.in SOURCES ...)` builds a package in the project (the library and
+  the manifest, into the build tree's kernel directory); with `TARGETS` instead of `SOURCES`, existing targets are the
+  libraries (see `kernels/onednn`).
+- Packages that the project does not build (e.g. installed ones) are imported at configure time with
+  `mdl-kernels deps --kernel-package <name>`: it prints the package's libraries for this host as CMake `IMPORTED`
+  targets (`mdl_kernel_package_<name>`) with their link dependencies (`--format json` for other tools).
+
 ## `package.yml`
 ```yaml
 schema: 1                   # the format version (required)
@@ -112,7 +146,17 @@ implementations:
     guarantees: { numerics: { exact: true } }  # declared by the author, never derived by the compiler
 ```
 Unknown keys, unknown schema versions, and references to unknown patterns or artifacts are errors (with the file and
-line).
+line). YAML anchors and merge keys work, e.g. for implementations that differ in the symbol and element type:
+```yaml
+  softmax-f32: &softmax
+    pattern: softmax
+    symbol: mdl_softmax_f32
+    ...
+  softmax-bf16:
+    <<: *softmax
+    symbol: mdl_softmax_bf16
+    applicability: { dtype: { x: bfloat16 } }
+```
 
 ### Artifacts
 - `platform` states binary compatibility: `os` (linux, windows, darwin), `arch` (x86_64, aarch64), `abi` (gnu, msvc,

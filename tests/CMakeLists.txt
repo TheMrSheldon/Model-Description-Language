@@ -53,15 +53,26 @@ add_test(NAME mdl_kernels_list COMMAND mdl-kernels --kernels-dir "${_kernels}/va
 set_tests_properties(mdl_kernels_list PROPERTIES PASS_REGULAR_EXPRESSION "cubin, device sm_80.*scaled_add 1.0")
 add_test(NAME mdl_kernels_list_problems COMMAND mdl-kernels --kernels-dir "${_kernels}/broken" list)
 set_tests_properties(mdl_kernels_list_problems PROPERTIES WILL_FAIL TRUE)
+add_subdirectory(kernels/e2e)
+
 # mdl-kernels check/dump: the selection among competing implementations (tests/kernels/matching), the verdicts, and the
 # Relax module at the matching boundary.
 set(_model "${_kernels}/models/scaled_add.dlm")
-add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}")
+add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_check PROPERTIES PASS_REGULAR_EXPRESSION
 	"M__forward: competing/scaled-add-f32 at v4.*M__other: competing/add-f32.*13 candidate\\(s\\), 4 selected")
-add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}")
+add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_explain PROPERTIES PASS_REGULAR_EXPRESSION
 	"overlaps competing/scaled-add-f32.*B % 16 == 0\\) \\[could be checked at runtime\\].*it is float32")
+# mdl-kernels deps/link-args: the packages' link requirements (CMake IMPORTED targets), and linker arguments from the
+# kernel report of the end-to-end test.
+add_test(NAME mdl_kernels_deps COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" deps --kernel-package competing)
+set_tests_properties(mdl_kernels_deps PROPERTIES PASS_REGULAR_EXPRESSION
+	"add_library\\(mdl_kernel_artifact_competing_host STATIC IMPORTED\\).*MDL_KERNEL_PACKAGE_BUILD_competing IMPORTED")
+add_test(NAME mdl_kernels_deps_unknown COMMAND mdl-kernels deps --kernel-package nonexistent)
+set_tests_properties(mdl_kernels_deps_unknown PROPERTIES WILL_FAIL TRUE)
+add_test(NAME mdl_kernels_link_args COMMAND mdl-kernels link-args "${CMAKE_CURRENT_BINARY_DIR}/kernels/e2e/kernel-report.json")
+set_tests_properties(mdl_kernels_link_args PROPERTIES PASS_REGULAR_EXPRESSION "scaled_add_c")
 add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
 set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")
 

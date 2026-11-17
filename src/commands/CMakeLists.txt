@@ -9,7 +9,7 @@ mdl_add_command(mdl-format mdl-format.cpp mdl_format) # the formatter
 mdl_add_command(mdls mdls.cpp mdls_lib)               # the language server
 
 if(MDL_ENABLE_COMPILER)
-	mdl_add_command(mdlc mdlc.cpp mdl)         # the compiler
+	mdl_add_command(mdlc mdlc.cpp mdl nlohmann_json::nlohmann_json) # the compiler
 	mdl_add_command(mdl-info mdl-info.cpp mdl) # information about TVM targets
-	mdl_add_command(mdl-kernels mdl-kernels.cpp mdl) # inspects kernel packages
+	mdl_add_command(mdl-kernels mdl-kernels.cpp mdl nlohmann_json::nlohmann_json) # inspects kernel packages
 endif()

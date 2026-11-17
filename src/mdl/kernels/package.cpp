@@ -515,6 +515,40 @@ namespace mdl::kernels {
 		};
 	} // namespace
 
+	namespace {
+		/**
+		 * @brief @p node with YAML merge keys expanded (`<<: *anchor` copies the anchor's keys that the map does not
+		 * have; yaml-cpp does not implement them), e.g. for implementations that differ only in the symbol.
+		 */
+		YAML::Node expandMerges(YAML::Node node) {
+			// In place (the loaded document is ours): the nodes keep their positions for the problems.
+			if (node.IsSequence()) {
+				for (auto item : node)
+					expandMerges(item);
+				return node;
+			}
+			if (!node.IsMap())
+				return node;
+			if (const auto merge = node["<<"]) {
+				std::vector<YAML::Node> sources;
+				if (merge.IsSequence())
+					for (const auto& m : merge)
+						sources.push_back(m);
+				else
+					sources.push_back(merge);
+				node.remove("<<");
+				for (auto& source : sources)
+					if (source.IsMap())
+						for (const auto& kv : expandMerges(source))
+							if (!node[kv.first.as<std::string>()])
+								node[kv.first.as<std::string>()] = kv.second;
+			}
+			for (auto kv : node)
+				expandMerges(kv.second);
+			return node;
+		}
+	} // namespace
+
 	std::optional<Package> loadPackage(const std::filesystem::path& file, std::vector<Problem>& problems) {
 		const size_t before = problems.size();
 		Reader reader{file, problems};
@@ -528,7 +562,7 @@ namespace mdl::kernels {
 			);
 		};
 		try {
-			const YAML::Node root = YAML::LoadFile(file.string());
+			const YAML::Node root = expandMerges(YAML::LoadFile(file.string()));
 			auto package = reader.package(root);
 			sorted();
 			if (reader.errors > 0)

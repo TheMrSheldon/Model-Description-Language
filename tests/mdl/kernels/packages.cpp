@@ -195,3 +195,48 @@ implementations:
 							  "18: the condition '$x.ndim' must be a condition, not an integer",
 					  });
 }
+
+TEST_CASE("implementations can share settings through YAML merge keys", "[kernels]") {
+	TempDir dir{"mdl-kernels-merge"};
+	write(dir.path / "p" / "package.yml", R"(schema: 1
+package: p
+version: "1"
+artifacts:
+  a: { kind: static-library, path: a.a, platform: { os: linux, arch: x86_64 } }
+patterns:
+  p: { op: relax.exp, args: [{ capture: x }] }
+implementations:
+  f32: &base
+    pattern: p
+    artifacts: [a]
+    symbol: exp_f32
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+    applicability: { dtype: { x: float32 } }
+  f16:
+    <<: *base
+    symbol: exp_f16
+    applicability: { dtype: { x: float16 } }
+    colour: red
+)");
+	std::vector<Problem> problems;
+	CHECK_FALSE(loadPackage(dir.path / "p" / "package.yml", problems).has_value());
+	REQUIRE(problems.size() == 1); // positions are kept in merged maps
+	CHECK(problems[0].line == 22); // the line of `colour`
+	problems.clear();
+	write(dir.path / "p" / "package.yml", [&] {
+		std::ifstream in{dir.path / "p" / "package.yml"};
+		std::string text{std::istreambuf_iterator<char>{in}, {}};
+		return text.substr(0, text.find("    colour: red"));
+	}());
+	auto p = loadPackage(dir.path / "p" / "package.yml", problems);
+	REQUIRE(p.has_value());
+	REQUIRE(p->implementations.size() == 2);
+	const auto& f16 = p->implementations[1];
+	CHECK(f16.symbol == "exp_f16");				   // its own
+	CHECK(f16.pattern == "p");					   // merged
+	CHECK(f16.arguments.size() == 2);			   // merged
+	CHECK(f16.dtypes.at("x") == std::vector<std::string>{"float16"}); // its own (not merged into)
+}
