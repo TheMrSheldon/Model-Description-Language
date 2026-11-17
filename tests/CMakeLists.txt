@@ -60,10 +60,10 @@ add_subdirectory(kernels/e2e)
 set(_model "${_kernels}/models/scaled_add.dlm")
 add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_check PROPERTIES PASS_REGULAR_EXPRESSION
-	"M__forward: competing/scaled-add-f32 at v4.*M__other: competing/add-f32.*13 candidate\\(s\\), 4 selected")
+	"M__forward: competing/scaled-add-aligned at v4 \\(with a runtime guard\\).*M__other: competing/add-f32.*20 candidate\\(s\\), 5 selected")
 add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_explain PROPERTIES PASS_REGULAR_EXPRESSION
-	"overlaps competing/scaled-add-f32.*B % 16 == 0\\) \\[could be checked at runtime\\].*it is float32")
+	"guard    where \\$x.shape\\[0\\] % 16 == 0 \\(checked at runtime: B % 16 == 0\\).*overlaps competing/scaled-add-aligned.*selected with a runtime guard.*it is float32.*the constant is 2 \\(it is 3\\)")
 # mdl-kernels deps/link-args: the packages' link requirements (CMake IMPORTED targets), and linker arguments from the
 # kernel report of the end-to-end test.
 add_test(NAME mdl_kernels_deps COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" deps --kernel-package competing)

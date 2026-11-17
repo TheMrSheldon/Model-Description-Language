@@ -16,6 +16,12 @@ patterns:
       - op: relax.multiply
         args: [{ capture: x }, { const: 2.0 }]
       - { capture: y }
+  scaled3-add:
+    op: relax.add
+    args:
+      - op: relax.multiply
+        args: [{ capture: x }, { const: 3.0 }]
+      - { capture: y }
 
 implementations:
   scaled-add-f32:
@@ -36,3 +42,20 @@ implementations:
       dtype: { x: float32, y: float32 }
       layout: { x: row-major, y: row-major }
       where: ["$x.shape == $y.shape"]
+  scaled3-add-even:   # a runtime guard: the batch size is symbolic (TVM's code for odd batch sizes)
+    pattern: scaled3-add
+    artifacts: [host]
+    priority: 10
+    symbol: test_scaled3_add_even_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $y.data }
+        - { type: int64, value: "prod($x.shape)" }
+      outputs:
+        - { shape: $x.shape, dtype: $x.dtype }
+    applicability:
+      dtype: { x: float32, y: float32 }
+      where: ["$x.shape == $y.shape", "$x.shape[0] % 2 == 0"]

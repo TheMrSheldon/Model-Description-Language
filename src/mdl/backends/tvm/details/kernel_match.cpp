@@ -10,6 +10,7 @@
 #include <tvm/relax/dataflow_pattern.h>
 #include <tvm/relax/expr_functor.h>
 #include <tvm/relax/transform.h>
+#include <tvm/relax/utils.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
 
@@ -288,8 +289,10 @@ namespace mdl::backend::tvm {
 			if (const auto* imm = simplified.as<::tvm::IntImmNode>())
 				return {what, intValue(imm) != 0 ? Verdict::Result::proven : Verdict::Result::refuted, "", {}};
 			const bool symbolic = !::tvm::tirx::UndefinedVars(simplified).empty();
-			return {what, Verdict::Result::unknown, "undecided at compile time: " + text(simplified),
-					symbolic ? Verdict::Class::shapeArithmetic : Verdict::Class::notGuardable};
+			if (!symbolic)
+				return {what, Verdict::Result::unknown, "undecided at compile time: " + text(simplified), {}};
+			return {what, Verdict::Result::unknown, "checked at runtime: " + text(simplified),
+					Verdict::Class::shapeArithmetic, simplified};
 		}
 
 		std::string dtypeName(const ::tvm::PrimType& t) {
@@ -386,14 +389,6 @@ namespace mdl::backend::tvm {
 						if (!matched)
 							continue;
 						const auto& m = matched.value();
-						// Constants: exact unless a tolerance is given.
-						bool constantsMatch = true;
-						for (const auto& [node, pattern] : e.compiled.constants) {
-							auto value = scalarConstant(m.at(pattern));
-							constantsMatch &= value && std::abs(*value - node->value) <= node->tolerance.value_or(0.0);
-						}
-						if (!constantsMatch)
-							continue;
 
 						Candidate c{.package = e.package, .implementation = e.impl, .function = gv->name_hint};
 						// The region: the bindings of the matched operator calls (the root last).
@@ -432,6 +427,47 @@ namespace mdl::backend::tvm {
 									 "",
 									 {}}
 							);
+						}
+
+						// Constants: exact unless a tolerance is given; the value may be an expression over the captures.
+						for (const auto& [node, pattern] : e.compiled.constants) {
+							const auto actual = scalarConstant(m.at(pattern));
+							std::optional<double> expected = node->value;
+							std::string spec = std::format("{}", node->value);
+							if (!node->valueExpr.empty()) {
+								spec = node->valueExpr;
+								expected.reset();
+								try {
+									auto parsed = expr::parse(node->valueExpr, [&] {
+										std::vector<std::string> names;
+										for (const auto& [n, _] : captures)
+											names.push_back(n);
+										return names;
+									}());
+									auto value =
+											::tvm::sym::Analyzer()->Simplify(Evaluator{captures}.eval(**parsed).scalar);
+									if (const auto* imm = value.as<::tvm::IntImmNode>())
+										expected = static_cast<double>(intValue(imm));
+								} catch (const EvalError&) {
+								}
+							}
+							const std::string what = std::format("the constant is {}", spec);
+							if (!actual)
+								c.verdicts.push_back({what, Verdict::Result::refuted, "it is not a scalar constant", {}}
+								);
+							else if (!expected)
+								c.verdicts.push_back(
+										{what, Verdict::Result::unknown, "the expected value is not a constant", {}}
+								);
+							else {
+								const bool ok = std::abs(*actual - *expected) <= node->tolerance.value_or(0.0);
+								c.verdicts.push_back(
+										{what,
+										 ok ? Verdict::Result::proven : Verdict::Result::refuted,
+										 ok ? "" : std::format("it is {:.17g}", *actual),
+										 {}}
+								);
+							}
 						}
 
 						// The artifact.
@@ -511,9 +547,13 @@ namespace mdl::backend::tvm {
 							evaluate(std::format("{} == $out.dtype", dtype), "the result's element type is " + dtype);
 						}
 
+						// Unknown shape arithmetic becomes a runtime guard (the original region is the fallback).
 						c.eligible = std::ranges::all_of(c.verdicts, [](const Verdict& v) {
-							return v.result == Verdict::Result::proven;
+							return v.result == Verdict::Result::proven || v.guard.defined();
 						});
+						c.guarded = c.eligible && std::ranges::any_of(c.verdicts, [](const Verdict& v) {
+										return v.result != Verdict::Result::proven;
+									});
 						if (!c.eligible) {
 							const auto refuted = std::ranges::count_if(c.verdicts, [](const Verdict& v) {
 								return v.result == Verdict::Result::refuted;
@@ -576,7 +616,18 @@ namespace mdl::backend::tvm {
 			::tvm::IRModule run(const ::tvm::IRModule& mod) {
 				for (const auto& [gv, base] : mod->functions)
 					if (const auto* fn = base.as<relax::FunctionNode>()) {
-						auto updated = VisitExpr(::tvm::ffi::GetRef<relax::Function>(fn));
+						const auto func = ::tvm::ffi::GetRef<relax::Function>(fn);
+						valueOf.clear();
+						position.clear();
+						for (const auto& [var, value] : relax::AnalyzeVar2Value(func))
+							valueOf.emplace(var.get(), value);
+						relax::PostOrderVisit(func, [&](const Expr& e) {
+							if (const auto* vb = e.as<relax::SeqExprNode>())
+								for (const auto& block : vb->blocks)
+									for (const auto& binding : block->bindings)
+										position.emplace(binding->var.get(), position.size());
+						});
+						auto updated = VisitExpr(func);
 						builder_->UpdateFunction(gv, updated.as_or_throw<::tvm::BaseFunc>());
 					}
 				return builder_->GetContextIRModule();
@@ -588,11 +639,80 @@ namespace mdl::backend::tvm {
 				auto it = roots.find(binding->var.get());
 				if (it == roots.end())
 					return relax::ExprMutator::VisitBinding_(binding);
-				ReEmitBinding(binding, builder_->Normalize(call(*it->second, binding->var)));
+				const Candidate& c = *it->second;
+				Expr kernel = call(c, binding->var);
+				if (c.guarded)
+					kernel = guarded(c, binding, kernel);
+				ReEmitBinding(binding, builder_->Normalize(kernel));
 			}
 
 		private:
 			std::unordered_map<const ::tvm::VarNode*, const Candidate*> roots;
+			std::unordered_map<const ::tvm::VarNode*, Expr> valueOf; ///< the bindings of the current function
+			std::unordered_map<const ::tvm::VarNode*, size_t> position;
+			int64_t fallbacks = 0;
+
+			/**
+			 * @brief `if guard: kernel else: fallback(...)`: the region becomes a private function, which TVM fuses like
+			 * any other and which is inlined after fusion (inlineGuardFallbacks; FuseOps does not look into `If`
+			 * branches); its original bindings become dead code.
+			 */
+			Expr guarded(const Candidate& c, const relax::VarBindingNode* root, const Expr& kernel) {
+				PrimExpr cond;
+				for (const auto& v : c.verdicts)
+					if (v.result != Verdict::Result::proven)
+						cond = cond.defined() ? ::tvm::logical_and(cond, v.guard) : v.guard;
+				std::vector<Var> order = c.replaced;
+				std::ranges::sort(order, {}, [&](const Var& v) { return position.at(v.get()); });
+				auto valueOfVar = [&](const Var& v) {
+					return v.same_as(root->var) ? root->value : valueOf.at(v.get());
+				};
+
+				// The parameters: the values the region uses from outside.
+				std::unordered_set<const ::tvm::VarNode*> region;
+				for (const auto& v : order)
+					region.insert(v.get());
+				std::vector<Var> inputs;
+				for (const auto& v : order)
+					for (const auto& free : relax::FreeVars(valueOfVar(v)))
+						if (!region.contains(free.get()) &&
+							std::ranges::none_of(inputs, [&](const Var& u) { return u.same_as(free); }))
+							inputs.push_back(free);
+				::tvm::ffi::Map<Var, Expr> fresh;
+				Array<Var> params;
+				for (const auto& v : inputs) {
+					Var p(std::string(v->name), relax::GetType(v));
+					fresh.Set(v, p);
+					params.push_back(p);
+				}
+				Array<relax::Binding> bindings;
+				for (const auto& v : order) {
+					Var copy(std::string(v->name), relax::GetType(v));
+					bindings.push_back(relax::VarBinding(copy, relax::Bind(valueOfVar(v), fresh)));
+					fresh.Set(v, copy);
+				}
+				auto body = relax::SeqExpr({relax::BindingBlock(bindings)}, fresh.at(root->var));
+				// (The function uses the caller's symbolic variables: InlinePrivateFunctions does not substitute them.)
+				auto func = relax::Function(params, body, relax::GetType(root->var));
+				Expr fallback;
+				if (relax::FreeSymbolicVars(func).empty()) {
+					Array<Expr> args;
+					for (const auto& v : inputs)
+						args.push_back(VisitExpr(v));
+					// (A distinct value per fallback: the builder would merge equal functions, but each must have a
+					// single caller, as the inliner does not copy them.)
+					func = ::tvm::WithAttr(std::move(func), kGuardFallbackAttr, ++fallbacks);
+					auto gv = builder_->AddFunction(func, c.implementation->symbol + "_fallback");
+					fallback = Call(::tvm::Type::Missing(), gv, args);
+				} else {
+					// A symbolic variable that the parameters do not define: the region stays in the branch (unfused).
+					::tvm::ffi::Map<Var, Expr> outer;
+					for (size_t i = 0; i < inputs.size(); ++i)
+						outer.Set(params[i], VisitExpr(inputs[i]));
+					fallback = relax::Bind(body, outer);
+				}
+				return relax::If(cond, relax::SeqExpr({}, kernel), relax::SeqExpr({}, fallback));
+			}
 
 			Expr call(const Candidate& c, const Var& root) {
 				const auto& impl = *c.implementation;
@@ -649,6 +769,66 @@ namespace mdl::backend::tvm {
 		return relax::transform::DeadCodeElimination({})(mod);
 	}
 
+	namespace {
+		/** @brief Replaces the calls of guard fallbacks by their bodies (each fallback has a single caller). */
+		class FallbackInliner : public relax::ExprMutator {
+		public:
+			explicit FallbackInliner(const ::tvm::IRModule& mod) : relax::ExprMutator(mod), mod(mod) {}
+
+			using relax::ExprMutator::VisitExpr_;
+
+			Expr VisitExpr_(const ::tvm::CallNode* op) override {
+				auto call = relax::ExprMutator::VisitExpr_(op).as_or_throw<Call>();
+				const auto* gv = call->op.as<::tvm::GlobalVarNode>();
+				if (gv == nullptr)
+					return call;
+				const auto* callee = mod->Lookup(::tvm::ffi::GetRef<::tvm::GlobalVar>(gv)).as<relax::FunctionNode>();
+				if (callee == nullptr || !callee->HasNonzeroAttr(kGuardFallbackAttr))
+					return call;
+				// The parameters' shapes use the caller's symbolic variables (see guarded): only the parameters
+				// themselves are substituted.
+				::tvm::ffi::Map<Var, Expr> args;
+				for (size_t i = 0; i < callee->params.size(); ++i)
+					args.Set(callee->params[i], call->args[i]);
+				return relax::Bind(callee->body, args);
+			}
+
+		private:
+			::tvm::IRModule mod;
+		};
+	} // namespace
+
+	::tvm::transform::Pass inlineGuardFallbacks() {
+		return ::tvm::transform::CreateModulePass(
+				[](::tvm::IRModule mod, ::tvm::transform::PassContext) {
+					std::vector<::tvm::GlobalVar> fallbacks;
+					for (const auto& [gv, f] : mod->functions)
+						if (f->HasNonzeroAttr(kGuardFallbackAttr))
+							fallbacks.push_back(gv);
+					for (const auto& [gv, f] : mod->functions)
+						if (fallbacks.empty())
+							return mod;
+					std::vector<std::pair<::tvm::GlobalVar, relax::Function>> callers;
+					for (const auto& [gv, f] : mod->functions)
+						if (const auto* fn = f.as<relax::FunctionNode>(); fn && !fn->HasNonzeroAttr(kGuardFallbackAttr))
+							callers.emplace_back(gv, ::tvm::ffi::GetRef<relax::Function>(fn));
+					FallbackInliner inliner{mod};
+					for (const auto& [gv, fn] : callers)
+						mod->Update(gv, inliner.VisitExpr(fn).as_or_throw<::tvm::BaseFunc>());
+					for (const auto& gv : fallbacks)
+						mod->Remove(gv);
+					return mod;
+				},
+				0, "mdl.InlineGuardFallbacks", {}
+		);
+	}
+
+	bool needsNonDataflow(const MatchResult& result) {
+		return std::ranges::any_of(result.candidates, [](const Candidate& c) {
+			return c.outcome == Candidate::Outcome::selected && c.guarded;
+		});
+	}
+
 	void explain(std::ostream& out, const MatchResult& result, const kernels::Discovery& discovery, bool verbose) {
 		if (!verbose) {
 			for (const auto& p : discovery.problems)
@@ -669,8 +849,11 @@ namespace mdl::backend::tvm {
 				out << std::format("  problem: {}: pattern '{}': {}\n", p.package->name, p.pattern, p.message);
 		}
 
-		auto mark = [](Verdict::Result r) {
-			return r == Verdict::Result::proven ? "proven" : r == Verdict::Result::refuted ? "not met" : "unknown";
+		auto mark = [](const Verdict& v) {
+			return v.result == Verdict::Result::proven	  ? "proven"
+				   : v.result == Verdict::Result::refuted ? "not met"
+				   : v.guard.defined()					  ? "guard"
+														  : "unknown";
 		};
 		std::string function;
 		size_t selected = 0;
@@ -679,8 +862,8 @@ namespace mdl::backend::tvm {
 				if (c.outcome == Candidate::Outcome::selected) {
 					++selected;
 					out << std::format(
-							"{}: {}/{} at {}\n", c.function, c.package->name, c.implementation->id,
-							std::string(c.replaced.back()->name)
+							"{}: {}/{} at {}{}\n", c.function, c.package->name, c.implementation->id,
+							std::string(c.replaced.back()->name), c.guarded ? " (with a runtime guard)" : ""
 					);
 				}
 				continue;
@@ -706,17 +889,16 @@ namespace mdl::backend::tvm {
 			}
 			out << std::format("    replaces {}; captures {}\n", replaced, captures.empty() ? "none" : captures);
 			for (const auto& v : c.verdicts) {
-				out << std::format("    {:<8} {}", mark(v.result), v.what);
+				out << std::format("    {:<8} {}", mark(v), v.what);
 				if (!v.detail.empty())
 					out << " (" << v.detail << ")";
-				if (v.result == Verdict::Result::unknown && v.guardClass == Verdict::Class::shapeArithmetic)
-					out << " [could be checked at runtime]";
 				out << "\n";
 			}
 			switch (c.outcome) {
 			case Candidate::Outcome::selected:
 				++selected;
-				out << "    => selected\n";
+				out << (c.guarded ? "    => selected with a runtime guard (otherwise TVM's code)\n"
+								  : "    => selected\n");
 				break;
 			case Candidate::Outcome::overlapped:
 				out << "    => not selected: " << c.reason << "\n";

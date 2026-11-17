@@ -45,7 +45,7 @@ implementations:
         - { type: pointer, access: read, value: $y.data }
     applicability:
       dtype: { x: float32, y: float32 }
-  scaled-add-aligned:   # higher priority, but the batch size is symbolic: undecided, so ineligible
+  scaled-add-aligned:   # higher priority; the batch size is symbolic: selected with a runtime guard
     pattern: scaled-add
     artifacts: [host]
     priority: 20

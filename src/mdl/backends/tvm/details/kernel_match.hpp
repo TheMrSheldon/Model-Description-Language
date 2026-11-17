@@ -9,6 +9,7 @@
 #include <mdl/kernels.hpp>
 
 #include <tvm/ir/module.h>
+#include <tvm/ir/transform.h>
 #include <tvm/relax/expr.h>
 
 #include <ostream>
@@ -21,14 +22,15 @@ namespace mdl::backend::tvm {
 	struct Verdict {
 		enum class Result { proven, refuted, unknown };
 		/**
-		 * @brief How an unknown verdict could be resolved at runtime (runtime guards come in a later phase): shape
-		 * arithmetic over symbolic dimensions can be checked; numerics, artifacts, element types cannot.
+		 * @brief How an unknown verdict could be resolved at runtime: shape arithmetic over symbolic dimensions is
+		 * checked by a runtime guard; numerics, artifacts, element types cannot be.
 		 */
 		enum class Class { notGuardable, shapeArithmetic, pointer };
 		std::string what; ///< e.g. `where $x.shape[-1] % 16 == 0`
 		Result result;
 		std::string detail; ///< e.g. the simplified condition, or why it is unknown
 		Class guardClass = Class::notGuardable;
+		::tvm::PrimExpr guard; ///< the condition to check at runtime (shape arithmetic only)
 	};
 
 	/** @brief An implementation that matches at one place of a function. */
@@ -41,6 +43,7 @@ namespace mdl::backend::tvm {
 		std::string artifact; ///< the artifact that would be used (empty: none)
 		std::vector<Verdict> verdicts;
 		bool eligible = false;
+		bool guarded = false; ///< eligible only if its runtime guard holds (the original region is the fallback)
 		enum class Outcome { selected, overlapped, ineligible } outcome = Outcome::ineligible;
 		std::string reason; ///< why it is ineligible or overlapped
 	};
@@ -68,7 +71,9 @@ namespace mdl::backend::tvm {
 
 	/**
 	 * @brief Replaces every selected region of @p result by a call of its implementation (a PrimFunc that `call_extern`s
-	 * the symbol with the evaluated arguments, through `call_tir`); the region's other bindings become dead code.
+	 * the symbol with the evaluated arguments, through `call_tir`); the region's other bindings become dead code. A
+	 * guarded region becomes `if guard: kernel else: original region`; @p mod must not have dataflow blocks then (see
+	 * needsNonDataflow).
 	 */
 	::tvm::IRModule applyKernels(::tvm::IRModule mod, const MatchResult& result);
 
@@ -76,6 +81,18 @@ namespace mdl::backend::tvm {
 	 * @brief Writes the result of matching (`mdl-kernels check`): the selected implementations, and with @p verbose every
 	 * candidate with the verdicts of its constraints (`--explain`).
 	 */
+	/** @brief The attribute of the fallback functions of runtime guards (private Relax functions). */
+	inline constexpr const char* kGuardFallbackAttr = "mdl.guard_fallback";
+
+	/**
+	 * @brief Inlines the fallbacks of runtime guards into their `If` branches (after fusion: FuseOps does not look into
+	 * branches, so the fallbacks are fused as functions of their own).
+	 */
+	::tvm::transform::Pass inlineGuardFallbacks();
+
+	/** @brief Whether applyKernels emits a runtime guard (an `If`, which cannot be inside a dataflow block). */
+	bool needsNonDataflow(const MatchResult& result);
+
 	void explain(std::ostream& out, const MatchResult& result, const kernels::Discovery& discovery, bool verbose);
 
 } // namespace mdl::backend::tvm
