@@ -103,6 +103,23 @@ int mdl_layer_norm_f16(
 		int64_t channels, float eps
 );
 
+/**
+ * @brief The gradient of a layer normalization over the last axis with respect to its input: dx = rsqrt(var) * (g -
+ * mean(g) - xhat * mean(g * xhat)) with g = dy * gamma, for [rows, channels] tensors dy and xhat (the normalized
+ * input) and var [rows] (the variance plus epsilon).
+ */
+int mdl_layer_norm_backward_f32(
+		float* dx, const float* dy, const float* gamma, const float* xhat, const float* var, int64_t rows,
+		int64_t channels
+);
+int mdl_layer_norm_backward_bf16(
+		uint16_t* dx, const uint16_t* dy, const uint16_t* gamma, const uint16_t* xhat, const uint16_t* var,
+		int64_t rows, int64_t channels
+);
+int mdl_layer_norm_backward_f16(
+		uint16_t* dx, const uint16_t* dy, const uint16_t* gamma, const uint16_t* xhat, const uint16_t* var,
+		int64_t rows, int64_t channels
+);
 #ifdef __cplusplus
 }
 #endif

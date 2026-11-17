@@ -216,7 +216,7 @@ namespace mdl::kernels {
 				PatternNode node{.line = lineOf(n)};
 				if (!isMap(n, "a pattern node"))
 					return node;
-				if (n["capture"]) {
+				if (n["capture"] && !n["op"]) { // (an operator node may name its result with `capture:` too)
 					onlyKeys(n, {"capture", "not"}, "a capture");
 					node.kind = PatternNode::Kind::capture;
 					node.capture = string(n["capture"], "capture");
