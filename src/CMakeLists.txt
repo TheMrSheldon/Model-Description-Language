@@ -55,7 +55,7 @@ CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)
 ##########################################################################################
 if(MDL_ENABLE_COMPILER)
 	# TVM
-	# - Vendor kernels (GEMM, softmax, layer norm, ...) are provided by oneDNN through the mdl_kernels library, so TVM's
+	# - Optimized kernels (GEMM, softmax, layer norm, ...) come from kernel packages (oneDNN: kernels/onednn), so TVM's
 	#   BLAS contrib is not needed.
 	# - TVM's parallel loops use OpenMP so that TVM-generated kernels and oneDNN share one thread pool (no
 	#   oversubscription).
@@ -80,7 +80,7 @@ endif()
 ##########################################################################################
 # Libraries and commands
 ##########################################################################################
-add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_kernels (compiler)
+add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_profile (compiler)
 add_subdirectory(mdls)     # mdls_lib (the language server)
 add_subdirectory(commands) # mdl-format, mdls; mdlc, mdl-info (compiler)
 

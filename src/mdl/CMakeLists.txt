@@ -96,4 +96,4 @@ if(MDL_ENABLE_IREE)
 	message(STATUS "[mdl] IREE backend enabled (iree-compile subprocess)")
 endif()
 
-add_subdirectory(runtime) # mdl_runtime, mdl_kernels
+add_subdirectory(runtime) # mdl_runtime, mdl_profile

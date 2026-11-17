@@ -1,7 +1,7 @@
 // Kernel profiling for models compiled with `mdlc --profile`: the generated entry functions call
 // mdl_profile_begin/end around every kernel call. The times are summed per kernel kind (the kernel name without its
 // numeric suffix) and printed to stderr when the program exits.
-#include <mdl/runtime/kernels.h>
+#include <mdl/runtime/profile.h>
 
 #include <algorithm>
 #include <cctype>

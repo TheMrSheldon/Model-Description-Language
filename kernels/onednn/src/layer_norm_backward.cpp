@@ -3,7 +3,7 @@
 //   dx = rsqrt(var) * (g - mean(g) - xhat * mean(g * xhat)),  g = dy * gamma
 // where xhat is the normalized input and var the variance plus epsilon (both saved by the forward pass). 16-bit types
 // are computed in float32.
-#include <mdl/runtime/kernels.h>
+#include <mdl_onednn.h>
 
 #include <cmath>
 #include <cstdint>

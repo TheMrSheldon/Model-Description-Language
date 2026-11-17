@@ -72,7 +72,7 @@ namespace mdl {
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;
 
-		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/kernels.h). */
+		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/profile.h). */
 		bool profile = false;
 
 		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/kernels.md and kernels::kernelDirs). */

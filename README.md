@@ -52,7 +52,7 @@ mdlc model.dlm -a model.yml --build train -o model_train.o --binding cpp=model_t
 
 The object file exports one function per member function (`__tvm_ffi_<Module>__<function>`, TVM FFI calling
 convention: inputs, weights, preallocated outputs). Link it against `mdl_runtime` (TVM runtime) and the libraries of
-the kernel packages it uses (`mdlc --kernel-report`, `mdl-kernels link-args`; e.g. `mdl_kernels` for oneDNN).
+the kernel packages it uses (`mdlc --kernel-report`, `mdl-kernels link-args`; e.g. `mdl_onednn` for oneDNN).
 
 ## Gradients
 ```bash
