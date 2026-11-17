@@ -3,7 +3,7 @@
 schema: 1
 package: onednn
 version: "3.13.4-mdl1"
-description: oneDNN kernels (matrix products, softmax, gelu, layer norm, column sums).
+description: oneDNN kernels (matrix products, softmax, gelu, layer norm and its gradient, column sums).
 
 artifacts:
   mdl-kernels:
@@ -53,6 +53,35 @@ patterns:
   relax-matmul:
     op: relax.matmul
     args: [{ capture: a }, { capture: b }]
+  layer-norm-backward:   # the input's gradient of a layer norm as MDL's autodiff writes it: rsqrt(var) *
+    # (g - mean(g) - xhat * mean(g * xhat)), g = dy * gamma (xhat: the normalized input, var: the variance + eps)
+    op: relax.multiply
+    args:
+      - { op: relax.rsqrt, args: [{ capture: var }] }
+      - op: relax.subtract
+        args:
+          - op: relax.subtract
+            args:
+              - { op: relax.multiply, capture: g, args: [{ capture: dy }, { capture: gamma }] }
+              - { op: relax.reshape, args: [{ op: relax.divide, args: [{ op: relax.sum, args: [{ capture: g }], attrs: { axis: [-1], keepdims: false } }, { const: "$dy.shape[-1]" }] }, { capture: shape1 }] }
+          - op: relax.multiply
+            args:
+              - { capture: xhat }
+              - { op: relax.reshape, args: [{ op: relax.divide, args: [{ op: relax.sum, args: [{ op: relax.multiply, args: [{ capture: g }, { capture: xhat }] }], attrs: { axis: [-1], keepdims: false } }, { const: "$dy.shape[-1]" }] }, { capture: shape2 }] }
+  layer-norm-backward-16:   # the same in a 16-bit type (the sums in float32)
+    op: relax.multiply
+    args:
+      - { op: relax.rsqrt, args: [{ capture: var }] }
+      - op: relax.subtract
+        args:
+          - op: relax.subtract
+            args:
+              - { op: relax.multiply, capture: g, args: [{ capture: dy }, { capture: gamma }] }
+              - { op: relax.reshape, args: [{ op: relax.divide, args: [{ op: relax.astype, args: [{ op: relax.sum, args: [{ op: relax.astype, args: [{ capture: g }] }], attrs: { axis: [-1], keepdims: false } }] }, { const: "$dy.shape[-1]" }] }, { capture: shape1 }] }
+          - op: relax.multiply
+            args:
+              - { capture: xhat }
+              - { op: relax.reshape, args: [{ op: relax.divide, args: [{ op: relax.astype, args: [{ op: relax.sum, args: [{ op: relax.astype, args: [{ op: relax.multiply, args: [{ capture: g }, { capture: xhat }] }] }], attrs: { axis: [-1], keepdims: false } }] }, { const: "$dy.shape[-1]" }] }, { capture: shape2 }] }
   sum-rows:   # (not of a product, e.g. the gradient of LayerNorm's scale: TVM fuses that with the product)
     op: relax.collapse_sum_to
     args: [{ capture: x, not: relax.multiply }, { capture: shape }]
@@ -251,3 +280,50 @@ implementations:
     <<: *matmul-quantized
     symbol: mdl_matmul_q_f16
     applicability: { dtype: { a: float16 } }
+
+  layer-norm-backward-f32: &layer-norm-backward
+    pattern: layer-norm-backward
+    artifacts: [mdl-kernels]
+    priority: 100
+    symbol: mdl_layer_norm_backward_f32
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $dy.data }
+        - { type: pointer, access: read, value: $gamma.data }
+        - { type: pointer, access: read, value: $xhat.data }
+        - { type: pointer, access: read, value: $var.data }
+        - { type: int64, value: "prod($dy.shape[:-1])" }
+        - { type: int64, value: "$dy.shape[-1]" }
+      outputs:
+        - { shape: $dy.shape, dtype: $dy.dtype }
+    applicability:
+      dtype: { dy: float32, gamma: float32, xhat: float32, var: float32 }
+      layout: { dy: row-major, xhat: row-major, var: row-major }
+      where:
+        - "$xhat.shape == $dy.shape"
+        - "$gamma.shape == $dy.shape[-1:]"
+        - "prod($var.shape) == prod($dy.shape[:-1])"
+  layer-norm-backward-bf16:
+    <<: *layer-norm-backward
+    pattern: layer-norm-backward-16
+    symbol: mdl_layer_norm_backward_bf16
+    applicability:
+      dtype: { dy: bfloat16, gamma: bfloat16, xhat: bfloat16, var: bfloat16 }
+      layout: { dy: row-major, xhat: row-major, var: row-major }
+      where:
+        - "$xhat.shape == $dy.shape"
+        - "$gamma.shape == $dy.shape[-1:]"
+        - "prod($var.shape) == prod($dy.shape[:-1])"
+  layer-norm-backward-f16:
+    <<: *layer-norm-backward
+    pattern: layer-norm-backward-16
+    symbol: mdl_layer_norm_backward_f16
+    applicability:
+      dtype: { dy: float16, gamma: float16, xhat: float16, var: float16 }
+      layout: { dy: row-major, xhat: row-major, var: row-major }
+      where:
+        - "$xhat.shape == $dy.shape"
+        - "$gamma.shape == $dy.shape[-1:]"
+        - "prod($var.shape) == prod($dy.shape[:-1])"

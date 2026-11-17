@@ -19,7 +19,7 @@ set_property(TARGET mdl_profile PROPERTY POSITION_INDEPENDENT_CODE ON)
 # The oneDNN kernels (include/mdl/runtime/kernels.h): the library of the kernel package kernels/onednn.
 option(MDL_ENABLE_ONEDNN "Build the oneDNN kernels (mdl_kernels, the kernel package onednn)" ON)
 if(MDL_ENABLE_ONEDNN)
-	add_library(mdl_kernels STATIC kernels/onednn.cpp)
+	add_library(mdl_kernels STATIC kernels/onednn.cpp kernels/layer_norm_backward.cpp)
 	target_include_directories(mdl_kernels PUBLIC ${PROJECT_SOURCE_DIR}/include)
 	target_compile_features(mdl_kernels PUBLIC cxx_std_20)
 	set_property(TARGET mdl_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
