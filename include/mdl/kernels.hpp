@@ -85,7 +85,8 @@ namespace mdl::kernels {
 		std::map<std::string, std::string> attrs; ///< of an op, as written in the manifest (e.g. `axis: -1`)
 		std::string capture;					  ///< the name of a capture
 		double value = 0;						  ///< of a constant
-		std::optional<double> tolerance;		  ///< of a constant (exact if absent)
+		std::string valueExpr; ///< of a constant given as an integer expression over the captures (e.g. `$x.shape[-1]`)
+		std::optional<double> tolerance; ///< of a constant (exact if absent)
 		size_t line = 0;
 	};
 

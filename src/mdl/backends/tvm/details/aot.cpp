@@ -544,6 +544,62 @@ namespace mdl::backend::tvm {
 
 			static int64_t bytesOf(DataType dtype) { return (dtype.bits() * dtype.lanes() + 7) / 8; }
 
+			/**
+			 * @brief `var = if cond: a else: b` (a runtime guard): both branches compute into the same buffer (the
+			 * output, if @p var is returned); a branch's allocations are local to it.
+			 */
+			void translateIf(const ::tvm::VarNode* var, const relax::IfNode& branch) {
+				Value cond = evaluate(branch.cond);
+				if (cond.kind != Value::Kind::Prim)
+					unsupported("condition (not a scalar)");
+				const auto* info = tensorInfo(relax::GetType(::tvm::ffi::GetRef<::tvm::Var>(var)));
+				if (info == nullptr || !info->GetShape().defined())
+					unsupported("if (the result is not a tensor of known shape)");
+				tirx::BufferVar result;
+				if (auto out = outputOf.find(var); out != outputOf.end())
+					result = out->second;
+				else
+					result = allocate(info->GetShape().value(), info->dtype.value(), "result");
+				auto lower = [&](const Expr& e) {
+					const auto* seq = e.as<relax::SeqExprNode>();
+					if (seq == nullptr)
+						unsupported("if branch (expected a SeqExpr)");
+					std::vector<tirx::Stmt> outer = std::move(stmts);
+					stmts.clear();
+					for (const auto& block : seq->blocks)
+						for (const auto& b : block->bindings)
+							if (const auto* vb = b.as<relax::VarBindingNode>())
+								bindingOf[vb->var.get()] = vb->value;
+					// The branch's result: computed into the result buffer directly if it is an allocation.
+					const auto* resultVar = seq->body.as<::tvm::VarNode>();
+					while (resultVar != nullptr) {
+						auto it = bindingOf.find(resultVar);
+						const auto* alias = it == bindingOf.end() ? nullptr : it->second.as<::tvm::VarNode>();
+						if (alias == nullptr)
+							break;
+						resultVar = alias;
+					}
+					if (resultVar != nullptr)
+						outputOf.emplace(resultVar, result);
+					for (const auto& block : seq->blocks)
+						for (const auto& b : block->bindings)
+							translate(b);
+					Value v = evaluate(seq->body);
+					if (v.kind != Value::Kind::Tensor)
+						unsupported("if branch result (not a tensor)");
+					if (!v.buffer.same_as(result))
+						copy(v.buffer, result);
+					std::vector<tirx::Stmt> inner = std::move(stmts);
+					stmts = std::move(outer);
+					return inner.empty() ? tirx::Stmt(tirx::Evaluate(IntImm(DataType::Int(32), 0)))
+										 : tirx::SeqStmt::Flatten(inner);
+				};
+				auto thenStmt = lower(branch.true_branch);
+				auto elseStmt = lower(branch.false_branch);
+				stmts.push_back(tirx::IfThenElse(cond.prim, thenStmt, elseStmt));
+				values[var] = Value::tensor(result);
+			}
+
 			void translate(const relax::Binding& binding) {
 				const ::tvm::VarNode* var = binding->var.get();
 				if (const auto* mc = binding.as<relax::MatchCastNode>()) {
@@ -551,6 +607,10 @@ namespace mdl::backend::tvm {
 					return;
 				}
 				const Expr& value = binding.as<relax::VarBindingNode>()->value;
+				if (const auto* branch = value.as<relax::IfNode>()) {
+					translateIf(var, *branch);
+					return;
+				}
 				const auto* call = value.as<::tvm::CallNode>();
 				if (call == nullptr) {
 					values[var] = evaluate(value);

@@ -21,6 +21,7 @@
 #include <tvm/ir/prim/op.h>
 #include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
+#include <tvm/relax/transform.h>
 #include <tvm/relax/type.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/var.h>
@@ -696,12 +697,21 @@ void mdl::backends::tvm::compileToFile(
 		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::Tvm || !allowed ||
 			   std::ranges::contains(opts.noKernelPackages, p.name);
 	});
-	const auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
+	auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
 	if (opts.inspectKernels != Inspection::none) {
 		backend::explain(*opts.inspectOut, matches, discovery, opts.inspectKernels == Inspection::explain);
 		return;
 	}
-	mod = backend::applyKernels(mod, matches);
+	if (backend::needsNonDataflow(matches)) {
+		// Runtime guards are `If`s, which cannot be inside dataflow blocks: match again without them (the same
+		// selection, of the new variables), then restore the blocks and their DataflowVars (only these can be fused).
+		mod = ::tvm::relax::transform::ToNonDataflow()(mod);
+		matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
+		mod = backend::applyKernels(mod, matches);
+		mod = ::tvm::relax::transform::ConvertToDataflow()(mod);
+		mod = ::tvm::relax::transform::CanonicalizeBindings()(mod);
+	} else
+		mod = backend::applyKernels(mod, matches);
 	for (const auto& c : matches.candidates) {
 		if (c.outcome != backend::Candidate::Outcome::selected)
 			continue;

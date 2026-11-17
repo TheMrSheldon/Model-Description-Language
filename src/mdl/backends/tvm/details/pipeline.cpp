@@ -3,6 +3,7 @@
 
 #include "../../../logging.hpp"
 #include "./aot.hpp"
+#include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
 #include "./schedule.hpp"
@@ -298,6 +299,8 @@ namespace mdl::backend::tvm {
 						// Python in TVM 0.24 (constants were folded before the patterns).
 						RT::FuseOps(),
 						RT::FuseTIR(),
+						// The fallbacks of runtime guards, now fused: back into their branches.
+						inlineGuardFallbacks(),
 						RT::DeadCodeElimination({}),
 				},
 				target

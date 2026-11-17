@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 #include <set>
 #include <stdexcept>
 
@@ -223,7 +224,12 @@ namespace mdl::kernels {
 				} else if (n["const"]) {
 					onlyKeys(n, {"const", "tolerance"}, "a constant");
 					node.kind = PatternNode::Kind::constant;
-					node.value = number(n["const"], "const").value_or(0);
+					// A number, or an integer expression over the captures (e.g. the size that a mean divides by).
+					double v = 0;
+					if (n["const"].IsScalar() && YAML::convert<double>::decode(n["const"], v))
+						node.value = v;
+					else
+						node.valueExpr = string(n["const"], "const");
 					if (n["tolerance"])
 						node.tolerance = number(n["tolerance"], "tolerance");
 				} else if (n["op"]) {
@@ -489,6 +495,33 @@ namespace mdl::kernels {
 					check(impl.outputs[i].first, expr::Type::shape, sig["outputs"][i]["shape"], "the output shape");
 					check(impl.outputs[i].second, expr::Type::dtype, sig["outputs"][i]["dtype"], "the output dtype");
 				}
+				// Constants given as expressions.
+				std::function<void(const PatternNode&)> constants = [&](const PatternNode& node) {
+					if (!node.valueExpr.empty()) {
+						auto parsed = expr::parse(node.valueExpr, captures);
+						if (!parsed)
+							problems.push_back(
+									Problem{.file = file,
+											.line = node.line,
+											.column = 0,
+											.message = std::format("constant '{}': {}", node.valueExpr, parsed.error())}
+							);
+						else if ((*parsed)->type != expr::Type::integer)
+							problems.push_back(
+									Problem{.file = file,
+											.line = node.line,
+											.column = 0,
+											.message = std::format(
+													"constant '{}' must be an integer, not {}", node.valueExpr,
+													expr::str((*parsed)->type)
+											)}
+							);
+						errors += parsed && (*parsed)->type == expr::Type::integer ? 0 : 1;
+					}
+					for (const auto& arg : node.args)
+						constants(arg);
+				};
+				constants(pattern.root);
 				const auto app = at["applicability"];
 				const auto where = app ? app["where"] : YAML::Node{};
 				for (size_t i = 0; i < impl.where.size(); ++i)

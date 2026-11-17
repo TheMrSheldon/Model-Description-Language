@@ -42,26 +42,33 @@ operators, `mdl.matmul` with folded permutations), before legalization. No code 
 - `dump` prints the module at the boundary: the representation that patterns are written against. (`mdlc --dump-dir`
   writes it too, as `<stem>.relax-match.txt`.)
 - `check` lists the selected implementations per function. With `--explain`, it lists every candidate: the bindings it
-  would replace, its captures, the verdict of each constraint (proven, not met, or unknown, i.e. undecided at compile
-  time), and why it is selected or not:
+  would replace, its captures, the verdict of each constraint (proven; not met; guard, i.e. checked at runtime; or
+  unknown, i.e. undecided), and why it is selected or not:
   ```
   function M__forward
     competing/scaled-add-aligned (priority 20) at v4
       replaces v3, v4; captures $x = x, $y = y
       proven   v3 is used only inside the region
       proven   a usable artifact (host)
-      unknown  where $x.shape[0] % 16 == 0 (undecided at compile time: B % 16 == 0) [could be checked at runtime]
-      => ineligible: 1 constraint(s) undecided at compile time
+      guard    where $x.shape[0] % 16 == 0 (checked at runtime: B % 16 == 0)
+      => selected with a runtime guard (otherwise TVM's code)
   ```
 
 **Selection.** All candidates are collected first (every pattern at every binding), so a small match cannot hide a
-larger one. A candidate is eligible if all its constraints are proven; an undecided constraint makes it ineligible
-(runtime checks for shape arithmetic are planned). Eligible candidates are selected by priority, then the number of
-replaced bindings (larger regions first), then the package and implementation names; a candidate is not selected if it
-replaces a binding that a selected one replaces. Captured inputs may be shared.
+larger one. A candidate is eligible if all its constraints are proven or can be checked at runtime (see Runtime
+guards); any other undecided constraint makes it ineligible. Eligible candidates are selected by priority, then the
+number of replaced bindings (larger regions first), then the package and implementation names; a candidate is not
+selected if it replaces a binding that a selected one replaces. Captured inputs may be shared.
 
 **Region rules.** The bindings of a region are replaced by one call: an intermediate result that is also used outside
 the region makes the candidate ineligible.
+
+**Runtime guards.** A constraint on symbolic dimensions (e.g. `$x.shape[0] % 16 == 0` with a runtime batch size, or an
+argument that must fit `int32`) that cannot be decided at compile time is checked at runtime: the region becomes
+`if <guards>: <kernel> else: <the region>`, where the else branch is the code TVM generates for the region (fused as
+usual). The output is shared by both branches. Other undecided constraints (e.g. a constant that depends on a runtime
+size) cannot be guarded. A guarded candidate takes its region like any other selected candidate, so the fallback is
+always TVM's code, not a lower-priority implementation.
 
 ## Compiling with kernel packages
 `mdlc` matches the packages of the kernel directories at the matching boundary and replaces every selected region by a
@@ -173,7 +180,10 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
   attributes that must match (e.g. `attrs: { axis: -1 }`);
 - `{capture: x}`: any value, named `x` in the implementation. The same name twice must be the same value. A capture
   may be used by other operations outside the region; the operations of the region itself must not be;
-- `{const: 2.0}`: a constant, matched exactly; `{const: 0.7978845608, tolerance: 1e-7}` allows a deviation.
+- `{const: 2.0}`: a constant, matched exactly; `{const: 1e-6, tolerance: 1e-12}` allows a deviation (e.g. for
+  constants that float32 cannot represent exactly). The value can be an integer expression over the captures, e.g.
+  `{const: "$x.shape[-1]"}` for the division of a mean. A constant that does not match is a constraint that is not
+  met (`check --explain` shows the actual value).
 
 `outputs: [a, b]` declares the results of a region with several outputs (by capture name); the default is the root.
 
