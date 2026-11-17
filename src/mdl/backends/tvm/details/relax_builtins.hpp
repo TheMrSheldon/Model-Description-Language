@@ -327,24 +327,30 @@ namespace mdl::backend::tvm {
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return callRelaxOp("relax.op.divide", ts[0], ts[1]); },
 
 			// ── statistical ─────────────────────────────────────────────────────────
-			/** MAX — keepdims=true for stable softmax broadcasting **/
+			/** MAX — over the last axis (removed, like MEAN and SUM) **/
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-				return reduceLastAxis("relax.op.max", ts[0], /*keepdims=*/true);
+				return reduceLastAxis("relax.op.max", ts[0], /*keepdims=*/false);
 			},
 			/** MIN **/
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-				return reduceLastAxis("relax.op.min", ts[0], /*keepdims=*/true);
+				return reduceLastAxis("relax.op.min", ts[0], /*keepdims=*/false);
 			},
 			/** MEAN — implemented as sum/N to avoid TVM's symbolic intermediate reduction buffer
      *  (relax.op.mean generates a B1-sized intermediate that LLVM codegen can't stack-alloc). **/
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr {
 				const auto& x = ts[0];
 				auto s = emitAs(bb, reduceLastAxis("relax.op.sum", x, /*keepdims=*/false), "sum");
-				return callRelaxOp("relax.op.divide", s, lastDimDivisor(x));
+				auto mean = callRelaxOp("relax.op.divide", s, lastDimDivisor(x));
+				if (tensorShape(x).size() == 1) // (a symbolic divisor broadcasts a 0-d sum to [1])
+					return callRelaxOp(
+							"relax.op.reshape", emitAs(bb, mean, "mean"),
+							::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>{})
+					);
+				return mean;
 			},
-			/** SUM — keepdims=true **/
+			/** SUM — over the last axis (removed) **/
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-				return reduceLastAxis("relax.op.sum", ts[0], /*keepdims=*/true);
+				return reduceLastAxis("relax.op.sum", ts[0], /*keepdims=*/false);
 			},
 
 			// ── unary arithmetic ────────────────────────────────────────────────────
@@ -504,36 +510,6 @@ namespace mdl::backend::tvm {
 			},
 			/** STOP_GRADIENT — identity (only meaningful to the gradient pass) **/
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return ts[0]; },
-			/** SUM_ALL — sum over all axes (0-d result) **/
-			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
-				::tvm::ffi::Optional<::tvm::ffi::Array<int64_t>> all;
-				return callRelaxOp("relax.op.sum", ts[0], all, false);
-			},
-			/** MEAN_ALL — sum over all axes divided by the number of elements **/
-			[](auto& bb, auto ts) -> ::tvm::relax::Expr {
-				::tvm::ffi::Optional<::tvm::ffi::Array<int64_t>> all;
-				auto s = emitAs(bb, callRelaxOp("relax.op.sum", ts[0], all, false), "sum");
-				::tvm::PrimExpr count = ::tvm::IntImm(::tvm::PrimType::Int(64), 1);
-				for (const auto& d : tensorShape(ts[0]))
-					count = count * ::tvm::prim::cast(::tvm::PrimType::Int(64), d);
-				if (const auto* imm = ::tvm::sym::Analyzer()->Simplify(count).template as<::tvm::IntImmNode>())
-					return callRelaxOp(
-							"relax.op.divide", s,
-							makeFloatConst(static_cast<float>(static_cast<int64_t>(imm->value)), dtypeOf(ts[0]))
-					);
-				// Symbolic number of elements: counted as a tensor (a PrimValue divisor would leave the dimension variables
-				// unbound in the kernel).
-				::tvm::ffi::Array<::tvm::PrimExpr> shape(tensorShape(ts[0]));
-				auto ones =
-						emitAs(bb,
-							   callRelaxOp(
-									   "relax.op.broadcast_to", makeFloatConst(1.0f, dtypeOf(ts[0])),
-									   ::tvm::relax::ShapeExpr(shape)
-							   ),
-							   "ones");
-				auto n = emitAs(bb, callRelaxOp("relax.op.sum", ones, all, false), "count");
-				return callRelaxOp("relax.op.divide", s, n);
-			},
 			/** TAKE — rows of ts[0] at the indices ts[1] (out-of-range indices are clipped) **/
 			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr {
 				return callRelaxOp(

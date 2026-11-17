@@ -2479,7 +2479,9 @@ namespace mdl {
 
 			auto* einopsCtx = ctx->einops();
 			auto lhs = parseEinopsSpec(einopsCtx->einops_spec_full(0));
-			auto rhs = parseEinopsSpec(einopsCtx->einops_spec_full(1));
+			// (Without output axes, e.g. `[1 -> ]`, the result is a scalar.)
+			auto rhs = einopsCtx->einops_spec_full().size() > 1 ? parseEinopsSpec(einopsCtx->einops_spec_full(1))
+																: mdl::einops::Spec{};
 
 			// Collect key=value bindings.
 			std::map<std::string, const Node*> bindings;

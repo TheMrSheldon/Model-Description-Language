@@ -57,8 +57,6 @@ namespace {
 	/** @brief Whether the result of @p func is masked if an argument is (like torch.masked: masked in, masked out). */
 	bool propagatesMask(FunctionIDs func) {
 		switch (func) {
-		case FunctionIDs::SUM_ALL:
-		case FunctionIDs::MEAN_ALL:
 		case FunctionIDs::MASK_OF:
 		case FunctionIDs::UNMASK:
 			return false;

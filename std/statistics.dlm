@@ -40,13 +40,14 @@ float[...] mean(x: float[..., N]) => __builtin_mean(x);
 float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
 
 /**
- * @brief Sum of all elements (a scalar), e.g. for objectives.
+ * @brief Sum of all elements (a scalar), e.g. for objectives: the sum of the flattened tensor.
  * @ingroup Statistics
  */
-float sum_all(x: float[...]) => __builtin_sum_all(x);
+float sum_flat(x: float[...]) => sum(x[... -> (...)]);
 
 /**
- * @brief Mean of all elements (a scalar), e.g. for objectives.
+ * @brief Mean of all elements (a scalar), e.g. for objectives: the mean of the flattened tensor (with a mask, of the
+ * valid elements).
  * @ingroup Statistics
  */
-float mean_all(x: float[...]) => __builtin_mean_all(x);
+float mean_flat(x: float[...]) => mean(x[... -> (...)]);

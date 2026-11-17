@@ -262,7 +262,7 @@ every name, `f_gradient` must be declared before it is used: it applies to the c
 ```dlm
 float[...] softmax_gradient(x: float[...], dy: float[...]) {
     auto y = softmax(x);  // the forward pass's node
-    return y * (dy - sum(dy * y));
+    return y * (dy - sum(dy * y)[... -> ... 1]);
 }
 ```
 Custom gradients that need only values the forward pass keeps anyway (like softmax's result) keep the forward pass of a
@@ -377,7 +377,7 @@ diagnostics are errors.
 |---|---|
 | `arithmetic` | `exp`, `log`, `sqrt`, `rsqrt`, `erf`, `tanh`, `sin`, `cos`, `tan` |
 | `activations` | `softmax` (also for masked tensors), `gelu`, `sigmoid`, `silu` (with custom gradients for softmax and GELU) |
-| `statistics` | reductions over the last dimension `sum`, `max`, `min`, `mean`, `var`; `sum_all`, `mean_all` (to a scalar) |
+| `statistics` | reductions over the last dimension `sum`, `max`, `min`, `mean`, `var`; `sum_flat`, `mean_flat` (all elements, to a scalar) |
 | `nn` | modules `Linear[indim, outdim, .bias]`, `LayerNorm[dim]` (custom gradient), `Embedding[num, dim]` |
 | `losses` | `mse`, `cross_entropy` (integer labels), `logsumexp`, `one_hot_like` |
 | `autodiff` | `sum_like`, `broadcast_like`, `nograd` |

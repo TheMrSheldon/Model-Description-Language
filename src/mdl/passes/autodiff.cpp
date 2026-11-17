@@ -182,26 +182,23 @@ namespace mdl::autodiff {
 			}
 			case FIDs::MAX:
 			case FIDs::MIN:
-				// Reductions over the last axis that keep it (size 1): the gradient flows to the extremal elements.
-				return b.mul(g, b.op(FIDs::EQUAL_MASK, {x, node}));
 			case FIDs::SUM:
-			case FIDs::SUM_ALL:
-				return b.op(FIDs::BROADCAST_LIKE, {g, x});
-			case FIDs::MEAN_ALL: {
-				// The number of elements (only known at runtime with `...`): the sum of ones of x's shape.
-				const Node& count = b.op(FIDs::SUM_ALL, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})});
-				return b.op(FIDs::BROADCAST_LIKE, {b.div(g, count), x});
-			}
 			case FIDs::MEAN: {
-				// The last axis is removed: restore it (size 1), broadcast, and divide by its size.
-				const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
-				const Node& keep = b.op(FIDs::RESHAPE, {g, group, graph.addConstNode(Atomic{1})});
-				const Node& spread = b.op(FIDs::BROADCAST_LIKE, {keep, x});
+				// Reductions over the last axis, which they remove: restore it (size 1) to broadcast along it.
+				auto keep = [&](const Node& v) -> const Node& {
+					const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
+					return b.op(FIDs::RESHAPE, {v, group, graph.addConstNode(Atomic{1})});
+				};
+				if (inv.id == FIDs::MAX || inv.id == FIDs::MIN) // the gradient flows to the extremal elements
+					return b.mul(keep(g), b.op(FIDs::EQUAL_MASK, {x, keep(node)}));
+				const Node& spread = b.op(FIDs::BROADCAST_LIKE, {keep(g), x});
+				if (inv.id == FIDs::SUM)
+					return spread;
 				if (const Node* n = lastDimSize(graph, getDataType(x)))
 					return b.div(spread, *n);
 				// Size not known statically: count the elements of the last axis at runtime.
 				const Node& ones = b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x});
-				return b.div(spread, b.op(FIDs::SUM, {ones}));
+				return b.div(spread, keep(b.op(FIDs::SUM, {ones})));
 			}
 			case FIDs::EXP:
 				return b.mul(g, node);
