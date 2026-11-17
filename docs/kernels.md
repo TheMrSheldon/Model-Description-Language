@@ -205,7 +205,7 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
   implementation names (deterministic).
 - **Adapters:** argument lists that are impractical to write as expressions use a named adapter of the compiler
   instead of `arguments`. Whether the adapter applies is a constraint of its own (`check --explain` says why not):
-  - `matmul-strided`: `mdl_matmul_<type>`'s arguments (`include/mdl/runtime/kernels.h`) for `mdl.matmul` and
+  - `matmul-strided`: `mdl_matmul_<type>`'s arguments (`kernels/onednn/include/mdl_onednn.h`) for `mdl.matmul` and
     `relax.matmul`: the permutations of the operands and the result become strides (at most two batch dimensions after
     merging), with bias, scale, activation, and addend;
   - `matmul-quantized`: `mdl_matmul_q_<type>`'s arguments for an `mdl.matmul` with quantized weights (a linear layer;

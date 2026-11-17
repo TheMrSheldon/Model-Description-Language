@@ -150,7 +150,7 @@ function(mdl_add_model target)
 	if(ARG_BUILD)
 		list(APPEND args --build "${ARG_BUILD}")
 	endif()
-	# The kernels: as requested; the kernel packages by default (with the oneDNN package if mdl_kernels has oneDNN).
+	# The kernels: as requested; the kernel packages by default (with the oneDNN package if it is built).
 	set(_none OFF)
 	if(ARG_KERNELS STREQUAL "none" OR ARG_KERNELS STREQUAL "tvm")
 		set(_none ON)

@@ -1,11 +1,11 @@
 /**
  * @file
- * @brief oneDNN implementation of the vendor kernels declared in <mdl/runtime/kernels.h>.
+ * @brief oneDNN implementation of the vendor kernels declared in <mdl_onednn.h>.
  * @details oneDNN primitives are expensive to create but cheap to execute. Each kernel therefore caches its primitive
  * keyed by the complete problem description (all shapes and flags), so a primitive is created once per distinct shape
  * and reused afterwards. Lookups take a shared lock; only the creation of a new primitive takes an exclusive one.
  */
-#include <mdl/runtime/kernels.h>
+#include <mdl_onednn.h>
 
 #include <oneapi/dnnl/dnnl.hpp>
 
