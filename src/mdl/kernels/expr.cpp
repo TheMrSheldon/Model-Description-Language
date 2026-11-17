@@ -21,6 +21,8 @@ namespace mdl::kernels::expr {
 			return "a shape";
 		case Type::pointer:
 			return "a pointer";
+		case Type::real:
+			return "a number";
 		}
 		return "";
 	}
@@ -358,6 +360,7 @@ namespace mdl::kernels::expr {
 					if (name.kind != Token::Kind::name)
 						fail(name, "expected the name of an attribute");
 					node.field = "attr." + name.text;
+					node.type = Type::real; // (for float arguments)
 				} else
 					fail(field, std::format("unknown field '{}' (shape, ndim, dtype, data, attr.<name>)", field.text));
 				return make(std::move(node));

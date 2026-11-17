@@ -84,8 +84,6 @@ namespace mdl::backend::tvm {
 			return result;
 		}
 
-		bool isLastAxis(int64_t axis, size_t ndim) { return axis == -1 || axis == static_cast<int64_t>(ndim) - 1; }
-
 		/**
 		 * @brief C++ counterpart of Python's `BlockBuilder.call_te`: lowers a TE computation over the call's arguments
 		 * to a PrimFunc and emits a `call_tir` to it.
@@ -266,19 +264,6 @@ namespace mdl::backend::tvm {
 					},
 					"T_matmul_epilogue", topi::kElementWise
 			);
-		}
-
-		// ── vendor kernels (mdl_kernels) ───────────────────────────────────────────
-
-		/** @brief The suffix of the vendor kernels for the element type @p dtype (`mdl_matmul_bf16`), if any. */
-		std::optional<std::string> kernelSuffix(::tvm::PrimType dtype) {
-			if (dtype == ::tvm::PrimType::Float(32))
-				return "f32";
-			if (dtype == ::tvm::PrimType::BFloat(16))
-				return "bf16";
-			if (dtype == ::tvm::PrimType::Float(16))
-				return "f16";
-			return std::nullopt;
 		}
 
 		/** @brief A permutation of the dimensions of a tensor (empty: none). */
@@ -462,24 +447,28 @@ namespace mdl::backend::tvm {
 		}
 
 		/**
-		 * @brief Lowers mdl.matmul to mdl_matmul_<type> on strided views of the operands and the result: the
-		 * permutations become strides, so permuted operands (e.g. the heads of attention) are read and written in
-		 * place. Supports at most two batch dimensions after merging (b's batch dimensions may be broadcast).
+		 * @brief The arguments of mdl_matmul_<type> (or mdl_matmul_q_<type> if @p quantized) for @p m, on strided
+		 * views of the operands and the result: the permutations become strides, so permuted operands (e.g. the heads
+		 * of attention) are read and written in place. Supports at most two batch dimensions after merging (b's batch
+		 * dimensions may be broadcast).
 		 */
-		std::optional<Expr> matmulKernel(const BlockBuilder& bb, const MatmulArgs& m) {
+		std::expected<ExternPlan, std::string> matmulPlan(const MatmulArgs& m, bool quantized) {
+			using std::unexpected;
+			if (quantized != m.quant.has_value())
+				return unexpected(quantized ? "the weights are not quantized" : "the weights are quantized");
 			const auto* ai = tensorInfo(m.a);
 			const auto* bi = tensorInfo(m.quant ? m.quant->scales : m.b);
-			if (!ai || !bi || ai->dtype.value() != bi->dtype.value() || !kernelSuffix(ai->dtype.value()))
-				return std::nullopt;
+			if (!ai || !bi || ai->dtype.value() != bi->dtype.value())
+				return unexpected("the operands have different element types");
 			const auto as = shapeOf(m.a), bs = m.bShape();
 			const auto la = permuted(as, m.permA), lb = permuted(bs, m.permB);
 			const auto sa = permuted(contiguousStrides(as), m.permA), sb = permuted(contiguousStrides(bs), m.permB);
 			const size_t ra = la.size(), rb = lb.size();
 			if (ra < 2 || rb < 2 || ra < rb || (rb > 2 && ra != rb))
-				return std::nullopt;
+				return unexpected("vector operands, or b has more dimensions than a");
 			if (m.addend && (tensorInfo(*m.addend)->dtype.value() != ai->dtype.value() ||
 							 !::tvm::ffi::StructuralEqual()(shapeOf(*m.addend), permuted(m.productShape(), m.permOut))))
-				return std::nullopt;
+				return unexpected("the addend has another shape or element type than the result");
 			// The result: the product's dimension j is the result's dimension at position p with perm_out[p] == j.
 			const auto lo = m.productShape();
 			const auto resultShape = permuted(lo, m.permOut);
@@ -489,6 +478,8 @@ namespace mdl::backend::tvm {
 				so[m.permOut.empty() ? p : static_cast<size_t>(m.permOut[p])] = rs[p];
 
 			const PrimExpr zero = ::tvm::IntImm(::tvm::PrimType::Int(64), 0);
+			auto i64 = [](PrimExpr e) { return ExternPlan::scalar(::tvm::prim::cast(::tvm::PrimType::Int(64), e)); };
+			auto i32 = [](int64_t v) { return ExternPlan::scalar(::tvm::IntImm(::tvm::PrimType::Int(32), v)); };
 			::tvm::sym::Analyzer analyzer;
 			auto equal = [&](const PrimExpr& x, const PrimExpr& y) { return analyzer->CanProveEqual(x, y); };
 			struct Dim {
@@ -523,43 +514,41 @@ namespace mdl::backend::tvm {
 			if (m.quant) {
 				// The quantized weights W [N, K] as B = W^T (a linear layer): a single GEMM with B[k, n] at n * K + k.
 				if (!batch.empty() || rb != 2 || !equal(bK, 1) || !equal(bN, K))
-					return std::nullopt;
-				ExternCall ext{bb, "mdl_matmul_q_" + *kernelSuffix(ai->dtype.value())};
-				auto pa = ext.input(m.a, "A");
-				auto pq = ext.input(m.b, "q");
-				auto pscales = ext.input(m.quant->scales, "scales");
-				Expr pzeros = m.quant->zeros ? ext.input(*m.quant->zeros, "zeros") : pq; // ignored without zeros
-				Expr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;
-				Expr paddend = m.addend ? ext.input(*m.addend, "addend") : pa;
-				auto pout = ext.output(resultShape, ai->dtype.value());
-				auto i64 = [](PrimExpr e) { return ::tvm::prim::cast(::tvm::PrimType::Int(64), e); };
-				auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::PrimType::Int(32), v); };
-				return ext.finish(
-						{pout,
-						 pa,
-						 pq,
-						 pscales,
-						 pzeros,
-						 i32(m.quant->zeros ? 1 : 0),
-						 i32(static_cast<int>(m.quant->format)),
-						 i64(::tvm::IntImm(::tvm::PrimType::Int(64), m.quant->group)),
-						 pbias,
-						 i32(m.bias ? 1 : 0),
-						 i64(M),
-						 i64(K),
-						 i64(N),
-						 i64(aM),
-						 i64(aK),
-						 i64(oM),
-						 i64(oN),
-						 paddend,
-						 i32(m.addend ? 1 : 0),
-						 i32(m.activation),
-						 ::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha)}
-				);
+					return unexpected("not a linear layer (batched, or the weights are not [N, K])");
+				ExternPlan plan{
+						.inputs = {m.a, m.b, m.quant->scales}, .outShape = resultShape, .outDtype = ai->dtype.value()
+				};
+				const ExternPlan::Arg a = plan.input(0), q = plan.input(1), scales = plan.input(2);
+				const auto zeros = m.quant->zeros ? plan.add(*m.quant->zeros) : q; // ignored without zeros
+				const auto bias = m.bias ? plan.add(*m.bias) : a;
+				const auto addend = m.addend ? plan.add(*m.addend) : a;
+				plan.args = {
+						ExternPlan::output(),
+						a,
+						q,
+						scales,
+						zeros,
+						i32(m.quant->zeros ? 1 : 0),
+						i32(static_cast<int>(m.quant->format)),
+						i64(::tvm::IntImm(::tvm::PrimType::Int(64), m.quant->group)),
+						bias,
+						i32(m.bias ? 1 : 0),
+						i64(M),
+						i64(K),
+						i64(N),
+						i64(aM),
+						i64(aK),
+						i64(oM),
+						i64(oN),
+						addend,
+						i32(m.addend ? 1 : 0),
+						i32(m.activation),
+						ExternPlan::scalar(::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha))
+				};
+				return plan;
 			}
 			if (batch.size() > 2)
-				return std::nullopt;
+				return unexpected("more than two batch dimensions after merging");
 			while (batch.size() < 2) { // outer dimensions of size 1 (with the strides of a contiguous outer dimension)
 				const Dim next = batch.empty() ? Dim{M, aM, zero, oM} : batch.front();
 				batch.insert(
@@ -568,42 +557,39 @@ namespace mdl::backend::tvm {
 				);
 			}
 
-			ExternCall ext{bb, "mdl_matmul_" + *kernelSuffix(ai->dtype.value())};
-			auto pa = ext.input(m.a, "A");
-			auto pb = ext.input(m.b, "B");
-			Expr pbias = m.bias ? ext.input(*m.bias, "bias") : pa;		   // ignored if has_bias == 0
-			Expr paddend = m.addend ? ext.input(*m.addend, "addend") : pa; // ignored if has_addend == 0
-			auto pout = ext.output(resultShape, ai->dtype.value());
-			auto i64 = [](PrimExpr e) { return ::tvm::prim::cast(::tvm::PrimType::Int(64), e); };
-			auto i32 = [](int64_t v) { return ::tvm::IntImm(::tvm::PrimType::Int(32), v); };
-			return ext.finish(
-					{pout,
-					 pa,
-					 pb,
-					 pbias,
-					 i32(m.bias ? 1 : 0),
-					 i64(batch[0].size),
-					 i64(batch[1].size),
-					 i64(M),
-					 i64(K),
-					 i64(N),
-					 i64(batch[0].a),
-					 i64(batch[1].a),
-					 i64(aM),
-					 i64(aK),
-					 i64(batch[0].b),
-					 i64(batch[1].b),
-					 i64(bK),
-					 i64(bN),
-					 i64(batch[0].out),
-					 i64(batch[1].out),
-					 i64(oM),
-					 i64(oN),
-					 paddend,
-					 i32(m.addend ? 1 : 0),
-					 i32(m.activation),
-					 ::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha)}
-			);
+			ExternPlan plan{.inputs = {m.a, m.b}, .outShape = resultShape, .outDtype = ai->dtype.value()};
+			const ExternPlan::Arg a = plan.input(0), b = plan.input(1);
+			const auto bias = m.bias ? plan.add(*m.bias) : a;		// ignored if has_bias == 0
+			const auto addend = m.addend ? plan.add(*m.addend) : a; // ignored if has_addend == 0
+			plan.args = {
+					ExternPlan::output(),
+					a,
+					b,
+					bias,
+					i32(m.bias ? 1 : 0),
+					i64(batch[0].size),
+					i64(batch[1].size),
+					i64(M),
+					i64(K),
+					i64(N),
+					i64(batch[0].a),
+					i64(batch[1].a),
+					i64(aM),
+					i64(aK),
+					i64(batch[0].b),
+					i64(batch[1].b),
+					i64(bK),
+					i64(bN),
+					i64(batch[0].out),
+					i64(batch[1].out),
+					i64(oM),
+					i64(oN),
+					addend,
+					i32(m.addend ? 1 : 0),
+					i32(m.activation),
+					ExternPlan::scalar(::tvm::FloatImm(::tvm::PrimType::Float(32), m.alpha))
+			};
+			return plan;
 		}
 
 		/** @brief @p m with a quantized b replaced by its dequantization (emitted as a kernel of its own). */
@@ -896,8 +882,17 @@ namespace mdl::backend::tvm {
 
 	// ── handler map ──────────────────────────────────────────────────────────────
 
+	std::expected<ExternPlan, std::string> matmulAdapter(const ::tvm::Call& call, bool quantized) {
+		static const auto& matmul = ::tvm::Op::Get("mdl.matmul");
+		static const auto& relaxMatmul = ::tvm::Op::Get("relax.matmul");
+		if (call->op.same_as(matmul))
+			return matmulPlan(MatmulArgs{call}, quantized);
+		if (call->op.same_as(relaxMatmul))
+			return matmulPlan(MatmulArgs{call->args[0], call->args[1]}, quantized);
+		return std::unexpected("not a matrix product");
+	}
+
 	Map<String, Function> legalizeMap(const mdl::CompileOptions& opts) {
-		const bool vendor = opts.kernels == mdl::Kernels::OneDnn;
 		const bool fast = opts.fastMath;
 
 		Map<String, Function> map;
@@ -953,42 +948,10 @@ namespace mdl::backend::tvm {
 					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
 					return te.finish(topi::concatenate(parts, axis));
 				}));
-		map.Set("relax.collapse_sum_to", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
-					// Sums over leading dimensions (e.g. the gradient of a bias): a column sum of [M, N] by the kernel.
+		map.Set("relax.collapse_sum_to", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
+					// (Column sums by a kernel: kernels/onednn, sum-rows.)
 					const auto& x = call->args[0];
-					const auto dtype = tensorInfo(x)->dtype.value();
-					auto shape = shapeOf(x);
 					auto target = (call->args[1]).as_or_throw<ShapeExpr>()->values;
-					::tvm::sym::Analyzer analyzer;
-					size_t lead = 0; // leading 1s of the target
-					while (lead < target.size() && analyzer->CanProveEqual(target[lead], 1))
-						++lead;
-					const size_t t = target.size() - lead;
-					// (A sum of a product, e.g. the gradient of LayerNorm's scale, fuses with the product instead.)
-					bool ofProduct = false;
-					if (const auto* var = x.as<::tvm::VarNode>())
-						if (auto value = bb->LookupBinding(::tvm::ffi::GetRef<::tvm::Var>(var)))
-							if (const auto* producer = value.value().as<::tvm::CallNode>()) {
-								static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
-								const auto* kernel = producer->op.same_as(callTir) && !producer->args.empty()
-															 ? producer->args[0].as<::tvm::GlobalVarNode>()
-															 : nullptr;
-								ofProduct =
-										producer->op.same_as(::tvm::Op::Get("relax.multiply")) ||
-										(kernel != nullptr && std::string(kernel->name_hint).starts_with("multiply"));
-							}
-					bool suffix = vendor && !ofProduct && kernelSuffix(dtype) && t > 0 && t < shape.size();
-					for (size_t i = 0; suffix && i < t; ++i)
-						suffix = analyzer->CanProveEqual(target[lead + i], shape[shape.size() - t + i]);
-					if (suffix) {
-						ExternCall ext{bb, "mdl_sum_rows_" + *kernelSuffix(dtype)};
-						auto px = ext.input(x, "x");
-						auto pout = ext.output(target, dtype);
-						return ext.finish(
-								{pout, px, product(shape, 0, shape.size() - t),
-								 product(shape, shape.size() - t, shape.size())}
-						);
-					}
 					TECall te{bb, "collapse_sum"};
 					return te.finish(topi::collapse_sum(te.tensor(x), target));
 				}));
@@ -1004,11 +967,8 @@ namespace mdl::backend::tvm {
 					return te.finish(topi::cast(te.tensor(call->args[0]), attrs->dtype));
 				}));
 
-		map.Set("relax.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+		map.Set("relax.matmul", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const Expr &a = call->args[0], &b = call->args[1];
-					if (vendor)
-						if (auto e = matmulKernel(bb, MatmulArgs{a, b}))
-							return *e;
 					if (shapeOf(a).size() < 2 || shapeOf(b).size() < 2) {
 						// Vector operands: unsqueeze to matrices, multiply, squeeze the result.
 						auto as = shapeOf(a), bs = shapeOf(b);
@@ -1028,45 +988,17 @@ namespace mdl::backend::tvm {
 					}
 					return matmulTE(bb, MatmulArgs{a, b});
 				}));
-		map.Set("mdl.matmul", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
-					MatmulArgs args{call};
-					if (vendor) {
-						if (auto e = matmulKernel(bb, args))
-							return *e;
-						if (args.quant) // a layout the quantized kernel does not cover: dequantize first
-							if (auto e = matmulKernel(bb, args = dequantized(bb, args)))
-								return *e;
-					}
-					return matmulTE(bb, args);
-				}));
+		map.Set("mdl.matmul",
+				wrap([](const BlockBuilder& bb, const Call& call) -> Expr { return matmulTE(bb, MatmulArgs{call}); }));
 
-		map.Set("relax.nn.softmax", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+		map.Set("relax.nn.softmax", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto* attrs = call->attrs.as<::tvm::relax::SoftmaxAttrs>();
 					const auto& x = call->args[0];
-					auto shape = shapeOf(x);
-					const auto dtype = tensorInfo(x)->dtype.value();
-					if (vendor && isLastAxis(attrs->axis, shape.size()) && kernelSuffix(dtype)) {
-						ExternCall ext{bb, "mdl_softmax_" + *kernelSuffix(dtype)};
-						auto px = ext.input(x, "x");
-						auto pout = ext.output(shape, dtype);
-						return ext.finish(
-								{pout, px, product(shape, 0, shape.size() - 1),
-								 product(shape, shape.size() - 1, shape.size())}
-						);
-					}
 					TECall te{bb, "softmax"};
 					return te.finish(topi::nn::softmax(te.tensor(x), attrs->axis));
 				}));
-		map.Set("relax.nn.gelu", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+		map.Set("relax.nn.gelu", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto& x = call->args[0];
-					auto shape = shapeOf(x);
-					const auto dtype = tensorInfo(x)->dtype.value();
-					if (vendor && kernelSuffix(dtype)) {
-						ExternCall ext{bb, "mdl_gelu_" + *kernelSuffix(dtype)};
-						auto px = ext.input(x, "x");
-						auto pout = ext.output(shape, dtype);
-						return ext.finish({pout, px, product(shape, 0, shape.size())});
-					}
 					TECall te{bb, "gelu"};
 					auto t = te.tensor(x);
 					return te.finish(te::compute(
@@ -1090,18 +1022,8 @@ namespace mdl::backend::tvm {
 					auto w = dequantCompute(te, call->args[0], quant);
 					return te.finish(w);
 				}));
-		map.Set("mdl.gelu_backward", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+		map.Set("mdl.gelu_backward", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto &x = call->args[0], &dy = call->args[1];
-					auto shape = shapeOf(dy);
-					const auto dtype = tensorInfo(dy)->dtype.value();
-					if (vendor && kernelSuffix(dtype) && tensorInfo(x)->dtype.value() == dtype &&
-						::tvm::ffi::StructuralEqual()(shapeOf(x), shape)) {
-						ExternCall ext{bb, "mdl_gelu_backward_" + *kernelSuffix(dtype)};
-						auto px = ext.input(x, "x");
-						auto pdy = ext.input(dy, "dy");
-						auto pout = ext.output(shape, dtype);
-						return ext.finish({pout, px, pdy, product(shape, 0, shape.size())});
-					}
 					// dy * GELU'(x) = dy * (Φ(x) + x φ(x)), in float32.
 					TECall te{bb, "gelu_backward"};
 					auto tx = te.tensor(x, "x");
@@ -1144,25 +1066,9 @@ namespace mdl::backend::tvm {
 					return te.finish(topi::one_hot(labels, on, off, attrs->depth, attrs->axis, on.ty(), shapeOf(call)));
 				}));
 
-		map.Set("relax.nn.layer_norm", wrap([vendor](const BlockBuilder& bb, const Call& call) -> Expr {
+		map.Set("relax.nn.layer_norm", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto* attrs = call->attrs.as<::tvm::relax::LayerNormAttrs>();
 					const auto &x = call->args[0], &gamma = call->args[1], &beta = call->args[2];
-					auto shape = shapeOf(x);
-					const bool lastAxis = attrs->axes.size() == 1 && isLastAxis(attrs->axes[0], shape.size());
-					const auto dtype = tensorInfo(x)->dtype.value();
-					if (vendor && lastAxis && attrs->center && attrs->scale && kernelSuffix(dtype) &&
-						tensorInfo(gamma)->dtype.value() == dtype && tensorInfo(beta)->dtype.value() == dtype) {
-						ExternCall ext{bb, "mdl_layer_norm_" + *kernelSuffix(dtype)};
-						auto px = ext.input(x, "x");
-						auto pg = ext.input(gamma, "gamma");
-						auto pb = ext.input(beta, "beta");
-						auto pout = ext.output(shape, dtype);
-						return ext.finish(
-								{pout, px, pg, pb, product(shape, 0, shape.size() - 1),
-								 product(shape, shape.size() - 1, shape.size()),
-								 ::tvm::FloatImm(::tvm::PrimType::Float(32), attrs->epsilon)}
-						);
-					}
 					TECall te{bb, "layer_norm"};
 					auto tx = te.tensor(x, "x");
 					auto tg = te.tensor(gamma, "gamma");

@@ -13,7 +13,7 @@ Compile MDL models into object files that can be linked into C++ programs.
                   [CONFIG <model.yml>]
                   [BUILD <name>]
                   [SHARED]
-                  [KERNELS onednn|tvm]
+                  [KERNELS packages|none]
                   [KERNEL_PACKAGES <name>...]
                   [IMPORT_DIRS <dir>...]
                   [BINDINGS <type>...]
@@ -30,7 +30,9 @@ Compile MDL models into object files that can be linked into C++ programs.
   ``BUILD``        use the build settings ``builds.<name>`` of ``CONFIG`` (``mdlc --build``).
   ``SHARED``       build a shared library (e.g., to load it from Python with ``tvm_ffi.load_module``) instead of a
                    static one.
-  ``KERNELS``      ``onednn`` (default if ``mdl_kernels`` was built with oneDNN) or ``tvm`` (no vendor kernels).
+  ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if ``mdl_kernels`` was
+                   built with oneDNN) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
+                   names.)
   ``KERNEL_PACKAGES`` kernel packages built with ``mdl_kernel_package`` that the model may use (see docs/kernels.md);
                    they are linked into ``<target>``. Without it, the model uses no kernel packages.
   ``IMPORT_DIRS``  additional search paths for ``import`` statements.
@@ -149,8 +151,7 @@ function(mdl_add_model target)
 	if(ARG_BUILD)
 		list(APPEND args --build "${ARG_BUILD}")
 	endif()
-	# The kernels: as requested, else oneDNN if mdl_kernels has it (mdlc's default, so that a CONFIG can choose), else
-	# the TVM-generated ones.
+	# The kernels: as requested; the kernel packages by default (with the oneDNN package if mdl_kernels has oneDNN).
 	set(_onednn OFF)
 	if(TARGET mdl_kernels)
 		get_target_property(_defs mdl_kernels INTERFACE_COMPILE_DEFINITIONS)
@@ -158,16 +159,20 @@ function(mdl_add_model target)
 			set(_onednn ON)
 		endif()
 	endif()
-	if(NOT ARG_KERNELS AND NOT _onednn)
-		set(ARG_KERNELS tvm)
+	set(_none OFF)
+	if(ARG_KERNELS STREQUAL "none" OR ARG_KERNELS STREQUAL "tvm")
+		set(_none ON)
 	endif()
-	if(ARG_KERNELS)
-		list(APPEND args --kernels "${ARG_KERNELS}")
-	endif()
-	# The oneDNN kernels are (partly) a kernel package (kernels/onednn): used whenever mdl_kernels is.
-	if(_onednn AND NOT ARG_KERNELS STREQUAL "tvm" AND TARGET mdl_kernel_package_onednn
-	   AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
+	# The oneDNN kernels are a kernel package (kernels/onednn): used whenever mdl_kernels has oneDNN.
+	if(_onednn AND NOT _none AND TARGET mdl_kernel_package_onednn AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
 		list(APPEND ARG_KERNEL_PACKAGES onednn)
+	endif()
+	# No package to link: none may be used (an unlisted package found elsewhere could not be linked).
+	if(NOT ARG_KERNEL_PACKAGES)
+		set(_none ON)
+	endif()
+	if(_none)
+		list(APPEND args --kernels none)
 	endif()
 	# Kernel packages: only those that are linked (an unlisted package found elsewhere could not be linked).
 	if(ARG_KERNEL_PACKAGES)
@@ -229,9 +234,9 @@ function(mdl_add_model target)
 	target_include_directories(${target} PUBLIC "${outdir}")
 
 	# Runtime dependencies of compiled models: the TVM runtime (thread pool, workspace allocation; it links the TVM FFI
-	# for the calling convention and errors) and the vendor kernels.
+	# for the calling convention and errors), mdl_kernels (the profiling hooks of --profile), and the kernel packages.
 	target_link_libraries(${target} PUBLIC mdl_runtime)
-	if(_onednn AND NOT ARG_KERNELS STREQUAL "tvm")
+	if(_onednn AND NOT _none)
 		target_link_libraries(${target} PUBLIC mdl_kernels)
 	endif()
 	foreach(package IN LISTS ARG_KERNEL_PACKAGES)

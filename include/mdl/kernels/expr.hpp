@@ -17,7 +17,7 @@
 
 namespace mdl::kernels::expr {
 
-	enum class Type { integer, boolean, dtype, shape, pointer };
+	enum class Type { integer, boolean, dtype, shape, pointer, real }; ///< real: an attribute (float arguments)
 	std::string str(Type type);
 
 	struct Node;
@@ -29,7 +29,7 @@ namespace mdl::kernels::expr {
 			integer,   ///< a literal (value)
 			dtypeName, ///< a literal element type (name), e.g. float32
 			list,	   ///< `[a, b, ...]` of integers (a shape) or element types (for `in`)
-			access,	   ///< `$capture.field` (name = capture, field = shape, ndim, dtype, data, or attr.<name>)
+			access,	   ///< `$capture.field` (name = capture, field = shape, ndim, dtype, data, or attr.<name> (real))
 			unary,	   ///< op: `-`, `not`
 			binary,	   ///< op: + - * // % == != < <= > >= and or
 			in,		   ///< args[0] in args[1] (a list)

@@ -5,8 +5,8 @@
  * @brief Legalization of all Relax operators that the MDL backend emits (Relax → TIR), implemented in C++.
  * @details TVM registers the default legalizations of Relax operators from Python. To compile without Python, the
  * backend provides its own handlers for exactly the operators it emits (the translation of the builtins and the
- * outputs of the backend's pattern rewrites). Depending on mdl::Kernels, recognized operators (matmul, softmax, GELU,
- * layer norm) are lowered to calls of the vendor kernels in `mdl_kernels` or to TVM-generated kernels (TOPI).
+ * outputs of the backend's pattern rewrites), as TVM-generated kernels (TOPI). Optimized kernels come from kernel
+ * packages (kernel_match.hpp), which are selected before legalization.
  */
 
 #include <mdl/compiler.hpp>
@@ -16,7 +16,10 @@
 #include <tvm/ir/transform.h>
 #include <tvm/relax/expr.h>
 
+#include <expected>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace mdl::backend::tvm {
 
@@ -47,6 +50,36 @@ namespace mdl::backend::tvm {
 	 * (without other uses) is written in the permuted layout (e.g. the heads of attention), instead of transposing.
 	 */
 	::tvm::transform::Pass foldPermutesIntoMatmul();
+
+	/**
+	 * @brief The arguments of an extern kernel call, computed by an adapter (see kernel packages, `adapter:`): the
+	 * tensors it reads (in the order of their buffers), and the kernel's arguments in order.
+	 */
+	struct ExternPlan {
+		struct Arg {
+			enum class Kind { input, output, scalar } kind;
+			size_t input = 0;	   ///< the index into inputs
+			::tvm::PrimExpr value; ///< a scalar
+		};
+		std::vector<::tvm::relax::Expr> inputs;
+		std::vector<Arg> args;
+		::tvm::ffi::Array<::tvm::PrimExpr> outShape;
+		::tvm::PrimType outDtype = ::tvm::PrimType::Void();
+
+		Arg input(size_t i) const { return {.kind = Arg::Kind::input, .input = i}; }
+		Arg add(const ::tvm::relax::Expr& e) {
+			inputs.push_back(e);
+			return input(inputs.size() - 1);
+		}
+		static Arg output() { return {.kind = Arg::Kind::output}; }
+		static Arg scalar(::tvm::PrimExpr v) { return {.kind = Arg::Kind::scalar, .value = std::move(v)}; }
+	};
+
+	/**
+	 * @brief The adapters `matmul-strided` (@p quantized false: mdl_matmul_<type>) and `matmul-quantized`
+	 * (mdl_matmul_q_<type>) for a call of mdl.matmul or relax.matmul, or why the kernel does not cover it.
+	 */
+	std::expected<ExternPlan, std::string> matmulAdapter(const ::tvm::Call& call, bool quantized);
 
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */
 	::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> legalizeMap(const mdl::CompileOptions& opts);

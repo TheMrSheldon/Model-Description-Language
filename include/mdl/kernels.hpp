@@ -84,6 +84,7 @@ namespace mdl::kernels {
 		std::vector<PatternNode> args;			  ///< of an op
 		std::map<std::string, std::string> attrs; ///< of an op, as written in the manifest (e.g. `axis: -1`)
 		std::string capture;					  ///< the name of a capture
+		std::vector<std::string> notOps;		  ///< of a capture: operators that must not produce the value (`not:`)
 		double value = 0;						  ///< of a constant
 		std::string valueExpr; ///< of a constant given as an integer expression over the captures (e.g. `$x.shape[-1]`)
 		std::optional<double> tolerance; ///< of a constant (exact if absent)

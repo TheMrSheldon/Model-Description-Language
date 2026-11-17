@@ -533,11 +533,14 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 			}));
 	app.add_option(
 			   "--kernels", args.compileOpts.kernels,
-			   "Kernels for recognized subgraphs: onednn (default; link against mdl_kernels), tvm (no dependency)"
+			   "packages (default): call the kernels of kernel packages (e.g. oneDNN) where they match; none: TVM-"
+			   "generated kernels only (no dependency)"
 	)
 			->transform(CLI::CheckedTransformer(std::map<std::string, mdl::Kernels>{
-					{"onednn", mdl::Kernels::OneDnn},
-					{"tvm", mdl::Kernels::Tvm},
+					{"packages", mdl::Kernels::Packages},
+					{"none", mdl::Kernels::None},
+					{"onednn", mdl::Kernels::Packages}, // (former names)
+					{"tvm", mdl::Kernels::None},
 			}));
 	app.add_option(
 			   "--ellipsis-rank", args.ellipsisRanks,

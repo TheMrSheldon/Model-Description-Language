@@ -151,11 +151,12 @@ TEST_CASE("expressions are parsed and type-checked over the captures", "[kernels
 	CHECK(type("$x.dtype in [float32, bfloat16]") == e::Type::boolean);
 	CHECK(type("$out.data") == e::Type::pointer);
 	CHECK(type("$x.shape[1:]") == e::Type::shape);
-	CHECK(type("$x.attr.axis + 1") == e::Type::integer);
+	CHECK(type("$out.attr.epsilon") == e::Type::real); // (for float arguments)
 	CHECK(e::str(*e::parse("prod($x.shape[:-1])", captures).value()) == "prod($x.shape[:-1])");
 
 	auto error = [&](const std::string& text) { return e::parse(text, captures).error(); };
 	CHECK(error("$z.shape") == "column 1: unknown capture '$z'");
+	CHECK(error("$x.attr.axis + 1") == "column 14: an operand of '+' must be an integer, not a number");
 	CHECK(error("$x.shape + 1") == "column 10: an operand of '+' must be an integer, not a shape");
 	CHECK(error("$x.dtype == 3") == "column 10: '==' compares an element type with an integer");
 	CHECK(error("$x.size") == "column 4: unknown field 'size' (shape, ndim, dtype, data, attr.<name>)");
@@ -235,8 +236,8 @@ implementations:
 	REQUIRE(p.has_value());
 	REQUIRE(p->implementations.size() == 2);
 	const auto& f16 = p->implementations[1];
-	CHECK(f16.symbol == "exp_f16");				   // its own
-	CHECK(f16.pattern == "p");					   // merged
-	CHECK(f16.arguments.size() == 2);			   // merged
+	CHECK(f16.symbol == "exp_f16");									  // its own
+	CHECK(f16.pattern == "p");										  // merged
+	CHECK(f16.arguments.size() == 2);								  // merged
 	CHECK(f16.dtypes.at("x") == std::vector<std::string>{"float16"}); // its own (not merged into)
 }

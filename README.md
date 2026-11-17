@@ -26,7 +26,7 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 ```
 - `--arg-vals` sets the hyperparameters (here `FFN: {indim: 8, outdim: 3}`).
 - `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`, `json` (metadata).
-- `--kernels onednn|tvm` selects the kernels for recognized operations (oneDNN via `mdl_kernels`, or TVM-generated only).
+- `--kernels packages|none` selects whether optimized kernels of kernel packages (e.g. oneDNN, see `docs/kernels.md`) are used, or TVM-generated kernels only.
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
   `--ellipsis-rank NAME=K` gives the input `NAME` only the leading `K` of them (e.g. `labels=1`: labels `[batch]` next
   to token ids `[batch, seq]`). Outputs get their shapes from shape inference (e.g. pooled `[batch, dim]`).
