@@ -1,5 +1,6 @@
 // Matching kernel packages at the matching boundary (see kernel_match.hpp and docs/kernels.md).
 #include "./kernel_match.hpp"
+#include "./extern_call.hpp"
 #include "./tvm_compat.hpp"
 
 #include <mdl/kernels/expr.hpp>
@@ -8,6 +9,7 @@
 #include <tvm/relax/dataflow_matcher.h>
 #include <tvm/relax/dataflow_pattern.h>
 #include <tvm/relax/expr_functor.h>
+#include <tvm/relax/transform.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
 
@@ -480,6 +482,29 @@ namespace mdl::backend::tvm {
 						};
 						for (const auto& w : e.impl->where)
 							evaluate(w, "where " + w);
+						// The arguments: integers must be computable, and fit their type (a checked conversion).
+						if (!e.impl->adapter.empty())
+							c.verdicts.push_back(
+									{"the argument adapter " + e.impl->adapter,
+									 Verdict::Result::refuted,
+									 "adapters are not supported yet",
+									 {}}
+							);
+						for (size_t i = 0; i < e.impl->arguments.size(); ++i) {
+							const auto& arg = e.impl->arguments[i];
+							if (arg.type == "pointer")
+								continue;
+							if (arg.type == "int32")
+								evaluate(
+										std::format("{} >= -2147483648 and {} <= 2147483647", arg.value, arg.value),
+										std::format("argument {} ({}) fits int32", i + 1, arg.value)
+								);
+							else
+								evaluate(
+										std::format("{} == {}", arg.value, arg.value),
+										std::format("argument {} ({}) can be computed", i + 1, arg.value)
+								);
+						}
 						if (!e.impl->outputs.empty()) {
 							const auto& [shape, dtype] = e.impl->outputs.front();
 							evaluate(std::format("{} == $out.shape", shape), "the result's shape is " + shape);
@@ -536,6 +561,92 @@ namespace mdl::backend::tvm {
 				taken.emplace(v.get(), c);
 		}
 		return result;
+	}
+
+	namespace {
+		/** @brief Rewrites the root bindings of the selected regions into calls of their implementations. */
+		class Emitter : public relax::ExprMutator {
+		public:
+			Emitter(const ::tvm::IRModule& mod, const MatchResult& result) : relax::ExprMutator(mod) {
+				for (const auto& c : result.candidates)
+					if (c.outcome == Candidate::Outcome::selected)
+						roots.emplace(c.replaced.back().get(), &c);
+			}
+
+			::tvm::IRModule run(const ::tvm::IRModule& mod) {
+				for (const auto& [gv, base] : mod->functions)
+					if (const auto* fn = base.as<relax::FunctionNode>()) {
+						auto updated = VisitExpr(::tvm::ffi::GetRef<relax::Function>(fn));
+						builder_->UpdateFunction(gv, updated.as_or_throw<::tvm::BaseFunc>());
+					}
+				return builder_->GetContextIRModule();
+			}
+
+			using relax::ExprMutator::VisitBinding_;
+
+			void VisitBinding_(const relax::VarBindingNode* binding) override {
+				auto it = roots.find(binding->var.get());
+				if (it == roots.end())
+					return relax::ExprMutator::VisitBinding_(binding);
+				ReEmitBinding(binding, builder_->Normalize(call(*it->second, binding->var)));
+			}
+
+		private:
+			std::unordered_map<const ::tvm::VarNode*, const Candidate*> roots;
+
+			Expr call(const Candidate& c, const Var& root) {
+				const auto& impl = *c.implementation;
+				std::map<std::string, Expr> captures;
+				for (const auto& [name, value] : c.captures)
+					captures[name] = value;
+				captures["out"] = root;
+				std::vector<std::string> names;
+				for (const auto& [name, _] : captures)
+					names.push_back(name);
+				Evaluator eval{captures};
+
+				ExternCall ext{builder_, impl.symbol};
+				const auto outShape = knownShape(root).value();
+				const auto outDtype = tensorInfo(root)->dtype.value();
+				auto out = ext.output(outShape, outDtype);
+				std::map<std::string, Expr> pointers; // one buffer per captured tensor
+				std::vector<Expr> args;
+				std::vector<PrimExpr> scalars;
+				for (const auto& arg : impl.arguments) {
+					auto parsed = expr::parse(arg.value, names).value(); // checked when the package was loaded
+					if (arg.type == "pointer") {
+						const auto& name = parsed->name;
+						if (name == "out") {
+							args.push_back(out);
+							continue;
+						}
+						auto [p, inserted] = pointers.try_emplace(name);
+						if (inserted)
+							p->second = ext.input(VisitExpr(captures.at(name)), name);
+						args.push_back(p->second);
+						continue;
+					}
+					PrimExpr value = eval.eval(*parsed).scalar;
+					const auto type = arg.type == "int32"	  ? ::tvm::PrimType::Int(32)
+									  : arg.type == "float32" ? ::tvm::PrimType::Float(32)
+									  : arg.type == "float64" ? ::tvm::PrimType::Float(64)
+															  : ::tvm::PrimType::Int(64);
+					value = ::tvm::prim::cast(type, ::tvm::sym::Analyzer()->Simplify(value));
+					scalars.push_back(value);
+					args.push_back(value);
+				}
+				return ext.finish(std::move(args), scalars);
+			}
+		};
+	} // namespace
+
+	::tvm::IRModule applyKernels(::tvm::IRModule mod, const MatchResult& result) {
+		if (std::ranges::none_of(result.candidates, [](const Candidate& c) {
+				return c.outcome == Candidate::Outcome::selected;
+			}))
+			return mod;
+		mod = Emitter{mod, result}.run(mod);
+		return relax::transform::DeadCodeElimination({})(mod);
 	}
 
 	void explain(std::ostream& out, const MatchResult& result, const kernels::Discovery& discovery, bool verbose) {

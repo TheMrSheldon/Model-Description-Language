@@ -79,8 +79,9 @@ target_link_libraries(mdl PUBLIC
 	spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
 	yaml-cpp::yaml-cpp
 )
-# The kernel packages of the source tree when running from the build tree (see kernels::kernelDirs).
-target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${PROJECT_SOURCE_DIR}/kernels")
+# The kernel packages built by this project, when running from the build tree (see kernels::kernelDirs).
+# (The packages of the source tree's kernels/ are generated there, with their libraries; see kernels/CMakeLists.txt.)
+target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_DIR}/mdl-kernels")
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)
 

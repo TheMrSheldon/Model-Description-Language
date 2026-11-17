@@ -67,6 +67,12 @@ namespace mdl::backend::tvm {
 	);
 
 	/**
+	 * @brief Replaces every selected region of @p result by a call of its implementation (a PrimFunc that `call_extern`s
+	 * the symbol with the evaluated arguments, through `call_tir`); the region's other bindings become dead code.
+	 */
+	::tvm::IRModule applyKernels(::tvm::IRModule mod, const MatchResult& result);
+
+	/**
 	 * @brief Writes the result of matching (`mdl-kernels check`): the selected implementations, and with @p verbose every
 	 * candidate with the verdicts of its constraints (`--explain`).
 	 */

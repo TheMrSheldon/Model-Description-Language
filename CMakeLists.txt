@@ -93,6 +93,9 @@ add_subdirectory(src)
 ##########################################################################################
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(MDL)
+if(MDL_ENABLE_COMPILER)
+	add_subdirectory(kernels) # the kernel packages of the project (e.g. oneDNN), see docs/kernels.md
+endif()
 if (MDL_BUILD_TESTS OR MDL_BUILD_EXAMPLES)
 	enable_testing()  # before add_subdirectory(examples) so that the examples' tests are registered
 endif()

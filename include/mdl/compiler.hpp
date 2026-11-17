@@ -24,6 +24,23 @@ namespace mdl {
 		Tvm,	///< Only TVM-generated kernels; the model has no dependency on mdl_kernels
 	};
 
+	/** @brief A library of a kernel package that must be linked (see docs/kernels.md). */
+	struct LinkedArtifact {
+		std::string package, id;
+		std::filesystem::path path;
+		std::string kind; ///< static-library, shared-library
+		std::vector<std::string>
+				dependencies; ///< `kind:name`, e.g. `system-library:m`, `runtime:openmp`, `artifact:dnnl`
+	};
+
+	/** @brief An implementation of a kernel package that the compiler used (see docs/kernels.md). */
+	struct SelectedKernel {
+		std::string function; ///< the compiled function's symbol
+		std::string package, version, implementation, symbol;
+		std::filesystem::path manifest;		   ///< the package's package.yml
+		std::vector<LinkedArtifact> artifacts; ///< the implementation's artifact, then those it depends on
+	};
+
 	struct CompileOptions {
 		/**
 		 * Optimization level string.
@@ -60,6 +77,15 @@ namespace mdl {
 
 		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/kernels.md and kernels::kernelDirs). */
 		std::vector<std::filesystem::path> kernelDirs;
+
+		/** @brief Kernel packages that may be used (`--kernel-package`; all if empty) and those that may not. */
+		std::vector<std::string> kernelPackages, noKernelPackages;
+
+		/** @brief Whether kernel packages are used at all (`--no-kernel-packages`; e.g. when the build links none). */
+		bool useKernelPackages = true;
+
+		/** @brief If set, receives the implementations of kernel packages that the compiled code calls. */
+		std::vector<SelectedKernel>* selectedKernels = nullptr;
 
 		/** @brief The source file (its project's `.mdl/kernels` is a kernel directory), if known. */
 		std::optional<std::filesystem::path> source;
