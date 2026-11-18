@@ -20,8 +20,9 @@ The goal is a port that can be diffed against TVM and updated when TVM changes:
   - `try/except` around schedule primitives becomes `catch (const std::exception&)`.
   - `s_tir.Schedule(func)` becomes `schedule_of(func)` (a traced schedule of `{"main": func}`).
   - Python's `int | Expr` domains are `PrimExpr`, with `as_int` where TVM checks for an `int`.
-- **TVM's own C++ analyses:** where the Python calls a C++ function registered with TVM (`NormalizePrimFunc`,
-  `GetSBlockRealize`, `HasIfThenElse`), the port calls the same function through its registry name.
+- **TVM's own C++ analyses:** where the Python calls a C++ function registered with TVM (`NormalizePrimFunc`), the
+  port calls that C++ function directly. If the function is not in TVM's public headers, it is declared `extern` next
+  to its use, with the TVM source file that defines it (TVM exports these symbols: `HIDE_PRIVATE_SYMBOLS OFF`).
 - **Independence:** nothing here depends on the rest of mdlc. The library `mdl_dlight` only uses TVM. The CUDA target
   (`../targets/cuda.cpp`) applies it like TVM's pipelines do:
   `ApplyDefaultSchedule(Matmul, Reduction, GeneralReduction, Transpose, Fallback)`.

@@ -8,6 +8,12 @@
 #include <map>
 #include <stdexcept>
 
+// TVM's C++ implementation behind Python's `get_global_func("s_tir.schedule.NormalizePrimFunc")`. It is not in TVM's
+// public headers (src/s_tir/schedule/transform.cc), but exported (TVM is built with HIDE_PRIVATE_SYMBOLS OFF).
+namespace tvm::s_tir {
+	ffi::Optional<ffi::ObjectRef> NormalizePrimFunc(Schedule sch);
+} // namespace tvm::s_tir
+
 namespace mdl::dlight::analysis {
 
 	namespace {
@@ -71,15 +77,15 @@ namespace mdl::dlight::analysis {
 	}
 
 	std::optional<std::vector<SBlockInfo>> normalize_prim_func(const Schedule& sch) {
-		ffi::Optional<Array<ffi::Any>> result;
+		ffi::Optional<ffi::ObjectRef> result;
 		try {
-			result = get_global_func("s_tir.schedule.NormalizePrimFunc")(sch).cast<ffi::Optional<Array<ffi::Any>>>();
+			result = ::tvm::s_tir::NormalizePrimFunc(sch);
 			if (!result)
 				return std::nullopt;
 		} catch (const std::exception&) {
 			return std::nullopt;
 		}
-		const auto parts = result.value();
+		const auto parts = ffi::Any(result.value()).cast<Array<ffi::Any>>();
 		const auto blocks_rv = parts[0].cast<Array<SBlockRV>>();
 		const auto loops = parts[1].cast<Array<Array<LoopRV>>>();
 		const auto iters = parts[2].cast<Array<Array<tirx::IterVar>>>();

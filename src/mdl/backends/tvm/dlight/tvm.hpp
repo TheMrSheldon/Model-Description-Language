@@ -40,11 +40,6 @@ namespace mdl::dlight {
 	using s_tir::Schedule;
 	using tirx::PrimFunc;
 
-	/** @brief A function registered with TVM (Python's `get_global_func`). */
-	inline ffi::Function get_global_func(const std::string& name) {
-		return ffi::Function::GetGlobalRequired(name);
-	}
-
 	/** @brief The value of a constant integer (Python's `isinstance(e, tirx.IntImm)` and `e.value`). */
 	inline std::optional<int64_t> as_int(const PrimExpr& e) {
 		if (const auto* imm = e.as<::tvm::IntImmNode>())
