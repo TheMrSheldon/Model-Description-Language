@@ -27,7 +27,7 @@ target_compile_options(mdl_cublas PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprec
 set_target_properties(mdl_cublas PROPERTIES CUDA_ARCHITECTURES "${MDL_CUBLAS_ARCHITECTURES}"
 	POSITION_INDEPENDENT_CODE ON CUDA_SEPARABLE_COMPILATION OFF)
 # TVMFFIEnvGetStream (the stream of the model's other kernels): the TVM FFI that compiled models link anyway.
-target_link_libraries(mdl_cublas PUBLIC CUDA::cublas CUDA::cudart PRIVATE tvm_ffi_header)
+target_link_libraries(mdl_cublas PUBLIC CUDA::cublasLt CUDA::cublas CUDA::cudart PRIVATE tvm_ffi_header)
 
 # In the build tree, the manifest refers to the built library; installed, the package is share/mdl/kernels/cublas
 # with the library in its lib directory.

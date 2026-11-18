@@ -3,7 +3,7 @@
 schema: 1
 package: cublas
 version: "@MDL_CUBLAS_VERSION@-mdl1"
-description: cuBLAS kernels for CUDA targets (matrix products with bias, scale, GELU and addend).
+description: cuBLAS kernels for CUDA targets (matrix products with bias, scale, GELU and addend; cuBLASLt).
 
 artifacts:
   mdl-kernels:
@@ -13,6 +13,7 @@ artifacts:
     # The oldest GPU architecture the library is built for (MDL_CUBLAS_ARCHITECTURES); it also contains PTX.
     device-arch: @MDL_CUBLAS_DEVICE_ARCH@
     dependencies:
+      - { kind: system-library, name: cublasLt }
       - { kind: system-library, name: cublas }
       - { kind: system-library, name: cudart }
 
