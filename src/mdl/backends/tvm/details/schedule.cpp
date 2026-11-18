@@ -9,6 +9,9 @@
 #include <tvm/tirx/stmt.h>
 
 #include <exception>
+#include <optional>
+#include <stdexcept>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -89,14 +92,11 @@ namespace mdl::backend::tvm {
 			sch->Parallel(par);
 		}
 
-		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
-			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
-			Schedule sch = Schedule::Concrete(
-					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
-			);
-			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
-			// Fused kernels consist of one block per operation: inline the elementwise producers into their consumers,
-			// so that intermediates are not materialized (one pass over the data instead of one per operation).
+		/**
+		 * @brief Fused kernels consist of one block per operation: inlines the elementwise producers into their
+		 * consumers, so that intermediates are not materialized (one pass over the data instead of one per operation).
+		 */
+		void inlineElementwise(Schedule& sch, const SBlockRV& root) {
 			for (const auto& block : sch->GetChildBlocks(root)) {
 				bool spatialOnly = true;
 				for (const auto& iv : sch->Get(block)->iter_vars)
@@ -108,26 +108,91 @@ namespace mdl::backend::tvm {
 				} catch (const std::exception&) {
 				}
 			}
-			for (const auto& block : sch->GetChildBlocks(root)) {
-				size_t numSpatial = 0;
-				bool reductionSeen = false, spatialAfterReduction = false, other = false;
-				for (const auto& iv : sch->Get(block)->iter_vars) {
-					if (iv->iter_type == tirx::kDataPar) {
-						++numSpatial;
-						spatialAfterReduction |= reductionSeen;
-					} else if (iv->iter_type == tirx::kCommReduce) {
-						reductionSeen = true;
-					} else {
-						other = true;
-					}
+		}
+
+		/**
+		 * @brief (number of spatial iterators, whether there are reductions) of a simple loop nest: one loop per block
+		 * iterator, spatial iterators first; nullopt otherwise.
+		 */
+		std::optional<std::pair<size_t, bool>> shapeOf(const Schedule& sch, const SBlockRV& block) {
+			size_t numSpatial = 0;
+			bool reductionSeen = false, spatialAfterReduction = false, other = false;
+			for (const auto& iv : sch->Get(block)->iter_vars) {
+				if (iv->iter_type == tirx::kDataPar) {
+					++numSpatial;
+					spatialAfterReduction |= reductionSeen;
+				} else if (iv->iter_type == tirx::kCommReduce) {
+					reductionSeen = true;
+				} else {
+					other = true;
 				}
-				// Only simple loop nests (one loop per block iterator, spatial iterators first).
-				if (other || spatialAfterReduction || sch->GetLoops(block).size() != sch->Get(block)->iter_vars.size())
+			}
+			if (other || spatialAfterReduction || sch->GetLoops(block).size() != sch->Get(block)->iter_vars.size())
+				return std::nullopt;
+			return std::pair{numSpatial, reductionSeen};
+		}
+
+		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
+			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
+			Schedule sch = Schedule::Concrete(
+					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
+			);
+			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
+			inlineElementwise(sch, root);
+			for (const auto& block : sch->GetChildBlocks(root)) {
+				const auto shape = shapeOf(sch, block);
+				if (!shape)
 					continue;
+				const size_t numSpatial = shape->first;
+				const bool reductionSeen = shape->second;
 				if (reductionSeen)
 					scheduleReduction(sch, block, numSpatial);
 				else
 					scheduleInjective(sch, block);
+			}
+			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
+		}
+
+		constexpr int64_t kThreadsPerBlock = 256;  ///< spatial work: threads per CUDA block
+		constexpr int64_t kReductionThreads = 128; ///< reductions: threads that reduce one output together
+
+		/**
+		 * @brief GPU schedule: every block's loops are bound to threads (an unbound loop would run on the host). Spatial
+		 * loops are fused and split over blocks and threads; a reduction is computed by kReductionThreads threads of
+		 * one CUDA block per output element (cross-thread reduction).
+		 */
+		/** @brief A split factor in the type of @p loop's variable (int64 loops must not be mixed with int32). */
+		Optional<::tvm::PrimExpr> factor(const Schedule& sch, const LoopRV& loop, int64_t n) {
+			return ::tvm::IntImm(sch->Get(loop)->extent.ty(), n);
+		}
+
+		tirx::PrimFunc scheduleGPU(const tirx::PrimFunc& func) {
+			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
+			Schedule sch = Schedule::Concrete(
+					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kDetail
+			);
+			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
+			inlineElementwise(sch, root);
+			for (const auto& block : sch->GetChildBlocks(root)) {
+				const auto shape = shapeOf(sch, block);
+				if (!shape)
+					throw std::runtime_error("not a simple loop nest: " + std::string(sch->Get(block)->name_hint));
+				auto loops = sch->GetLoops(block);
+				std::vector<LoopRV> spatial(loops.begin(), loops.begin() + shape->first);
+				std::vector<LoopRV> reduction(loops.begin() + shape->first, loops.end());
+				LoopRV outer = !spatial.empty() ? (spatial.size() == 1 ? spatial[0] : sch->Fuse(Array<LoopRV>(spatial.begin(), spatial.end())))
+							   : loops.empty() ? sch->AddUnitLoop(block)
+											   : sch->AddUnitLoop(loops[0]);
+				if (!shape->second) {
+					auto split = sch->Split(outer, {std::nullopt, factor(sch, outer, kThreadsPerBlock)});
+					sch->Bind(split[0], "blockIdx.x");
+					sch->Bind(split[1], "threadIdx.x");
+					continue;
+				}
+				LoopRV r = reduction.size() == 1 ? reduction[0] : sch->Fuse(Array<LoopRV>(reduction.begin(), reduction.end()));
+				auto split = sch->Split(r, {std::nullopt, factor(sch, r, kReductionThreads)});
+				sch->Bind(outer, "blockIdx.x");
+				sch->Bind(split[1], "threadIdx.x");
 			}
 			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
 		}
@@ -151,6 +216,31 @@ namespace mdl::backend::tvm {
 		for (auto& [gv, func] : updates)
 			mod->Update(gv, func);
 		logger->info("Scheduled {} kernel(s) for the CPU", updates.size());
+		return mod;
+	}
+
+} // namespace mdl::backend::tvm
+
+namespace mdl::backend::tvm {
+
+	::tvm::IRModule applyDefaultGPUSchedule(::tvm::IRModule mod) {
+		auto logger = mdl::log::getLogger("compiler");
+		std::vector<std::pair<::tvm::GlobalVar, tirx::PrimFunc>> updates;
+		for (const auto& [gv, func] : mod->functions) {
+			const auto* prim = func.as<tirx::PrimFuncNode>();
+			if (prim == nullptr || !prim->body->IsInstance<::tvm::s_tir::SBlockRealizeNode>())
+				continue;
+			if (auto pattern = prim->GetAttr<int64_t>("op_pattern"); pattern && *pattern == 8)
+				continue; // extern kernel
+			try {
+				updates.emplace_back(gv, scheduleGPU(::tvm::ffi::GetRef<tirx::PrimFunc>(prim)));
+			} catch (const std::exception& e) {
+				throw std::runtime_error("GPU schedule of " + std::string(gv->name_hint) + " failed: " + e.what());
+			}
+		}
+		for (auto& [gv, func] : updates)
+			mod->Update(gv, func);
+		logger->info("Scheduled {} kernel(s) for the GPU", updates.size());
 		return mod;
 	}
 

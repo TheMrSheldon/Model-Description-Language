@@ -1,0 +1,29 @@
+# The CUDA target (MDL_ENABLE_CUDA): models compiled with --target cuda, called with device tensors. The tests that run
+# compiled code need a GPU of architecture MDL_CUDA_ARCH or newer.
+set(_target "cuda -arch=${MDL_CUDA_ARCH}")
+set(_examples "${PROJECT_SOURCE_DIR}/examples")
+
+# The FFN of examples/01_ffn, unchanged: the model does not depend on the target.
+mdl_add_model(cuda_ffn_model SOURCE ${_examples}/01_ffn/model.dlm CONFIG ${_examples}/01_ffn/model.yml TARGET "${_target}")
+add_executable(cuda_ffn ffn.cpp)
+target_link_libraries(cuda_ffn PRIVATE cuda_ffn_model)
+add_test(NAME cuda_ffn COMMAND cuda_ffn)
+
+# Targets: an unknown kind is reported with the available ones; cuda needs an architecture.
+add_test(NAME mdlc_target_unknown COMMAND mdlc ${_examples}/01_ffn/model.dlm -a ${_examples}/01_ffn/model.yml --target foo -o unused.o)
+set_tests_properties(mdlc_target_unknown PROPERTIES WILL_FAIL TRUE)
+add_test(NAME mdlc_target_unknown_message COMMAND mdlc ${_examples}/01_ffn/model.dlm -a ${_examples}/01_ffn/model.yml --target foo -o unused.o)
+set_tests_properties(mdlc_target_unknown_message PROPERTIES PASS_REGULAR_EXPRESSION "target 'foo' not found \\(available: cuda, llvm\\)")
+add_test(NAME mdlc_target_cuda_arch COMMAND mdlc ${_examples}/01_ffn/model.dlm -a ${_examples}/01_ffn/model.yml --target cuda -o unused.o)
+set_tests_properties(mdlc_target_cuda_arch PROPERTIES PASS_REGULAR_EXPRESSION "the GPU architecture is required")
+
+# Kernel packages: CPU artifacts (oneDNN) are never selected for the CUDA target, but are for the CPU.
+if(TARGET mdl_kernel_package_onednn)
+	set(_bert ${_examples}/02_transformer)
+	add_test(NAME cuda_no_cpu_kernels COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		${_bert}/model.dlm -a ${_bert}/model.yml --kernel-package onednn --target "${_target}")
+	set_tests_properties(cuda_no_cpu_kernels PROPERTIES PASS_REGULAR_EXPRESSION " 0 selected")
+	add_test(NAME cpu_kernels COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		${_bert}/model.dlm -a ${_bert}/model.yml --kernel-package onednn)
+	set_tests_properties(cpu_kernels PROPERTIES FAIL_REGULAR_EXPRESSION " 0 selected")
+endif()

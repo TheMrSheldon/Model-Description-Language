@@ -369,7 +369,10 @@ namespace mdl::backend::tvm {
 			for (const auto& id : impl.artifacts) {
 				const auto* a = p.artifact(id);
 				std::error_code ec;
-				std::string reason = !a->supported() ? "CUDA artifacts are not supported yet"
+				std::string reason = !kernels::forDevice(*a, target)
+											 ? (a->deviceArch.empty() ? std::string("not for the device ") + target.deviceArch
+																	  : "not for " + (target.deviceArch.empty() ? std::string("the CPU") : target.deviceArch))
+									 : !a->supported() ? "cubin and PTX artifacts are not supported yet"
 									 : !kernels::compatible(a->platform, target)	  ? "not for " + target.str()
 									 : !std::filesystem::is_regular_file(a->path, ec) ? "missing " + a->path.string()
 																					  : "";

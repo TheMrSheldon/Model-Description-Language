@@ -7,6 +7,8 @@
 
 #include <mdl/compiler.hpp>
 
+#include "../targets/target.hpp"
+
 #include <tvm/ir/module.h>
 #include <tvm/target/target.h>
 
@@ -14,9 +16,6 @@
 #include <string>
 
 namespace mdl::backend::tvm {
-
-	/** @brief The LLVM target for the host CPU. */
-	::tvm::Target makeTarget(const mdl::CompileOptions& opts);
 
 	/**
 	 * @brief The Relax module at the matching boundary of kernel packages (see docs/dev/spec/kernel-packages.md): constants folded and the
@@ -35,13 +34,13 @@ namespace mdl::backend::tvm {
 	::tvm::IRModule runRelaxPipeline(::tvm::IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts);
 
 	/**
-	 * @brief Runs the TIR passes on a PrimFunc-only module and writes the generated code into an object file.
+	 * @brief Runs the TIR passes on a PrimFunc-only module and writes the generated code for @p target into an object file.
 	 * @param systemLibPrefix symbol prefix of the "system library": the generated code calls the TVM runtime directly
 	 * (instead of through function pointers that are only set when TVM loads a shared library), so the object file can
 	 * be linked statically.
 	 */
 	void buildObject(
-			::tvm::IRModule mod, const ::tvm::Target& target, const std::string& systemLibPrefix,
+			::tvm::IRModule mod, const Target& target, const std::string& systemLibPrefix,
 			const std::filesystem::path& output
 	);
 

@@ -1,6 +1,7 @@
 #include "./aot.hpp"
 #include "./tvm_compat.hpp"
 
+#include <tvm/te/operation.h>
 #include <tvm/ir/function.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/type.h>
@@ -16,6 +17,8 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <functional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -93,14 +96,93 @@ namespace mdl::backend::tvm {
 			);
 		}
 
+		/**
+		 * @brief The kernels that entry functions call instead of accessing tensor memory themselves (copies,
+		 * accumulations, constants, the dimensions in the context header): the memory may be on a device, and the entry
+		 * functions run on the host. They are scheduled like the other kernels.
+		 */
+		struct HelperKernels {
+			std::string prefix;
+			std::map<std::string, tirx::PrimFunc> functions; ///< by symbol
+
+			static std::string key(DataType dtype) {
+				return std::to_string(dtype->dtype.code) + "_" + std::to_string(dtype->dtype.bits);
+			}
+
+			/** @brief The symbol of the kernel @p name, created by @p make if it does not exist yet. */
+			std::string get(const std::string& name, const std::function<tirx::PrimFunc()>& make) {
+				const std::string symbol = prefix + name;
+				if (!functions.contains(symbol))
+					functions.emplace(
+							symbol, ::tvm::WithAttr(make(), ::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol))
+					);
+				return symbol;
+			}
+
+			static tirx::PrimFunc fromTE(const Array<::tvm::ffi::ObjectRef>& args) {
+				static const auto createPrimFunc = ::tvm::ffi::Function::GetGlobalRequired("te.CreatePrimFunc");
+				return createPrimFunc(args, nullptr).cast<tirx::PrimFunc>();
+			}
+
+			/** @brief `out[i] = src[i]` (or `src[i] + acc[i]`) over n elements. */
+			std::string elementwise(DataType dtype, bool add) {
+				return get((add ? "accumulate_" : "copy_") + key(dtype), [&] {
+					PrimVar n("n", DataType::Int(64));
+					auto src = ::tvm::te::placeholder({n}, dtype, "src");
+					auto acc = ::tvm::te::placeholder({n}, dtype, "acc");
+					auto out = ::tvm::te::compute(
+							{n},
+							[&](const Array<PrimVar>& i) {
+								PrimExpr v = src(Array<PrimExpr>{i[0]});
+								return add ? v + acc(Array<PrimExpr>{i[0]}) : v;
+							},
+							"out"
+					);
+					return add ? fromTE({src, acc, out}) : fromTE({src, out});
+				});
+			}
+
+			/**
+			 * @brief `out[i] = v_i` for k scalar parameters v_0..v_{k-1} (16-bit floats are passed as float32: the
+			 * calling convention has no 16-bit scalars).
+			 */
+			std::string fill(DataType dtype, size_t k) {
+				return get("fill" + std::to_string(k) + "_" + key(dtype), [&] {
+					const bool narrowFloat =
+							dtype.bits() < 32 && (dtype.MatchesCode(kDLFloat) || dtype.MatchesElementType(kDLBfloat, 16));
+					const DataType param = narrowFloat ? DataType::Float(32) : dtype;
+					Array<::tvm::ffi::ObjectRef> args;
+					std::vector<PrimVar> values;
+					for (size_t j = 0; j < k; ++j) {
+						values.emplace_back("v" + std::to_string(j), param);
+						args.push_back(values.back());
+					}
+					auto out = ::tvm::te::compute(
+							{IntImm(DataType::Int(64), static_cast<int64_t>(k))},
+							[&](const Array<PrimVar>& i) {
+								PrimExpr v = values.back();
+								for (size_t j = k - 1; j-- > 0;)
+									v = ::tvm::if_then_else(
+											i[0] == IntImm(DataType::Int(64), static_cast<int64_t>(j)), values[j], v
+									);
+								return ::tvm::prim::cast(dtype, v);
+							},
+							"out"
+					);
+					args.push_back(out);
+					return fromTE(args);
+				});
+			}
+		};
+
 		/** @brief Builds the entry PrimFunc of one Relax function. */
 		class EntryBuilder {
 		public:
 			EntryBuilder(
 					const IRModule& mod, const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols,
-					bool profile
+					HelperKernels& helpers, bool profile
 			)
-					: mod(mod), symbols(symbols), profile(profile) {}
+					: mod(mod), symbols(symbols), helpers(helpers), profile(profile) {}
 
 			tirx::PrimFunc
 			build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
@@ -225,11 +307,25 @@ namespace mdl::backend::tvm {
 						outerContext = outer;
 					callArgs.push_back(makeArray(outer.data(), outer, shape));
 				}
-				auto words = bufferOf(
-						"ctx_words", DataType::Int(64), {::tvm::floordiv(outerContext.value()->shape[0], 8)},
-						IntImm(DataType::Int(64), 0)
-				);
-				std::vector<tirx::Stmt> body{tirx::DeclBuffer(words, outerContext->data())};
+				// The header (the context's first contextDims words) is copied to the host stack: the context may be
+				// device memory (on the CPU, the copy is a memcpy of 64 bytes).
+				const auto n = IntImm(DataType::Int(64), kHeaderBytes / 8);
+				auto deviceWords = bufferOf("ctx_header", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
+				auto words = bufferOf("ctx_words", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
+				std::vector<tirx::Stmt> body{
+						tirx::DeclBuffer(deviceWords, outerContext->data()),
+						tirx::DeclBuffer(
+								words, ::tvm::Call(
+											   ::tvm::PointerType(DataType::Int(64)), tirx::builtin::tvm_stack_alloca(),
+											   {StringImm("shape"), n}
+									   )
+						),
+				};
+				body.push_back(tirx::Evaluate(::tvm::Call(
+						DataType::Int(32), tirx::builtin::tvm_call_packed(),
+						{StringImm("runtime.TVMTensorCopyToBytes"), makeArray(deviceWords.data(), deviceWords, {n}),
+						 words.data(), IntImm(DataType::Int(64), kHeaderBytes)}
+				)));
 				for (const auto& [slot, dim] : headerDims) {
 					PrimExpr value = tirx::BufferLoad(words, {IntImm(DataType::Int(64), slot)});
 					if (dim.ty() != DataType::Int(64))
@@ -251,6 +347,7 @@ namespace mdl::backend::tvm {
 		private:
 			const IRModule& mod;
 			const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols;
+			HelperKernels& helpers;
 			bool profile;
 			Array<::tvm::Var> params; ///< buffers and scalar dimensions
 			std::vector<tirx::BufferVar> outputs;
@@ -312,12 +409,26 @@ namespace mdl::backend::tvm {
 				contextSize = alignTo64(contextSize);
 				params.push_back(context);
 				std::vector<tirx::Stmt> prologue;
+				if (role == Role::Producer && !contextDims.empty()) {
+					// The dimensions into the header (through a kernel: the context may be device memory).
+					auto dims = bufferOf(
+							"ctx_dims", DataType::Int(64), {IntImm(DataType::Int(64), static_cast<int64_t>(contextDims.size()))},
+							IntImm(DataType::Int(64), 0)
+					);
+					prologue.push_back(tirx::DeclBuffer(dims, context.data()));
+					std::vector<PrimExpr> values;
+					for (const auto& dim : contextDims)
+						values.push_back(::tvm::prim::cast(DataType::Int(64), dim));
+					std::vector<tirx::Stmt> saved = std::move(stmts);
+					stmts.clear();
+					fill(dims, values);
+					prologue.insert(prologue.end(), stmts.begin(), stmts.end());
+					stmts = std::move(saved);
+				}
 				for (size_t k = 0; k < contextDims.size(); ++k) {
 					const PrimVar& dim = contextDims[k];
-					const PrimExpr slot = IntImm(DataType::Int(64), static_cast<int64_t>(k));
 					if (role == Role::Producer) {
-						prologue.push_back(tirx::BufferStore(header, ::tvm::prim::cast(DataType::Int(64), dim), {slot})
-						);
+						continue;
 					} else if (std::find(boundByParams.begin(), boundByParams.end(), dim.get()) ==
 							   boundByParams.end()) {
 						// Not determined by another argument (e.g. the sequence length when only [batch, classes]
@@ -427,8 +538,10 @@ namespace mdl::backend::tvm {
 						freshName("const_flat"), dtype, {IntImm(DataType::Int(64), n)}, IntImm(DataType::Int(64), 0)
 				);
 				stmts.push_back(tirx::DeclBuffer(flat, buffer.data()));
+				std::vector<PrimExpr> values;
 				for (int64_t i = 0; i < n; ++i)
-					stmts.push_back(tirx::BufferStore(flat, element(i), {IntImm(DataType::Int(64), i)}));
+					values.push_back(element(i));
+				fill(flat, values);
 				return buffer;
 			}
 
@@ -455,15 +568,31 @@ namespace mdl::backend::tvm {
 				return n;
 			}
 
+			/** @brief Calls a helper kernel (see HelperKernels) with tensor and scalar arguments. */
+			void callHelper(const std::string& symbol, const std::vector<Value>& args) {
+				Array<Expr> callArgs{StringImm(symbol)};
+				for (const auto& arg : args)
+					callArgs.push_back(packedArg(arg));
+				stmts.push_back(tirx::Evaluate(cpackedCall(callArgs)));
+			}
+
+			/** @brief Writes @p values into the 1-D buffer @p dst (through a kernel: dst may be device memory). */
+			void fill(const tirx::BufferVar& dst, const std::vector<PrimExpr>& values) {
+				const DataType dtype = dst->dtype;
+				const bool narrowFloat =
+						dtype.bits() < 32 && (dtype.MatchesCode(kDLFloat) || dtype.MatchesElementType(kDLBfloat, 16));
+				std::vector<Value> args;
+				for (const auto& v : values)
+					args.push_back(Value::primitive(::tvm::prim::cast(narrowFloat ? DataType::Float(32) : dtype, v)));
+				args.push_back(Value::tensor(dst));
+				callHelper(helpers.fill(dtype, values.size()), args);
+			}
+
 			void copy(const tirx::BufferVar& src, const tirx::BufferVar& dst) {
 				PrimExpr n = numElements(dst);
 				auto flatSrc = view(src, {n}, src->dtype, src->elem_offset);
 				auto flatDst = view(dst, {n}, dst->dtype, dst->elem_offset);
-				PrimVar i("i", DataType::Int(64));
-				stmts.push_back(tirx::For(
-						i, IntImm(DataType::Int(64), 0), n, tirx::ForKind::kSerial,
-						tirx::BufferStore(flatDst, tirx::BufferLoad(flatSrc, {i}), {i})
-				));
+				callHelper(helpers.elementwise(dst->dtype, false), {Value::tensor(flatSrc), Value::tensor(flatDst)});
 			}
 
 			/** @brief dst += src (elementwise, same shapes). */
@@ -471,11 +600,10 @@ namespace mdl::backend::tvm {
 				PrimExpr n = numElements(dst);
 				auto flatSrc = view(src, {n}, src->dtype, src->elem_offset);
 				auto flatDst = view(dst, {n}, dst->dtype, dst->elem_offset);
-				PrimVar i("i", DataType::Int(64));
-				stmts.push_back(tirx::For(
-						i, IntImm(DataType::Int(64), 0), n, tirx::ForKind::kSerial,
-						tirx::BufferStore(flatDst, tirx::BufferLoad(flatDst, {i}) + tirx::BufferLoad(flatSrc, {i}), {i})
-				));
+				callHelper(
+						helpers.elementwise(dst->dtype, true),
+						{Value::tensor(flatSrc), Value::tensor(flatDst), Value::tensor(flatDst)}
+				);
 			}
 
 			Expr packedArg(const Value& v) {
@@ -717,12 +845,13 @@ namespace mdl::backend::tvm {
 				);
 			}
 		}
+		HelperKernels helpers{.prefix = kernelPrefix + "mdl_", .functions = {}};
 		for (const auto& [gv, func] : mod->functions) {
 			if (const auto* fn = func.as<relax::FunctionNode>()) {
 				auto symbol = fn->GetAttr<::tvm::ffi::String>(::tvm::attr::kGlobalSymbol);
 				if (!symbol)
 					continue; // internal helper function
-				EntryBuilder builder{mod, symbols, profile};
+				EntryBuilder builder{mod, symbols, helpers, profile};
 				auto packed = packing.find(std::string(symbol.value()));
 				const EntrySignature* signature = packed == packing.end() ? nullptr : &packed->second;
 				builder.build(::tvm::ffi::GetRef<relax::Function>(fn), symbol.value(), signature);
@@ -735,6 +864,8 @@ namespace mdl::backend::tvm {
 					);
 			}
 		}
+		for (const auto& [symbol, func] : helpers.functions)
+			result->Add(GlobalVar(symbol), func);
 		return result;
 	}
 

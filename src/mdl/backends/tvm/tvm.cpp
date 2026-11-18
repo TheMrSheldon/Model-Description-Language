@@ -7,6 +7,7 @@
 #include "./details/pipeline.hpp"
 #include "./details/relax_builtins.hpp"
 #include "./details/tvm_compat.hpp"
+#include "./targets/registry.hpp"
 
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/datatype.hpp>
@@ -646,13 +647,6 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 
 // ── main entry point ──────────────────────────────────────────────────────────
 
-/** @brief A C identifier derived from the output file name (prefix for the symbols of the compiled kernels). */
-static std::string symbolPrefix(const std::filesystem::path& output) {
-	std::string prefix = "mdl_";
-	for (char c : output.stem().string())
-		prefix += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
-	return prefix + "_";
-}
 
 void mdl::backends::tvm::compileToFile(
 		const std::vector<mdl::ExportedFunction>& exports, const std::filesystem::path& output,
@@ -680,7 +674,8 @@ void mdl::backends::tvm::compileToFile(
 	dump(mod, "relax");
 
 	// 2. Relax passes, AOT lowering, TIR passes, and code generation.
-	auto target = backend::makeTarget(opts);
+	const auto device = backend::makeTarget(opts);
+	const auto& target = device->tvm();
 	mod = backend::canonicalize(mod, target);
 	dump(mod, "relax-match"); // the matching boundary of kernel packages (see docs/dev/spec/kernel-packages.md)
 	using Inspection = mdl::CompileOptions::KernelInspection;
@@ -697,7 +692,7 @@ void mdl::backends::tvm::compileToFile(
 		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::None || !allowed ||
 			   std::ranges::contains(opts.noKernelPackages, p.name);
 	});
-	auto matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
+	auto matches = backend::matchKernels(mod, discovery.packages, device->kernelPlatform());
 	if (opts.inspectKernels != Inspection::none) {
 		backend::explain(*opts.inspectOut, matches, discovery, opts.inspectKernels == Inspection::explain);
 		return;
@@ -706,7 +701,7 @@ void mdl::backends::tvm::compileToFile(
 		// Runtime guards are `If`s, which cannot be inside dataflow blocks: match again without them (the same
 		// selection, of the new variables), then restore the blocks and their DataflowVars (only these can be fused).
 		mod = ::tvm::relax::transform::ToNonDataflow()(mod);
-		matches = backend::matchKernels(mod, discovery.packages, mdl::kernels::hostPlatform());
+		matches = backend::matchKernels(mod, discovery.packages, device->kernelPlatform());
 		mod = backend::applyKernels(mod, matches);
 		mod = ::tvm::relax::transform::ConvertToDataflow()(mod);
 		mod = ::tvm::relax::transform::CanonicalizeBindings()(mod);
@@ -764,8 +759,8 @@ void mdl::backends::tvm::compileToFile(
 	}
 	mod = backend::lowerRelax(mod, target, opts);
 	dump(mod, "relax-lowered");
-	const auto prefix = symbolPrefix(output);
+	const auto prefix = mdl::systemLibPrefix(output);
 	mod = backend::lowerToAOT(mod, prefix + "k_", packing, opts.profile);
 	dump(mod, "tir");
-	backend::buildObject(mod, target, prefix, output);
+	backend::buildObject(mod, *device, prefix, output);
 }

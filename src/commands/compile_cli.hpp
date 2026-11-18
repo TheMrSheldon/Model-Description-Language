@@ -423,6 +423,7 @@ inline void runCompileCommand(const CompileArgs& args) {
 
 	for (const auto& binding : args.bindings) {
 		auto generator = binding.factory();
+		generator->libraryPrefix = mdl::systemLibPrefix(output);
 		auto path = binding.path.value_or(generator->inferBindingsFilename(output));
 		if (path.has_parent_path())
 			std::filesystem::create_directories(path.parent_path());
@@ -590,6 +591,12 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 			"or members with @conditional(c) used where c may be false (-Werror=permits-illegal-instantiation)."
 	);
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
+	app.add_option(
+			   "--target", args.compileOpts.target,
+			   "The device the compiled model runs on, as a TVM target: llvm (the host CPU, the default) or "
+			   "cuda -arch=sm_XY. The model itself does not depend on it."
+	)
+			->type_name("TARGET");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,
 			"Time every kernel call; the times per kernel are printed at program exit (link mdl_profile; "

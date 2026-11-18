@@ -6,7 +6,6 @@
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
-#include "./schedule.hpp"
 
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
@@ -35,15 +34,6 @@ namespace mdl::backend::tvm {
 	using ::tvm::transform::Pass;
 
 	namespace {
-		/** @brief Gets a pass from TVM's registry (many TIR passes are only exposed through the FFI). */
-		template <typename... Args>
-		Pass registeredPass(const std::string& name, Args&&... args) {
-			auto factory = ::tvm::ffi::Function::GetGlobal(name);
-			if (!factory)
-				throw std::runtime_error("TVM pass not found: " + name);
-			return (*factory)(std::forward<Args>(args)...).template cast<Pass>();
-		}
-
 		/**
 		 * @brief Prepares bfloat16 stores for tirx.transform.BF16StorageLegalize, which only converts stored values that
 		 * are reinterpretations: a bfloat16 value built from constants (e.g. a vectorized zero, `broadcast(reinterpret(
@@ -138,13 +128,6 @@ namespace mdl::backend::tvm {
 					},
 					0, "mdl.RestoreBF16ArrayTypes", {}
 			);
-		}
-
-		IRModule runPasses(IRModule mod, const std::vector<Pass>& passes, const ::tvm::Target& target) {
-			auto ctx = ::tvm::transform::PassContext::Create();
-			::tvm::With<::tvm::transform::PassContext> ctxGuard(ctx);
-			::tvm::With<::tvm::Target> targetGuard(target);
-			return ::tvm::transform::Sequential(Array<Pass>(passes.begin(), passes.end()))(std::move(mod));
 		}
 
 		/**
@@ -258,18 +241,6 @@ namespace mdl::backend::tvm {
 		}
 	} // namespace
 
-	::tvm::Target makeTarget(const mdl::CompileOptions& opts) {
-		std::string cpu = "generic";
-		if (auto fn = ::tvm::ffi::Function::GetGlobal("tvm.codegen.llvm.GetHostCPUName"))
-			cpu = (*fn)().cast<std::string>();
-		std::string json = R"({"kind": "llvm", "mcpu": ")" + cpu + "\"";
-		if (opts.fastMath)
-			json += R"(, "fast-math": true)";
-		::tvm::Target target(json + "}");
-		// The host of a CPU target is the CPU itself (MakePackedAPI only lowers functions with a host target).
-		return ::tvm::Target(target, target);
-	}
-
 	IRModule canonicalize(IRModule mod, const ::tvm::Target& target) {
 		// Constant folding first (e.g. sqrt(64) → 8) so that patterns can check constant values.
 		mod = runPasses(mod, {RT::Normalize(), RT::FoldConstant()}, target);
@@ -325,15 +296,14 @@ namespace mdl::backend::tvm {
 		return lowerRelax(canonicalize(std::move(mod), target), target, opts);
 	}
 
-	void buildObject(
-			IRModule mod, const ::tvm::Target& target, const std::string& systemLibPrefix,
-			const std::filesystem::path& output
-	) {
+	void buildObject(IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output) {
 		auto logger = mdl::log::getLogger("compiler");
+		const ::tvm::Target& tvmTarget = target.tvm();
 		mod = ::tvm::WithAttr(mod, ::tvm::attr::kSystemLibPrefix, ::tvm::ffi::String(systemLibPrefix));
 
-		// CPU subset of TVM's default TIR pipeline (python/tvm/s_tir/pipeline.py), followed by the host finalization.
-		// The block-lowering passes only apply to the kernels; the AOT entry functions are already flat.
+		// TVM's default TIR pipeline (python/tvm/s_tir/pipeline.py) with the device-specific parts from the target,
+		// followed by the host finalization. The block-lowering passes only apply to the kernels; the AOT entry
+		// functions are already flat.
 		IRModule kernels = IRModule(::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::BaseFunc>(), mod->source_map, mod->attrs);
 		std::vector<std::pair<::tvm::GlobalVar, ::tvm::BaseFunc>> entries;
 		for (const auto& [gv, func] : mod->functions) {
@@ -342,60 +312,45 @@ namespace mdl::backend::tvm {
 			else
 				kernels->Add(gv, func);
 		}
-		kernels = applyDefaultCPUSchedule(kernels);
-		mod = runPasses(
-				kernels,
-				{
-						::tvm::tirx::transform::BindTarget(target),
-						registeredPass("s_tir.transform.CanonicalizeLoop"),
-						registeredPass("s_tir.transform.LowerCrossThreadReduction"),
-						registeredPass("s_tir.transform.LowerInitBlock"),
-						registeredPass("s_tir.transform.PlanAndUpdateBufferAllocationLocation"),
-						registeredPass("s_tir.transform.ConvertBlocksToOpaque"),
-						registeredPass("s_tir.transform.CompactBufferAllocation", true),
-						registeredPass("s_tir.transform.LowerMatchBuffer"),
-						registeredPass("tirx.transform.StmtSimplify"),
-						registeredPass("s_tir.transform.LowerOpaqueBlock"),
-				},
-				target
-		);
+		kernels = runPasses(kernels, {::tvm::tirx::transform::BindTarget(tvmTarget)}, tvmTarget);
+		kernels = target.schedule(kernels);
+		mod = runPasses(kernels, target.blockLowering(), tvmTarget);
 		for (const auto& [gv, func] : entries)
 			mod->Add(gv, func);
-		mod = runPasses(
-				mod,
-				{
-						::tvm::tirx::transform::BindTarget(target),
-						registeredPass("tirx.transform.FlattenBuffer"),
-						registeredPass("tirx.transform.BF16ComputeLegalize"),
-						registeredPass("tirx.transform.NarrowDataType", 32),
-						registeredPass("s_tir.transform.LoopPartition"),
-						registeredPass("tirx.transform.VectorizeLoop", true),
-						registeredPass("tirx.transform.StorageRewrite"),
-						registeredPass("s_tir.transform.HoistIfThenElse"),
-						registeredPass("tirx.transform.UnrollLoop"),
-						registeredPass("s_tir.transform.RenormalizeSplitPattern"),
-						registeredPass("tirx.transform.StmtSimplify"),
-						registeredPass("tirx.transform.RemoveNoOp"),
-						registeredPass("s_tir.transform.RewriteUnsafeSelect"),
-						registeredPass("tirx.transform.CommonSubexprElim"),
-						registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
-						registeredPass("tirx.transform.VerifyMemory"),
-						registeredPass("tirx.transform.AnnotateEntryFunc"),
-						registeredPass("tirx.transform.SplitHostDevice"),
-						registeredPass("tirx.transform.MakePackedAPI"),
-						registeredPass("tirx.transform.FP8StorageLegalize"),
-						wrapBF16Stores(),
-						registeredPass("tirx.transform.BF16StorageLegalize"),
-						restoreBF16ArrayTypes(),
-						registeredPass("tirx.transform.LowerTVMBuiltin"),
-						registeredPass("tirx.transform.LowerIntrin"),
-				},
-				target
-		);
+		std::vector<Pass> passes{
+				::tvm::tirx::transform::BindTarget(tvmTarget),
+				registeredPass("tirx.transform.FlattenBuffer"),
+				registeredPass("tirx.transform.BF16ComputeLegalize"),
+				registeredPass("tirx.transform.NarrowDataType", 32),
+				registeredPass("s_tir.transform.LoopPartition"),
+				registeredPass("tirx.transform.VectorizeLoop", true),
+				registeredPass("tirx.transform.StorageRewrite"),
+				registeredPass("s_tir.transform.HoistIfThenElse"),
+				registeredPass("tirx.transform.UnrollLoop"),
+				registeredPass("s_tir.transform.RenormalizeSplitPattern"),
+				registeredPass("tirx.transform.StmtSimplify"),
+				registeredPass("tirx.transform.RemoveNoOp"),
+				registeredPass("s_tir.transform.RewriteUnsafeSelect"),
+				registeredPass("tirx.transform.CommonSubexprElim"),
+				registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
+				registeredPass("tirx.transform.VerifyMemory"),
+				registeredPass("tirx.transform.AnnotateEntryFunc"),
+		};
+		for (auto& p : target.beforeSplit())
+			passes.push_back(std::move(p));
+		for (auto p : {
+					 registeredPass("tirx.transform.SplitHostDevice"),
+					 registeredPass("tirx.transform.MakePackedAPI"),
+					 registeredPass("tirx.transform.FP8StorageLegalize"),
+					 wrapBF16Stores(),
+					 registeredPass("tirx.transform.BF16StorageLegalize"),
+					 restoreBF16ArrayTypes(),
+			 })
+			passes.push_back(std::move(p));
+		mod = runPasses(mod, passes, tvmTarget);
 		logger->info("TIR lowering done ({} functions)", mod->functions.size());
 
-		auto module = ::tvm::codegen::Build(mod, target);
-		module->WriteToFile(output.string(), "o");
+		target.emit(mod, output);
 		logger->info("Wrote {}", output.string());
 	}
 

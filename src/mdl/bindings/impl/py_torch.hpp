@@ -152,27 +152,29 @@ namespace mdl::bindings {
 				<< "    trainable = " << pyList(trainable) << "\n\n"
 				<< "    @staticmethod\n"
 				<< "    def forward(ctx, owner, *args):\n"
-				<< "        inputs = [a.contiguous() for a in args[:" << inputs.size() << "]]\n";
+				<< "        inputs = [a.contiguous() for a in args[:" << inputs.size() << "]]\n"
+				<< "        # Buffers on the device of the inputs (the device the model was compiled for).\n"
+				<< "        device = inputs[0].device if inputs else next(iter(owner.weights.values())).device\n";
 			if (dimsFrom >= 0)
 				out << "        dims = [int(d) for d in inputs[" << dimsFrom << "].shape[:" << rank << "]]\n";
 			else
 				out << "        dims = []\n";
 			out << "        buffer = torch.empty(owner._mod[\"" << fw.context->sizeSymbol
-				<< "\"](*dims), dtype=torch.uint8)\n"
+				<< "\"](*dims), dtype=torch.uint8, device=device)\n"
 				<< "        outputs = [";
 			for (const auto* o : outputs)
-				out << "torch.empty(" << shapeExpr(*o) << ", dtype=" << torchDtype(o->dtype) << "), ";
+				out << "torch.empty(" << shapeExpr(*o) << ", dtype=" << torchDtype(o->dtype) << ", device=device), ";
 			out << "]\n"
 				<< "        owner._mod[\"" << fw.symbol << "\"](*inputs, *[owner.weights[p] for p in " << className(fw)
 				<< ".forward_weights], *outputs, buffer)\n"
-				<< "        ctx.owner, ctx.buffer, ctx.dims = owner, buffer, dims\n"
+				<< "        ctx.owner, ctx.buffer, ctx.dims, ctx.device = owner, buffer, dims, device\n"
 				<< "        ctx.output_shapes = [o.shape for o in outputs]\n"
 				<< "        ctx.output_dtypes = [o.dtype for o in outputs]\n"
 				<< "        return outputs[0] if len(outputs) == 1 else tuple(outputs)\n\n"
 				<< "    @staticmethod\n"
 				<< "    def backward(ctx, *grads):\n"
 				<< "        owner = ctx.owner\n"
-				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s, dtype=d) for g, s, d in "
+				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s, dtype=d, device=ctx.device) for g, s, d in "
 				   "zip(grads, ctx.output_shapes, ctx.output_dtypes)]\n"
 				<< "        # The compiled backward pass adds the gradients to its output buffers: start from zero.\n"
 				<< "        gradients = {p: torch.zeros_like(owner.weights[p]) for p in " << className(fw)
@@ -184,7 +186,7 @@ namespace mdl::bindings {
 					continue;
 				const bool isInput = std::find(inputNames.begin(), inputNames.end(), o.gradientOf) != inputNames.end();
 				if (isInput)
-					out << "torch.zeros(" << shapeExpr(o) << ", dtype=" << torchDtype(o.dtype) << "), ";
+					out << "torch.zeros(" << shapeExpr(o) << ", dtype=" << torchDtype(o.dtype) << ", device=ctx.device), ";
 				else
 					out << "gradients[\"" << o.gradientOf << "\"], ";
 			}

@@ -62,6 +62,8 @@ add_library(mdl
 	backends/tvm/details/patterns.cpp
 	backends/tvm/details/schedule.cpp
 	backends/tvm/details/pipeline.cpp
+	backends/tvm/targets/llvm.cpp
+	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp
 	compiler.cpp
 	exports.cpp
@@ -82,6 +84,16 @@ target_link_libraries(mdl PUBLIC
 # The kernel packages built by this project, when running from the build tree (see kernels::kernelDirs).
 # (The packages of the source tree's kernels/ are generated there, with their libraries; see kernels/CMakeLists.txt.)
 target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_DIR}/mdl-kernels")
+# The targets of the TVM backend (backends/tvm/targets/): CUDA only with MDL_ENABLE_CUDA (else unsupported). The CUDA
+# target combines host and device code into one object file with the linker (ld -r).
+if(MDL_ENABLE_CUDA)
+	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp)
+	find_package(CUDAToolkit REQUIRED)
+	find_file(MDL_CUDA_LIBDEVICE libdevice.10.bc PATHS "${CUDAToolkit_LIBRARY_ROOT}/nvvm/libdevice"
+		"${CUDAToolkit_TARGET_DIR}/nvvm/libdevice" "${CUDAToolkit_BIN_DIR}/../nvvm/libdevice" NO_DEFAULT_PATH REQUIRED)
+	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}"
+		MDL_CUDA_LIBDEVICE="${MDL_CUDA_LIBDEVICE}")
+endif()
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)
 

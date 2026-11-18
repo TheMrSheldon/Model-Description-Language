@@ -54,6 +54,13 @@ CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)
 # Dependencies of the compiler
 ##########################################################################################
 if(MDL_ENABLE_COMPILER)
+	# CUDA target (MDL_ENABLE_CUDA, a package feature, see the top-level CMakeLists.txt): TVM's CUDA codegen and runtime.
+	# Without it, the cuda target is registered as unsupported (see backends/tvm/targets/).
+	if(MDL_ENABLE_CUDA)
+		set(MDL_TVM_USE_CUDA ON)
+	else()
+		set(MDL_TVM_USE_CUDA OFF)
+	endif()
 	# TVM
 	# - Optimized kernels (GEMM, softmax, layer norm, ...) come from kernel packages (oneDNN: kernels/onednn), so TVM's
 	#   BLAS contrib is not needed.
@@ -67,7 +74,7 @@ if(MDL_ENABLE_COMPILER)
 		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
-		OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
+		OPTIONS "USE_LLVM ON" "USE_CUDA ${MDL_TVM_USE_CUDA}" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
 		EXCLUDE_FROM_ALL YES
 	)
 	# spdlog (logging)

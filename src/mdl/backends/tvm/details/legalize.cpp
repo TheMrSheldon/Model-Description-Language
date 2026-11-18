@@ -1073,6 +1073,15 @@ namespace mdl::backend::tvm {
 					auto tx = te.tensor(x, "x");
 					auto tg = te.tensor(gamma, "gamma");
 					auto tb = te.tensor(beta, "beta");
+					// TOPI's layer norm supports float32 and float16 only: bfloat16 is normalized in float32 (when
+					// no kernel package replaces it, e.g. on GPUs).
+					if (tx->dtype.MatchesElementType(kDLBfloat, 16)) {
+						const auto f32 = ::tvm::PrimType::Float(32);
+						auto y = topi::nn::layer_norm(
+								topi::cast(tx, f32), topi::cast(tg, f32), topi::cast(tb, f32), attrs->axes, attrs->epsilon
+						);
+						return te.finish(topi::cast(y, tx->dtype));
+					}
 					return te.finish(topi::nn::layer_norm(tx, tg, tb, attrs->axes, attrs->epsilon));
 				}));
 		return map;

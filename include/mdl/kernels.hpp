@@ -38,6 +38,7 @@ namespace mdl::kernels {
 		std::string abi;  ///< gnu, msvc, darwin
 		std::string
 				libc; ///< a requirement like `>=2.28` (artifacts), or a version like `2.39` (the host); may be empty
+		std::string deviceArch; ///< the device of a compilation target (e.g. sm_80); empty: the CPU
 
 		std::string str() const; ///< e.g. `linux x86_64 gnu libc>=2.28`
 	};
@@ -185,6 +186,13 @@ namespace mdl::kernels {
 
 	/** @brief Whether an artifact for @p required runs on @p host (also checks a `libc: >=x.y` requirement). */
 	bool compatible(const Platform& required, const Platform& host);
+
+	/**
+	 * @brief Whether @p artifact is for the device of @p target: CPU artifacts (no device-arch) only for CPU targets,
+	 * device artifacts only for that device. A cubin runs on the same major architecture with an equal or higher minor
+	 * one (sm_80 on sm_86, not on sm_90); PTX and libraries on equal or higher architectures.
+	 */
+	bool forDevice(const Artifact& artifact, const Platform& target);
 
 } // namespace mdl::kernels
 
