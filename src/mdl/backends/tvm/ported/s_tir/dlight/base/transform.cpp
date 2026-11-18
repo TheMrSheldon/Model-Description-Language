@@ -1,12 +1,12 @@
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/transform.py
-// (see ../README.md).
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/transform.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #include "./transform.hpp"
 
 #include <tvm/ir/attrs.h>
 
 #include <stdexcept>
 
-namespace mdl::dlight {
+namespace mdl::tvm_ported::dlight {
 
 	namespace {
 		bool is_scheduled(const PrimFunc& func) {
@@ -62,4 +62,4 @@ namespace mdl::dlight {
 		);
 	}
 
-} // namespace mdl::dlight
+} // namespace mdl::tvm_ported::dlight

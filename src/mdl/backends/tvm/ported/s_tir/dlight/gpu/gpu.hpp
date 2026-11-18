@@ -1,15 +1,15 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/__init__.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #pragma once
 
 /**
  * @file gpu.hpp
  * @brief GPU-generic schedule rules.
- * Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/__init__.py
- * (see ../README.md; GEMV, LowBatchGEMV and RMSNorm are not ported yet).
  */
 
 #include "./base.hpp"
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 #define MDL_DLIGHT_RULE(Name)                                                                                          \
 	class Name final : public GPUScheduleRule {                                                                        \
@@ -25,9 +25,11 @@ namespace mdl::dlight::gpu {
 	MDL_DLIGHT_RULE(Reduction)
 	/** @brief gpu/transpose.py: schedule rule for transpose. */
 	MDL_DLIGHT_RULE(Transpose)
-	/** @brief gpu/matmul.py: the schedule rule for matmul-like computation (without tensorization). */
+	/** @brief gpu/matmul.py: the schedule rule for matmul-like computation. */
 	MDL_DLIGHT_RULE(Matmul)
+	/** @brief gpu/matmul.py: the schedule rule for float16 tensor core matmul computation (WMMA). */
+	MDL_DLIGHT_RULE(MatmulTensorization)
 
 #undef MDL_DLIGHT_RULE
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

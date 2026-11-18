@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace mdl::dlight {
+namespace mdl::tvm_ported {
 
 	namespace ffi = ::tvm::ffi;
 	namespace tirx = ::tvm::tirx;
@@ -69,4 +69,4 @@ namespace mdl::dlight {
 		return region->source.as_or_throw<tirx::BufferVar>();
 	}
 
-} // namespace mdl::dlight
+} // namespace mdl::tvm_ported

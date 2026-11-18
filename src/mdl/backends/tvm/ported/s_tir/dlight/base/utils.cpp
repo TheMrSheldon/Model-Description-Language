@@ -1,10 +1,10 @@
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/utils.py
-// (see ../README.md).
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/utils.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #include "./utils.hpp"
 
 #include <stdexcept>
 
-namespace mdl::dlight {
+namespace mdl::tvm_ported::dlight {
 
 	Schedule schedule_of(const PrimFunc& func) {
 		// Python's s_tir.Schedule defaults: a traced schedule, random seed, no debug checks, detailed errors.
@@ -79,4 +79,4 @@ namespace mdl::dlight {
 		return results;
 	}
 
-} // namespace mdl::dlight
+} // namespace mdl::tvm_ported::dlight

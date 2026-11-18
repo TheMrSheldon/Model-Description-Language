@@ -1,12 +1,12 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/matmul.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 // A GEMM schedule rule for GPU operators.
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/matmul.py
-// (see ../README.md). Ported: the helpers and `Matmul`. Not ported: `MatmulTensorization`, `MatmulInt8Tensorization`
-// and `MetalMatmul` (they need the Python-only tensor intrinsics of python/tvm/s_tir/tensor_intrin/cuda.py), and
-// `Matmul.sch_outer_reduction` (OpenCL on Android/Adreno only).
+// Ported: the helpers, `MatmulTensorization` and `Matmul`. Not ported: `MatmulInt8Tensorization`, `MetalMatmul`, and `Matmul.sch_outer_reduction` (OpenCL on Android/Adreno).
 #include "./gpu.hpp"
 
 #include "../analysis/common_analysis.hpp"
 #include "../base/utils.hpp"
+#include "../../tensor_intrin/cuda.hpp"
 
 #include <tvm/tirx/analysis.h>
 
@@ -17,7 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 	namespace {
 		Array<SBlockRV> _collect_producers(const Schedule& sch, const SBlockRV& block) {
@@ -320,7 +320,225 @@ namespace mdl::dlight::gpu {
 		}
 	} // namespace
 
-	std::optional<Schedule> Matmul::apply(const PrimFunc& func, const Target& target, bool /*tunable*/) const {
+	namespace {
+		Array<PrimExpr> ints(std::initializer_list<int64_t> values) {
+			Array<PrimExpr> result;
+			for (int64_t v : values)
+				result.push_back(::tvm::IntImm::Int32(v));
+			return result;
+		}
+	} // namespace
+
+	std::optional<Schedule>
+	MatmulTensorization::apply(const PrimFunc& func, const Target& target, bool /*tunable*/) const {
+		// pylint: disable=too-many-locals,missing-docstring
+		tensor_intrin::cuda::register_wmma_intrinsics(); // (Python: importing tvm.s_tir.tensor_intrin.cuda)
+
+		if (!is_target_available(target))
+			return std::nullopt;
+		Schedule sch = schedule_of(func);
+		const SBlockRV root_block = analysis::get_root_block(sch);
+		const auto blocks = sch->GetChildBlocks(root_block);
+
+		if (func->attrs.defined() && func->attrs->dict.count("dlight.do_not_tensorize"))
+			return std::nullopt;
+
+		const auto reduction_blocks = get_reduction_blocks(sch, blocks);
+		if (!reduction_blocks)
+			return std::nullopt;
+
+		// Start Schedule
+		// Step 0. Get schedule config.
+		// NOTE: we can analyze the config by the hardware spec in the future
+
+		// tensor core intrinsic size
+		const int64_t micro_size_x = 16;
+		const int64_t micro_size_y = 16;
+		const int64_t micro_size_k = 16;
+
+		const int64_t warp_size = 32;
+		const int64_t vector_size = 4;
+
+		const std::vector<std::optional<int64_t>> i_factors{std::nullopt, 1, 4, 2}, j_factors{1, std::nullopt, 4, 2},
+				k_factors{std::nullopt, 4};
+		const int64_t num_ty = *i_factors[2] * *j_factors[2];
+		const int64_t x_pad_factor = *i_factors[2] * *i_factors[3];
+		const int64_t y_pad_factor = *j_factors[2] * *j_factors[3];
+		const int64_t k_pad_factor = *k_factors[1];
+
+		// Step 1. Normalize generic matmul to C[S, I, J] += A[S, I, K] * B[S, J, K]
+		const SBlockRV main_block = (*reduction_blocks)[0];
+		const SBlockRV reindex_a = sch->ReIndex(main_block, 0, s_tir::BufferIndexType::kRead);
+		const SBlockRV reindex_b = sch->ReIndex(main_block, 1, s_tir::BufferIndexType::kRead);
+		const SBlockRV reindex_c = sch->ReIndex(main_block, 0, s_tir::BufferIndexType::kWrite);
+
+		const auto index_maps = get_index_map(sch->Get(main_block));
+		if (!index_maps)
+			throw std::logic_error("MatmulTensorization: no index maps after reindexing");
+		sch->TransformLayout(reindex_a, 0, s_tir::BufferIndexType::kWrite, index_maps->a_index_map);
+		sch->TransformLayout(reindex_b, 0, s_tir::BufferIndexType::kWrite, index_maps->b_index_map);
+		sch->TransformLayout(reindex_c, 0, s_tir::BufferIndexType::kRead, index_maps->c_index_map);
+		sch->TransformBlockLayout(main_block, index_maps->matmul_index_map);
+
+		// Step 2. Padding for dynamic shape kernels
+		sch->PadEinsum(
+				main_block,
+				{1, micro_size_x * x_pad_factor, micro_size_y * y_pad_factor, micro_size_k * k_pad_factor}
+		);
+
+		// Step 3. Schedule matmul to use tensor core
+		const SBlockRV block = main_block;
+
+		auto loops = sch->GetLoops(block);
+		const LoopRV batch = loops[0];
+		auto split = sch->Split(loops[1], factors({std::nullopt, micro_size_x}));
+		LoopRV i = split[0], i_inner = split[1];
+		split = sch->Split(loops[2], factors({std::nullopt, micro_size_y}));
+		LoopRV j = split[0], j_inner = split[1];
+		split = sch->Split(loops[3], factors({std::nullopt, micro_size_k}));
+		LoopRV k = split[0], k_inner = split[1];
+
+		sch->Reorder({i, j, k, i_inner, j_inner, k_inner});
+
+		const SBlockRV block_inner = block;
+		const SBlockRV block_outer = sch->Blockize(i_inner);
+
+		auto to_factors = [](const std::vector<std::optional<int64_t>>& f) {
+			Array<ffi::Optional<PrimExpr>> result;
+			for (const auto& v : f)
+				result.push_back(v ? ffi::Optional<PrimExpr>(::tvm::IntImm::Int32(*v)) : ffi::Optional<PrimExpr>());
+			return result;
+		};
+		split = sch->Split(i, to_factors(i_factors));
+		const LoopRV i0 = split[0], i1 = split[1], i2 = split[2], i3 = split[3];
+		split = sch->Split(j, to_factors(j_factors));
+		const LoopRV j0 = split[0], j1 = split[1], j2 = split[2], j3 = split[3];
+		split = sch->Split(k, to_factors(k_factors));
+		const LoopRV k0 = split[0], k1 = split[1];
+		sch->Annotate(k0, "software_pipeline_order", ints({0, 3, 1, 4, 5, 2, 6}));
+		sch->Annotate(k0, "software_pipeline_stage", ints({0, 0, 0, 0, 0, 1, 1}));
+		sch->Annotate(k1, "software_pipeline_order", ints({0, 1, 2}));
+		sch->Annotate(k1, "software_pipeline_stage", ints({0, 0, 1}));
+
+		sch->Reorder({i0, j0, i1, j1, j2, i2, k0, k1, i3, j3});
+
+		const LoopRV block_idx = sch->Fuse({i0, j0});
+		const LoopRV block_idy = sch->Fuse({i1, j1});
+		const LoopRV thread_idy = sch->Fuse({j2, i2});
+		sch->Bind(batch, "blockIdx.z");
+		sch->Bind(block_idx, "blockIdx.x");
+		sch->Bind(block_idy, "blockIdx.y");
+		sch->Bind(thread_idy, "threadIdx.y");
+
+		auto fetch_to_shared = [&](const SBlockRV& block, int idx, int ndim) {
+			const SBlockRV block_read = sch->CacheRead(block, idx, "shared.dyn");
+			sch->ComputeAt(block_read, k0, /*preserve_unit_loops=*/false);
+			const auto read_loops = sch->GetLoops(block_read);
+			const LoopRV fused = sch->Fuse(Array<LoopRV>(read_loops.end() - ndim, read_loops.end()));
+
+			const auto parts = sch->Split(fused, factors({std::nullopt, num_ty, warp_size, vector_size}));
+			const LoopRV f_1 = parts[1], f_2 = parts[2], f_3 = parts[3];
+
+			sch->Bind(f_2, "threadIdx.x");
+			sch->Bind(f_1, "threadIdx.y");
+			sch->Vectorize(f_3);
+
+			sch->StorageAlign(block_read, 0, /*axis=*/-2, /*factor=*/16, /*offset=*/8);
+			sch->Annotate(block_read, "tirx.manifest_shared_memory_local_stage", ::tvm::IntImm::Int32(1));
+			sch->Annotate(block_read, "double_buffer_scope", ::tvm::IntImm::Int32(0));
+			return block_read;
+		};
+
+		const SBlockRV a_g2s = fetch_to_shared(block_outer, 0, 2);
+		const SBlockRV b_g2s = fetch_to_shared(block_outer, 1, 2);
+
+		auto_inline_producers(sch, a_g2s);
+		auto_inline_producers(sch, b_g2s);
+
+		// create read cache to load matrix from shared memory to wmma fragments
+		const SBlockRV A_mat = sch->CacheRead(block_outer, 0, "wmma.matrix_a");
+		const SBlockRV B_mat = sch->CacheRead(block_outer, 1, "wmma.matrix_b");
+		sch->ComputeAt(A_mat, k1, /*preserve_unit_loops=*/false);
+		sch->ComputeAt(B_mat, k1, /*preserve_unit_loops=*/false);
+
+		// create write cache to store matrix from wmma fragments to shared memory and global memory
+		const SBlockRV accumulator_shared_to_global = sch->CacheWrite(block_outer, 0, "shared.dyn");
+		sch->StorageAlign(accumulator_shared_to_global, 0, -2, 16, 4);
+
+		const SBlockRV store = sch->CacheWrite(block_outer, 0, "wmma.accumulator");
+		sch->ReverseComputeAt(store, thread_idy, /*preserve_unit_loops=*/false);
+		sch->ReverseComputeAt(accumulator_shared_to_global, thread_idy, /*preserve_unit_loops=*/false);
+
+		// split the store loop to match hardware intrinsic pattern
+		auto store_loops = sch->GetLoops(store);
+		auto si = sch->Split(store_loops[store_loops.size() - 2], factors({std::nullopt, 16}));
+		auto sj = sch->Split(store_loops[store_loops.size() - 1], factors({std::nullopt, 16}));
+		sch->Reorder({si[0], sj[0], si[1], sj[1]});
+
+		const SBlockRV block_init_c = sch->DecomposeReduction(block_outer, k0);
+		const SBlockRV block_init_c_inner = sch->GetChildBlocks(block_init_c)[0];
+
+		// Tensorization by hardware intrinsics
+		auto intrin_group = tensor_intrin::cuda::get_wmma_intrin_group(
+				"shared.dyn", "shared.dyn", "float16", "float32", /*trans_b=*/true
+		);
+
+		try {
+			for (const auto& [mat, intrin] : {std::pair{A_mat, "load_a"}, std::pair{B_mat, "load_b"}}) {
+				const auto mat_loops = sch->GetLoops(mat);
+				const auto mi = sch->Split(mat_loops[mat_loops.size() - 2], factors({std::nullopt, 16}));
+				const auto mj = sch->Split(mat_loops[mat_loops.size() - 1], factors({std::nullopt, 16}));
+				sch->Reorder({mi[0], mj[0], mi[1], mj[1]});
+				sch->Unroll(mi[0]);
+				sch->Unroll(mj[0]);
+				sch->Tensorize(mi[1], intrin_group.at(intrin));
+			}
+		} catch (const std::exception&) {
+			return std::nullopt;
+		}
+
+		bool tensorize_success = false;
+
+		auto tensorize_init_store_compute = [&] {
+			const auto init_loops = sch->GetLoops(block_init_c_inner);
+			sch->Tensorize(init_loops[init_loops.size() - 2], intrin_group.at("init"));
+			const auto s_loops = sch->GetLoops(store);
+			sch->Tensorize(s_loops[s_loops.size() - 2], intrin_group.at("store"));
+			const auto c_loops = sch->GetLoops(block_inner);
+			sch->Tensorize(c_loops[c_loops.size() - 3], intrin_group.at("compute"));
+		};
+
+		try {
+			tensorize_init_store_compute();
+			tensorize_success = true;
+		} catch (const std::exception&) {
+			intrin_group = tensor_intrin::cuda::get_wmma_intrin_group(
+					"shared.dyn", "shared.dyn", "float16", "float16", /*trans_b=*/true
+			);
+		}
+
+		if (!tensorize_success) {
+			try {
+				tensorize_init_store_compute();
+				tensorize_success = true;
+			} catch (const std::exception&) {
+				return std::nullopt;
+			}
+		}
+		auto_inline_consumer_chain(sch, accumulator_shared_to_global);
+
+		const auto acc_loops = sch->GetLoops(accumulator_shared_to_global);
+		const LoopRV fused = sch->Fuse(Array<LoopRV>(acc_loops.end() - 2, acc_loops.end()));
+		const auto parts = sch->Split(fused, factors({std::nullopt, warp_size, vector_size}));
+		sch->Bind(parts[1], "threadIdx.x");
+		sch->Vectorize(parts[2]);
+
+		if (tensorize_success)
+			return sch;
+		return std::nullopt;
+	}
+
+	std::optional<Schedule> Matmul::apply(const PrimFunc& func, const Target& target, bool tunable) const {
 		// pylint: disable=too-many-locals,missing-docstring
 		if (!is_target_available(target))
 			return std::nullopt;
@@ -367,11 +585,15 @@ namespace mdl::dlight::gpu {
 			}
 			if (apply_tensorization) {
 				const auto [in_dtype, out_dtype] = get_in_out_dtypes(block_stmt);
-				// Not ported: MatmulInt8Tensorization (int8 -> int32) and MatmulTensorization (float16 -> float16 or
-				// float32). They need the WMMA tensor intrinsics of python/tvm/s_tir/tensor_intrin/cuda.py; without
-				// them, the tensorized schedule is never available (TVM's `tensorize_sch is None`).
-				(void)in_dtype;
-				(void)out_dtype;
+				std::optional<Schedule> tensorize_sch;
+				if (in_dtype == ::tvm::PrimType::Int(8) && out_dtype == ::tvm::PrimType::Int(32)) {
+					// (Not ported: MatmulInt8Tensorization.)
+				} else if (in_dtype == ::tvm::PrimType::Float(16) &&
+						   (out_dtype == ::tvm::PrimType::Float(16) || out_dtype == ::tvm::PrimType::Float(32))) {
+					tensorize_sch = MatmulTensorization().apply(func, target, tunable);
+				}
+				if (tensorize_sch)
+					return tensorize_sch;
 			}
 		}
 		// (Not ported: MetalMatmul.)
@@ -472,4 +694,4 @@ namespace mdl::dlight::gpu {
 		return sch;
 	}
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

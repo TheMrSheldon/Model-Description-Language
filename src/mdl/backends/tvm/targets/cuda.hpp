@@ -2,7 +2,7 @@
 
 /**
  * @file cuda.hpp
- * @brief NVIDIA GPUs: device code through TVM's LLVM NVPTX backend (PTX), with the host CPU as the host. Without MDL_ENABLE_CUDA, the target is
+ * @brief NVIDIA GPUs: device code through TVM's CUDA C code generation (compiled with NVRTC), with the host CPU as the host. Without MDL_ENABLE_CUDA, the target is
  * registered but unsupported.
  */
 

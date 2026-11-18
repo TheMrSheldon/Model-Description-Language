@@ -1,6 +1,6 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/fallback.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 // A fallback schedule rule for GPU operators.
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/fallback.py
-// (see ../README.md).
 #include "./gpu.hpp"
 
 #include "../base/common_schedules.hpp"
@@ -8,7 +8,7 @@
 
 #include <tvm/ffi/extra/structural_visit.h>
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 	namespace {
 		bool _has_internal_thread_env(const tirx::Stmt& stmt) {
@@ -83,4 +83,4 @@ namespace mdl::dlight::gpu {
 		return sch;
 	}
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

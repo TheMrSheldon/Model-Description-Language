@@ -1,15 +1,15 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/schedule_rule.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #pragma once
 
 /**
  * @file schedule_rule.hpp
  * @brief A lightweight wrapper on an arbitrary function that can be used to schedule a TIR PrimFunc.
- * Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/schedule_rule.py
- * (see ../README.md).
  */
 
-#include "../tvm.hpp"
+#include "../../../tvm.hpp"
 
-namespace mdl::dlight {
+namespace mdl::tvm_ported::dlight {
 
 	/**
 	 * @brief A thin wrapper on an arbitrary function that can be used to schedule a TIR PrimFunc.
@@ -27,4 +27,4 @@ namespace mdl::dlight {
 		virtual bool is_target_available(const Target& /*target*/) const { return true; }
 	};
 
-} // namespace mdl::dlight
+} // namespace mdl::tvm_ported::dlight

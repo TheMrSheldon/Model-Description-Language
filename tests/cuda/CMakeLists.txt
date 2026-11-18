@@ -28,18 +28,18 @@ if(TARGET mdl_kernel_package_onednn)
 	set_tests_properties(cpu_kernels PROPERTIES FAIL_REGULAR_EXPRESSION " 0 selected")
 endif()
 
-# BERT (examples/02_transformer, unchanged) on the GPU against Hugging Face's BertModel: float32, bfloat16, and padded
-# sequences with a mask (bert_check.cpp with MDL_BERT_DEVICE).
+# BERT (examples/02_transformer, unchanged) on the GPU against Hugging Face's BertModel: float32, bfloat16, float16, and padded
+# sequences with a mask; float16 GEMMs use tensor cores (bert_check.cpp with MDL_BERT_DEVICE).
 set(_bert_dir ${_examples}/02_transformer)
-foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "masked;;1e-4;--mask;forward;--mask;pooled")
+foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "f16;float16;5e-3;" "masked;;1e-4;--mask;forward;--mask;pooled")
 	list(GET variant 0 name)
 	list(GET variant 1 type)
 	list(GET variant 2 tolerance)
 	list(SUBLIST variant 3 -1 extra)
 	set(options --ellipsis-rank 2 ${extra})
 	set(reference ${_bert_dir}/data/bert_tiny.safetensors)
-	if(name STREQUAL "bf16")
-		list(APPEND options --float bf16)
+	if(name STREQUAL "bf16" OR name STREQUAL "f16")
+		list(APPEND options --float ${name})
 	elseif(name STREQUAL "masked")
 		set(reference ${_bert_dir}/data/bert_tiny_padded.safetensors)
 	endif()

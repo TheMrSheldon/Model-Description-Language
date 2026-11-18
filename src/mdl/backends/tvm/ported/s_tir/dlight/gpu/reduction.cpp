@@ -1,6 +1,6 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/reduction.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 // A rule for reduction (`Out[...] += In[...]` with an optional elementwise epilogue).
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/reduction.py
-// (see ../README.md).
 #include "./gpu.hpp"
 
 #include "../base/common_schedules.hpp"
@@ -15,7 +15,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 	namespace {
 		using analysis::SBlockInfo;
@@ -400,4 +400,4 @@ namespace mdl::dlight::gpu {
 		return sch;
 	}
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

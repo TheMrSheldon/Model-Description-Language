@@ -1,6 +1,6 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/transpose.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 // Schedule rule for transpose.
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/transpose.py
-// (see ../README.md).
 #include "./gpu.hpp"
 
 #include "../base/common_schedules.hpp"
@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 	namespace {
 		bool is_transpose(const Schedule& sch, const SBlockRV& block_rv) {
@@ -139,4 +139,4 @@ namespace mdl::dlight::gpu {
 		return sch;
 	}
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

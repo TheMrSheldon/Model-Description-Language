@@ -87,15 +87,14 @@ target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_D
 # The targets of the TVM backend (backends/tvm/targets/): CUDA only with MDL_ENABLE_CUDA (else unsupported). The CUDA
 # target combines host and device code into one object file with the linker (ld -r).
 if(MDL_ENABLE_CUDA)
-	# The GPU schedules: TVM's DLight, ported to C++ (backends/tvm/dlight/README.md).
-	add_subdirectory(backends/tvm/dlight)
-	target_link_libraries(mdl PRIVATE mdl_dlight)
+	# The GPU schedules, the tensor intrinsics, and the CUDA C code generation callbacks: parts of TVM's Python package
+	# translated to C++ (backends/tvm/ported/README.md).
+	add_subdirectory(backends/tvm/ported)
+	target_link_libraries(mdl PRIVATE mdl_tvm_ported)
 	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp)
-	find_package(CUDAToolkit REQUIRED)
-	find_file(MDL_CUDA_LIBDEVICE libdevice.10.bc PATHS "${CUDAToolkit_LIBRARY_ROOT}/nvvm/libdevice"
-		"${CUDAToolkit_TARGET_DIR}/nvvm/libdevice" "${CUDAToolkit_BIN_DIR}/../nvvm/libdevice" NO_DEFAULT_PATH REQUIRED)
-	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}"
-		MDL_CUDA_LIBDEVICE="${MDL_CUDA_LIBDEVICE}")
+	# The CUDA target uses TVM internals (the CUDA module of the code generation; see targets/cuda.cpp).
+	set_source_files_properties(backends/tvm/targets/cuda.cpp PROPERTIES INCLUDE_DIRECTORIES "${tvm_SOURCE_DIR}/src")
+	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}")
 endif()
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)

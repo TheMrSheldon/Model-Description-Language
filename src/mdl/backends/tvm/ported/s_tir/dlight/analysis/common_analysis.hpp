@@ -1,18 +1,18 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/analysis/common_analysis.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #pragma once
 
 /**
  * @file common_analysis.hpp
  * @brief Analysis on TIR blocks, loops and functions.
- * Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/analysis/common_analysis.py
- * (see ../README.md).
  */
 
-#include "../tvm.hpp"
+#include "../../../tvm.hpp"
 
 #include <string>
 #include <unordered_set>
 
-namespace mdl::dlight::analysis {
+namespace mdl::tvm_ported::dlight::analysis {
 
 	/** @brief Information about a loop/iter var. */
 	struct IterInfo {
@@ -71,4 +71,4 @@ namespace mdl::dlight::analysis {
 	/** @brief Check if the epilogue block is a broadcast pattern. */
 	bool is_broadcast_epilogue(const Schedule& sch, const SBlockRV& block, const SBlockRV& epilogue);
 
-} // namespace mdl::dlight::analysis
+} // namespace mdl::tvm_ported::dlight::analysis

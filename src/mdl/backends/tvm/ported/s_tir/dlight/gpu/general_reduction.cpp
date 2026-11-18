@@ -1,6 +1,6 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/general_reduction.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 // Reduction rule for operators including softmax, layer norm, RMS norm, etc.
-// Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/gpu/general_reduction.py
-// (see ../README.md).
 #include "./gpu.hpp"
 
 #include "../base/common_schedules.hpp"
@@ -10,7 +10,7 @@
 
 #include <unordered_map>
 
-namespace mdl::dlight::gpu {
+namespace mdl::tvm_ported::dlight::gpu {
 
 	std::optional<Schedule>
 	GeneralReduction::apply(const PrimFunc& func, const Target& target, bool /*tunable*/) const {
@@ -204,4 +204,4 @@ namespace mdl::dlight::gpu {
 		return sch;
 	}
 
-} // namespace mdl::dlight::gpu
+} // namespace mdl::tvm_ported::dlight::gpu

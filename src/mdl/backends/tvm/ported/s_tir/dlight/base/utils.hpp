@@ -1,15 +1,15 @@
+// Translated from https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/utils.py
+// (conventions: src/mdl/backends/tvm/ported/README.md)
 #pragma once
 
 /**
  * @file utils.hpp
  * @brief Utility methods for generic GPU.
- * Port of https://github.com/apache/tvm/blob/7b5acb32bd271342a24130f4ef439ff6c2e52c6c/python/tvm/s_tir/dlight/base/utils.py
- * (see ../README.md).
  */
 
-#include "../tvm.hpp"
+#include "../../../tvm.hpp"
 
-namespace mdl::dlight {
+namespace mdl::tvm_ported::dlight {
 
 	/** @brief `s_tir.Schedule(func)`: a (traced) schedule of the module {"main": func} (not in TVM's utils.py). */
 	Schedule schedule_of(const PrimFunc& func);
@@ -29,4 +29,4 @@ namespace mdl::dlight {
 			const Target& target, const std::vector<tirx::For>& loops, int64_t max_threads_for_dynamic_loop = 32
 	);
 
-} // namespace mdl::dlight
+} // namespace mdl::tvm_ported::dlight
