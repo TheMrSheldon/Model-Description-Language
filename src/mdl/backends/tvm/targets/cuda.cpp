@@ -2,13 +2,16 @@
 
 #include "./llvm.hpp"
 
-#include "../ported/globals.hpp"
-#include "../ported/support/nvcc.hpp"
-#include "../ported/s_tir/dlight/base/transform.hpp"
-#include "../ported/s_tir/dlight/gpu/gpu.hpp"
+#include <tvm_ported/globals.hpp>
+#include <tvm_ported/s_tir/dlight/base/transform.hpp>
+#include <tvm_ported/s_tir/dlight/gpu/gpu.hpp>
+#include <tvm_ported/support/nvcc.hpp>
 
 #include <tvm/ir/attrs.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/target/codegen.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt.h>
 
 // TVM internals (src/; pinned TVM version): the CUDA module of the code generation without a CUDA runtime.
 #include <backend/cuda/codegen/cuda_fallback_module.h>
@@ -17,6 +20,8 @@
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace mdl::backend::tvm {
 
@@ -33,7 +38,7 @@ namespace mdl::backend::tvm {
 			);
 		arch = a.value();
 		// Device code through TVM's CUDA C code generation, compiled with NVRTC (cubin). Its Python callbacks (the
-		// CUDA header, intrinsic codegens, the compiler) and the tensor intrinsics are ported to C++ (../ported).
+		// CUDA header, intrinsic codegens, the compiler) and the tensor intrinsics are ported to C++ (src/tvm_ported).
 		target = ::tvm::Target(::tvm::Target(R"({"kind": "cuda", "arch": ")" + arch + "\"}"), LLVMTarget::host(opts));
 		mdl::tvm_ported::register_cuda_globals();
 	}
@@ -45,7 +50,26 @@ namespace mdl::backend::tvm {
 	}
 
 	::tvm::IRModule CUDATarget::schedule(::tvm::IRModule kernels) const {
-		// TVM's default GPU schedules (DLight), as TVM's own pipelines apply them; ported to C++ (../ported).
+		// TVM's default GPU schedules (DLight), as TVM's own pipelines apply them; ported to C++ (src/tvm_ported).
+		// The calls of kernel packages (a block without loops around a call_extern) are host code: marked as
+		// scheduled, which ApplyDefaultSchedule skips (in TVM's pipelines, such calls are not PrimFuncs).
+		std::vector<std::pair<::tvm::GlobalVar, ::tvm::BaseFunc>> externs;
+		for (const auto& [gv, func] : kernels->functions) {
+			const auto* prim = func.as<::tvm::tirx::PrimFuncNode>();
+			if (prim == nullptr)
+				continue;
+			bool loops = false;
+			::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
+					prim->body, [&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
+						loops = true;
+						return ::tvm::ffi::WalkResult::Advance();
+					}
+			);
+			if (!loops)
+				externs.emplace_back(gv, ::tvm::WithAttr(func, "tirx.is_scheduled", ::tvm::IntImm::Bool(true)));
+		}
+		for (const auto& [gv, func] : externs)
+			kernels->Update(gv, func);
 		namespace gpu = mdl::tvm_ported::dlight::gpu;
 		return runPasses(
 				std::move(kernels),

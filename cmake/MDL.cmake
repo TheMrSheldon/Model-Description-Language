@@ -33,7 +33,7 @@ Compile MDL models into object files that can be linked into C++ programs.
                    runtime of the target (``mdl_target_<kind>``, e.g. TVM's CUDA runtime) is linked.
   ``SHARED``       build a shared library (e.g., to load it from Python with ``tvm_ffi.load_module``) instead of a
                    static one.
-  ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if it is built and the target is the CPU) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
+  ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if it is built and the target is the CPU, and the cuBLAS package for CUDA targets) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
                    names.)
   ``KERNEL_PACKAGES`` kernel packages built with ``mdl_kernel_package`` that the model may use (see docs/dev/spec/kernel-packages.md);
                    they are linked into ``<target>``. Without it, the model uses no kernel packages.
@@ -168,6 +168,11 @@ function(mdl_add_model target)
 	endif()
 	if(NOT _none AND _cpu AND TARGET mdl_kernel_package_onednn AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
 		list(APPEND ARG_KERNEL_PACKAGES onednn)
+	endif()
+	# The cuBLAS kernels (kernels/cublas), for CUDA targets.
+	if(NOT _none AND ARG_TARGET MATCHES "^cuda" AND TARGET mdl_kernel_package_cublas
+			AND NOT "cublas" IN_LIST ARG_KERNEL_PACKAGES)
+		list(APPEND ARG_KERNEL_PACKAGES cublas)
 	endif()
 	# No package to link: none may be used (an unlisted package found elsewhere could not be linked).
 	if(NOT ARG_KERNEL_PACKAGES)

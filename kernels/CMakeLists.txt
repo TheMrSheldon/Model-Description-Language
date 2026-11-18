@@ -2,3 +2,4 @@
 # manifest into MDL_KERNELS_BUILD_DIR. They are separate from the compiler, which only reads their manifests.
 
 add_subdirectory(onednn) # oneDNN (MDL_ENABLE_ONEDNN)
+add_subdirectory(cublas) # cuBLAS (MDL_ENABLE_CUDA, MDL_ENABLE_CUBLAS)

@@ -57,3 +57,12 @@ foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "f16;float16;5e-3;" 
 	endif()
 	add_test(NAME cuda_bert_${name} COMMAND cuda_bert_${name})
 endforeach()
+
+# The cuBLAS package (kernels/cublas) is selected for the CUDA target (BERT's matrix products).
+if(TARGET mdl_kernel_package_cublas)
+	add_test(NAME cuda_cublas_kernels COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		${_examples}/02_transformer/model.dlm -a ${_examples}/02_transformer/model.yml --kernel-package cublas
+		--target "${_target}")
+	set_tests_properties(cuda_cublas_kernels PROPERTIES PASS_REGULAR_EXPRESSION "cublas/matmul-f32"
+		FAIL_REGULAR_EXPRESSION " 0 selected")
+endif()

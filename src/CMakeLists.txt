@@ -87,6 +87,10 @@ endif()
 ##########################################################################################
 # Libraries and commands
 ##########################################################################################
+# Parts of TVM's Python package translated to C++ (mdl_tvm_ported, used by the CUDA target; see tvm_ported/README.md).
+if(MDL_ENABLE_COMPILER AND MDL_ENABLE_CUDA)
+	add_subdirectory(tvm_ported)
+endif()
 add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_profile (compiler)
 add_subdirectory(mdls)     # mdls_lib (the language server)
 add_subdirectory(commands) # mdl-format, mdls; mdlc, mdl-info (compiler)

@@ -88,8 +88,7 @@ target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_D
 # target combines host and device code into one object file with the linker (ld -r).
 if(MDL_ENABLE_CUDA)
 	# The GPU schedules, the tensor intrinsics, and the CUDA C code generation callbacks: parts of TVM's Python package
-	# translated to C++ (backends/tvm/ported/README.md).
-	add_subdirectory(backends/tvm/ported)
+	# translated to C++, kept separate in src/tvm_ported (see its README.md).
 	target_link_libraries(mdl PRIVATE mdl_tvm_ported)
 	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp)
 	# The CUDA target uses TVM internals (the CUDA module of the code generation; see targets/cuda.cpp).
