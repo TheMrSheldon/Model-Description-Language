@@ -2,10 +2,12 @@
 
 #include "./llvm.hpp"
 
-#include "../details/schedule.hpp"
+#include "../dlight/base/transform.hpp"
+#include "../dlight/gpu/gpu.hpp"
 
 #include <tvm/ir/attrs.h>
 #include <tvm/target/codegen.h>
+#include <tvm/ir/prim/vector_expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/op.h>
@@ -82,6 +84,55 @@ namespace mdl::backend::tvm {
 					0, "mdl.Int32ThreadIndices", {}
 			);
 		}
+
+		/**
+		 * @brief Vector calls of CUDA's math library (libdevice, `__nv_*`) per lane: TVM's NVPTX intrinsic lowering
+		 * calls the scalar libdevice functions also for vectors (vectorized schedules). Fused multiply-adds become
+		 * vector arithmetic instead, which LLVM's NVPTX backend contracts into one fma per lane.
+		 */
+		::tvm::transform::Pass scalarizeVectorLibdeviceCalls() {
+			namespace tirx = ::tvm::tirx;
+			struct Expand : tirx::StmtExprMutator {
+				using StmtExprMutator::Mutate_;
+				::tvm::UnchangedOr<::tvm::Expr> Mutate_(const ::tvm::CallNode* op, ::tvm::InplaceMode mode) final {
+					auto result = StmtExprMutator::Mutate_(op, mode);
+					if (!result.IsUnchanged())
+						op = ::tvm::ffi::AnyView(result).as<::tvm::CallNode>();
+					const auto* type = op->ty.as<::tvm::PrimTypeNode>();
+					if (!op->op.same_as(tirx::builtin::call_pure_extern()) || op->args.empty() || type == nullptr)
+						return result;
+					const auto vector = ::tvm::ffi::GetRef<::tvm::PrimType>(type);
+					const auto* name = op->args[0].as<::tvm::StringImmNode>();
+					if (vector.lanes() == 1 || name == nullptr || !std::string(name->value).starts_with("__nv_"))
+						return result;
+					std::vector<::tvm::PrimExpr> args;
+					for (size_t i = 1; i < op->args.size(); ++i)
+						args.push_back(op->args[i].as_or_throw<::tvm::PrimExpr>());
+					if (std::string(name->value).starts_with("__nv_fma") && args.size() == 3)
+						return ::tvm::Expr(args[0] * args[1] + args[2]);
+					::tvm::ffi::Array<::tvm::PrimExpr> lanes;
+					for (int lane = 0; lane < vector.lanes(); ++lane) {
+						::tvm::ffi::Array<::tvm::Expr> scalarArgs{op->args[0]};
+						for (const auto& arg : args)
+							scalarArgs.push_back(
+									arg.ty().lanes() == 1 ? arg : ::tvm::prim::Shuffle::ExtractElement(arg, lane)
+							);
+						lanes.push_back(::tvm::Call(vector.WithLanes(1), op->op, scalarArgs).as_or_throw<::tvm::PrimExpr>());
+					}
+					return ::tvm::Expr(::tvm::prim::Shuffle::Concat(lanes));
+				}
+			};
+			return tirx::transform::CreatePrimFuncPass(
+					[](tirx::PrimFunc f, ::tvm::IRModule, ::tvm::transform::PassContext) {
+						Expand expand;
+						auto body = expand.Mutate(f->body).ValueOrUnchanged(f->body);
+						if (!body.same_as(f->body))
+							f.CopyOnWrite()->body = std::move(body);
+						return f;
+					},
+					0, "mdl.ScalarizeVectorLibdeviceCalls", {}
+			);
+		}
 	} // namespace
 
 	CUDATarget::CUDATarget(const mdl::CompileOptions& opts) {
@@ -110,9 +161,29 @@ namespace mdl::backend::tvm {
 	}
 
 	::tvm::IRModule CUDATarget::schedule(::tvm::IRModule kernels) const {
-		// Our own schedule: TVM's DLight rules are Python-only; heavy operators (GEMMs) are expected from kernel
-		// packages.
-		return applyDefaultGPUSchedule(std::move(kernels));
+		// TVM's default GPU schedules (DLight), as TVM's own pipelines apply them; ported to C++ (../dlight). DLight
+		// chooses its CUDA configurations by TVM's `cuda` target: it schedules for that target (the same GPU), and the
+		// kernels are bound to the NVPTX target for code generation afterwards.
+		const ::tvm::Target cuda(
+				::tvm::Target(R"({"kind": "cuda", "arch": ")" + arch + "\"}"), target->GetHost().value()
+		);
+		::tvm::IRModule unbound(::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::BaseFunc>(), kernels->source_map, kernels->attrs);
+		for (const auto& [gv, func] : kernels->functions)
+			unbound->Add(gv, ::tvm::WithoutAttr(func, ::tvm::attr::kTarget));
+		namespace gpu = mdl::dlight::gpu;
+		auto scheduled = runPasses(
+				unbound,
+				{mdl::dlight::ApplyDefaultSchedule({
+						std::make_shared<gpu::Matmul>(), std::make_shared<gpu::Reduction>(),
+						std::make_shared<gpu::GeneralReduction>(), std::make_shared<gpu::Transpose>(),
+						std::make_shared<gpu::Fallback>()
+				})},
+				cuda
+		);
+		::tvm::IRModule result(::tvm::ffi::Map<::tvm::GlobalVar, ::tvm::BaseFunc>(), kernels->source_map, kernels->attrs);
+		for (const auto& [gv, func] : scheduled->functions)
+			result->Add(gv, ::tvm::WithAttr(func, ::tvm::attr::kTarget, target));
+		return result;
 	}
 
 	std::vector<::tvm::transform::Pass> CUDATarget::blockLowering() const {
@@ -135,6 +206,11 @@ namespace mdl::backend::tvm {
 				registeredPass("s_tir.transform.TransformMmaBufferLayout"),
 				registeredPass("s_tir.transform.LowerOpaqueBlock"),
 		};
+	}
+
+	std::vector<::tvm::transform::Pass> CUDATarget::afterVectorize() const {
+		// As in TVM's default TIR pipeline (python/tvm/s_tir/pipeline.py): DLight's schedules bind virtual threads.
+		return {registeredPass("s_tir.transform.InjectVirtualThread"), registeredPass("s_tir.transform.InjectDoubleBuffer")};
 	}
 
 	std::vector<::tvm::transform::Pass> CUDATarget::beforeSplit() const {
@@ -162,7 +238,7 @@ namespace mdl::backend::tvm {
 		deviceMod = runPasses(
 				deviceMod,
 				{registeredPass("tirx.transform.LowerWarpMemory"), registeredPass("tirx.transform.StmtSimplify"),
-				 registeredPass("tirx.transform.LowerIntrin")},
+				 registeredPass("tirx.transform.LowerIntrin"), scalarizeVectorLibdeviceCalls()},
 				target
 		);
 		auto code = ::tvm::codegen::Build(hostMod, host);

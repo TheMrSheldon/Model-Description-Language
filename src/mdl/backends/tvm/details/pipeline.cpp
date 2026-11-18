@@ -324,7 +324,11 @@ namespace mdl::backend::tvm {
 				registeredPass("tirx.transform.NarrowDataType", 32),
 				registeredPass("s_tir.transform.LoopPartition"),
 				registeredPass("tirx.transform.VectorizeLoop", true),
-				registeredPass("tirx.transform.StorageRewrite"),
+		};
+		for (auto& p : target.afterVectorize())
+			passes.push_back(std::move(p));
+		for (auto p : {
+					 registeredPass("tirx.transform.StorageRewrite"),
 				registeredPass("s_tir.transform.HoistIfThenElse"),
 				registeredPass("tirx.transform.UnrollLoop"),
 				registeredPass("s_tir.transform.RenormalizeSplitPattern"),
@@ -335,7 +339,8 @@ namespace mdl::backend::tvm {
 				registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
 				registeredPass("tirx.transform.VerifyMemory"),
 				registeredPass("tirx.transform.AnnotateEntryFunc"),
-		};
+			 })
+			passes.push_back(std::move(p));
 		for (auto& p : target.beforeSplit())
 			passes.push_back(std::move(p));
 		for (auto p : {

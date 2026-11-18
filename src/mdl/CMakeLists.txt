@@ -87,6 +87,9 @@ target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_D
 # The targets of the TVM backend (backends/tvm/targets/): CUDA only with MDL_ENABLE_CUDA (else unsupported). The CUDA
 # target combines host and device code into one object file with the linker (ld -r).
 if(MDL_ENABLE_CUDA)
+	# The GPU schedules: TVM's DLight, ported to C++ (backends/tvm/dlight/README.md).
+	add_subdirectory(backends/tvm/dlight)
+	target_link_libraries(mdl PRIVATE mdl_dlight)
 	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp)
 	find_package(CUDAToolkit REQUIRED)
 	find_file(MDL_CUDA_LIBDEVICE libdevice.10.bc PATHS "${CUDAToolkit_LIBRARY_ROOT}/nvvm/libdevice"

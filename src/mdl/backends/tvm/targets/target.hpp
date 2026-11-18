@@ -41,6 +41,9 @@ namespace mdl::backend::tvm {
 		/** @brief The passes that lower the scheduled kernels' blocks into loops (before buffers are flattened). */
 		virtual std::vector<::tvm::transform::Pass> blockLowering() const = 0;
 
+		/** @brief Device-specific passes after vectorization, before storage rewriting (virtual threads, ...). */
+		virtual std::vector<::tvm::transform::Pass> afterVectorize() const { return {}; }
+
 		/** @brief Device-specific passes before host and device code are split (thread synchronization, ...). */
 		virtual std::vector<::tvm::transform::Pass> beforeSplit() const { return {}; }
 

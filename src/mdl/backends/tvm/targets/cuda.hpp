@@ -21,6 +21,7 @@ namespace mdl::backend::tvm {
 		kernels::Platform kernelPlatform() const override;
 		::tvm::IRModule schedule(::tvm::IRModule kernels) const override;
 		std::vector<::tvm::transform::Pass> blockLowering() const override;
+		std::vector<::tvm::transform::Pass> afterVectorize() const override;
 		std::vector<::tvm::transform::Pass> beforeSplit() const override;
 		void emit(::tvm::IRModule mod, const std::filesystem::path& output) const override;
 

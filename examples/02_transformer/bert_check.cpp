@@ -5,17 +5,22 @@
 // compared (they must not depend on the padding), and the masked positions of the output must be zero.
 // With MDL_BERT_FLOAT (bfloat16 or float16), the model is compiled with `--float bf16|f16`: the float32 reference
 // weights are converted when loading, and the outputs are compared with the tolerance MDL_BERT_TOLERANCE (relative to
-// the largest output).
+// the largest output). With MDL_BERT_DEVICE (a DLDeviceType, e.g. kDLCUDA), the model is compiled for that device
+// (mdlc --target): the weights and inputs are copied there, the outputs back.
 //
 //     02_transformer_bert [file.safetensors]
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
+#ifdef MDL_BERT_DEVICE
+#include <tvm/runtime/tensor.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using Model = mdl::models::Bert;
 #ifdef MDL_BERT_FLOAT
@@ -25,7 +30,43 @@ constexpr double kTolerance = MDL_BERT_TOLERANCE;
 #else
 using Float = float;
 constexpr auto kConversion = mdl::runtime::FloatConversion::none;
+#ifdef MDL_BERT_TOLERANCE
+constexpr double kTolerance = MDL_BERT_TOLERANCE;
+#else
 constexpr double kTolerance = 1e-4;
+#endif
+#endif
+
+#ifdef MDL_BERT_DEVICE
+namespace {
+	constexpr DLDevice device{MDL_BERT_DEVICE, 0};
+	std::vector<tvm::runtime::Tensor> deviceTensors;
+
+	/** @brief A copy of @p t on the device (alive until the end of main). */
+	const DLTensor* onDevice(const DLTensor* t) {
+		auto& d = deviceTensors.emplace_back(
+				tvm::runtime::Tensor::Empty(tvm::ffi::Shape(t->shape, t->shape + t->ndim), t->dtype, device)
+		);
+		d.CopyFrom(t);
+		return d.operator->();
+	}
+
+	/** @brief Calls @p f with a device buffer for @p host, then copies the buffer back into @p host. */
+	template <typename T, typename F>
+	void intoHost(mdl::runtime::BasicTensor<T>& host, F&& f) {
+		auto* d = const_cast<DLTensor*>(onDevice(host));
+		f(d);
+		deviceTensors.back().CopyTo(host.dl());
+	}
+} // namespace
+#else
+namespace {
+	const DLTensor* onDevice(const DLTensor* t) { return t; }
+	template <typename T, typename F>
+	void intoHost(mdl::runtime::BasicTensor<T>& host, F&& f) {
+		f(host.dl());
+	}
+} // namespace
 #endif
 
 int main(int argc, char** argv) {
@@ -33,24 +74,27 @@ int main(int argc, char** argv) {
 	// The weights are loaded directly into Model::Weights (with dtype and shape checks); the file also contains the
 	// inputs and the reference output, which are not weights of the model.
 	auto loaded = mdl::runtime::loadWeights<Model>(path, {}, kConversion);
-	const auto& weights = loaded.weights;
+	Model::Weights weights = loaded.weights;
+	for (const auto& info : Model::Weights::infos)
+		*weights.find(info.name) = onDevice(*weights.find(info.name));
 	auto floats = mdl::runtime::loadSafetensorsAs<float>(path);
 	auto ints = mdl::runtime::loadSafetensorsAs<int32_t>(path);
 	std::printf("loaded %zu weights (%zu other tensors in the file)\n", Model::Weights::infos.size(), loaded.unused.size());
-	auto& ids = ints.at("input.ids");
-	auto& types = ints.at("input.types");
-	auto& positions = ints.at("input.positions");
+	const DLTensor* ids = onDevice(ints.at("input.ids"));
+	const DLTensor* types = onDevice(ints.at("input.types"));
+	const DLTensor* positions = onDevice(ints.at("input.positions"));
 	const auto& reference = floats.at("reference.output");
 
 	mdl::runtime::BasicTensor<Float> output(reference.shape());
 	const size_t hidden = static_cast<size_t>(reference.shape().back());
 #ifdef MDL_BERT_MASKED
 	auto masks = mdl::runtime::loadSafetensorsAs<uint8_t>(path);
-	auto& mask = masks.at("input.mask");
-	Model::forward(ids, types, positions, mask, weights, output);
-	auto valid = [&](size_t i) { return mask.data()[i / hidden] != 0; };
+	auto& hostMask = masks.at("input.mask");
+	const DLTensor* mask = onDevice(hostMask);
+	intoHost(output, [&](DLTensor* out) { Model::forward(ids, types, positions, mask, weights, out); });
+	auto valid = [&](size_t i) { return hostMask.data()[i / hidden] != 0; };
 #else
-	Model::forward(ids, types, positions, weights, output);
+	intoHost(output, [&](DLTensor* out) { Model::forward(ids, types, positions, weights, out); });
 	auto valid = [](size_t) { return true; };
 #endif
 
@@ -68,16 +112,16 @@ int main(int argc, char** argv) {
 	if (masked > 0)
 		std::printf("masked positions: %zu (max |output| there: %.3g)\n", masked / hidden, maxMasked);
 	std::printf("batch %lld, seq %lld: max abs error vs Hugging Face %.3g (max |output| %.3g)\n",
-				(long long)ids.shape()[0], (long long)ids.shape()[1], maxErr, maxRef);
+				(long long)ids->shape[0], (long long)ids->shape[1], maxErr, maxRef);
 	bool ok = maxErr < kTolerance * std::max(1.0, maxRef) && maxMasked == 0.0;
 
 	// The pooled output (the transformed first position of each sequence): [batch, hidden].
 	const auto& referencePooled = floats.at("reference.pooled");
 	mdl::runtime::BasicTensor<Float> pooled(referencePooled.shape());
 #ifdef MDL_BERT_MASKED
-	Model::pooled(ids, types, positions, mask, weights, pooled);
+	intoHost(pooled, [&](DLTensor* out) { Model::pooled(ids, types, positions, mask, weights, out); });
 #else
-	Model::pooled(ids, types, positions, weights, pooled);
+	intoHost(pooled, [&](DLTensor* out) { Model::pooled(ids, types, positions, weights, out); });
 #endif
 	double maxPooledErr = 0;
 	for (size_t i = 0; i < pooled.size(); ++i)
@@ -85,5 +129,8 @@ int main(int argc, char** argv) {
 	std::printf("pooled output: max abs error vs Hugging Face %.3g\n", maxPooledErr);
 	ok &= maxPooledErr < kTolerance;
 	std::puts(ok ? "OK" : "FAILED");
+#ifdef MDL_BERT_DEVICE
+	deviceTensors.clear(); // before the device runtime is unloaded at exit
+#endif
 	return ok ? 0 : 1;
 }
