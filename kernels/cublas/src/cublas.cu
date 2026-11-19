@@ -5,6 +5,11 @@
 // dimensions are one strided batch where their strides allow it (e.g. heads x batch of attention). GELU (exact, erf) is
 // a separate elementwise pass: cuBLASLt's GELU epilogue is the tanh approximation. Layouts that cuBLASLt does not
 // accept fall back to cublasGemmStridedBatchedEx and a general epilogue kernel.
+//
+// The algorithm of each configuration is the fastest of cuBLASLt's first candidates, measured once (autotuning;
+// MDL_CUBLAS_AUTOTUNE=0: cuBLASLt's first candidate). Two batch dimensions whose strides do not merge (e.g. heads and
+// batch of attention, whose matrices are interleaved) are one pointer-array batched GEMM: the pointers are computed on
+// the GPU.
 #include "mdl_cublas.h"
 
 #include <cublasLt.h>
@@ -17,6 +22,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -41,6 +48,8 @@ namespace {
 		cublasHandle_t blas = nullptr;
 		cublasLtHandle_t lt = nullptr;
 		void* workspace = nullptr;
+		void** pointers = nullptr; ///< pointer arrays of batched GEMMs (3 * capacity entries)
+		int64_t capacity = 0;
 	};
 	Context* context() {
 		thread_local std::array<Context, kMaxDevices> contexts{};
@@ -150,6 +159,28 @@ namespace {
 		return static_cast<int>(std::clamp<int64_t>((total + threads - 1) / threads, 1, 65535));
 	}
 
+	/** @brief The pointers of the matrices of a 2-D batch: base + i * s0 + j * s1 for i < b0, j < b1. */
+	template <typename T>
+	__global__ void batchPointers(
+			const void** a, const void** b, void** d, const T* aBase, const T* bBase, T* dBase, int64_t b0, int64_t b1,
+			int64_t a_s0, int64_t a_s1, int64_t b_s0, int64_t b_s1, int64_t d_s0, int64_t d_s1
+	) {
+		for (int64_t k = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; k < b0 * b1; k += int64_t(gridDim.x) * blockDim.x) {
+			const int64_t i = k / b1, j = k % b1;
+			a[k] = aBase + i * a_s0 + j * a_s1;
+			b[k] = bBase + i * b_s0 + j * b_s1;
+			d[k] = dBase + i * d_s0 + j * d_s1;
+		}
+	}
+
+	bool autotune() {
+		static const bool enabled = [] {
+			const char* env = std::getenv("MDL_CUBLAS_AUTOTUNE");
+			return env == nullptr || std::string(env) != "0";
+		}();
+		return enabled;
+	}
+
 	/** @brief The problem in cuBLAS's (column-major) terms: D (rows x cols) = op(first) @ op(second). */
 	template <typename T>
 	struct Problem {
@@ -240,14 +271,61 @@ namespace {
 			cublasLtMatmulPreferenceSetAttribute(
 					preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace, sizeof(workspace)
 			);
-			cublasLtMatmulHeuristicResult_t result{};
+			constexpr int kCandidates = 8;
+			cublasLtMatmulHeuristicResult_t results[kCandidates] = {};
 			int found = 0;
 			const cublasStatus_t status = cublasLtMatmulAlgoGetHeuristic(
-					ctx.lt, desc, a.layout, b.layout, dl.layout, dl.layout, preference, 1, &result, &found
+					ctx.lt, desc, a.layout, b.layout, dl.layout, dl.layout, preference, autotune() ? kCandidates : 1,
+					results, &found
 			);
 			cublasLtMatmulPreferenceDestroy(preference);
-			const bool ok = status == CUBLAS_STATUS_SUCCESS && found > 0;
-			it = algos.emplace(key, ok ? std::optional(result) : std::nullopt).first;
+			std::optional<cublasLtMatmulHeuristicResult_t> best;
+			if (status == CUBLAS_STATUS_SUCCESS && found > 0)
+				best = results[0];
+			if (best && found > 1) {
+				// Measure the candidates once (into a scratch result: C may be the result itself, e.g. accumulated
+				// gradients), keep the fastest.
+				const int64_t elements = (batch - 1) * dBatch + p.ldd * p.cols;
+				void* scratch = nullptr;
+				cudaEvent_t start = nullptr, stop = nullptr;
+				if (cudaMalloc(&scratch, elements * sizeof(T)) == cudaSuccess && cudaEventCreate(&start) == cudaSuccess &&
+					cudaEventCreate(&stop) == cudaSuccess) {
+					float bestMs = 0;
+					const float beta = c != nullptr ? 1.0f : 0.0f;
+					T* out = static_cast<T*>(scratch);
+					for (int r = 0; r < found; ++r) {
+						auto run = [&] {
+							return cublasLtMatmul(
+									ctx.lt, desc, &alpha, first, a.layout, second, b.layout, &beta,
+									c != nullptr ? c : out, dl.layout, out, dl.layout, &results[r].algo, ctx.workspace,
+									kWorkspaceBytes, stream
+							);
+						};
+						if (run() != CUBLAS_STATUS_SUCCESS) // (also the warm-up)
+							continue;
+						cudaEventRecord(start, stream);
+						constexpr int kRuns = 3;
+						for (int k = 0; k < kRuns; ++k)
+							run();
+						cudaEventRecord(stop, stream);
+						cudaEventSynchronize(stop);
+						float ms = 0;
+						cudaEventElapsedTime(&ms, start, stop);
+						if (r == 0 || ms < bestMs) {
+							bestMs = ms;
+							best = results[r];
+						}
+					}
+				}
+				if (start != nullptr)
+					cudaEventDestroy(start);
+				if (stop != nullptr)
+					cudaEventDestroy(stop);
+				if (scratch != nullptr)
+					cudaFree(scratch);
+				cudaGetLastError(); // (a failed candidate does not affect the following calls)
+			}
+			it = algos.emplace(key, best).first;
 		}
 		bool ok = false;
 		if (it->second) {
@@ -318,6 +396,39 @@ namespace {
 		// and the addend (beta * C, unless GELU comes between the bias and the addend).
 		const bool fuseBias = has_bias && !p.dColumnMajor;
 		const bool fuseAddend = has_addend && activation == 0;
+
+		// Two batch dimensions that do not merge, without epilogue: one pointer-array batched GEMM.
+		if (b0 > 1 && !has_bias && !has_addend && activation == 0) {
+			const int64_t count = b0 * b1;
+			if (count > ctx->capacity) {
+				if (ctx->pointers != nullptr)
+					cudaFree(ctx->pointers);
+				ctx->pointers = nullptr;
+				ctx->capacity = 0;
+				if (cudaMalloc(reinterpret_cast<void**>(&ctx->pointers), 3 * count * sizeof(void*)) == cudaSuccess)
+					ctx->capacity = count;
+			}
+			if (ctx->pointers != nullptr && cublasSetStream(ctx->blas, stream) == CUBLAS_STATUS_SUCCESS) {
+				const void** ap = const_cast<const void**>(ctx->pointers);
+				const void** bp = const_cast<const void**>(ctx->pointers + count);
+				void** dp = ctx->pointers + 2 * count;
+				constexpr int threads = 256;
+				batchPointers<T><<<blocksFor(count, threads), threads, 0, stream>>>(
+						ap, bp, dp, p.firstPtr, p.secondPtr, dst, b0, b1, p.firstOuter, p.firstBatch, p.secondOuter,
+						p.secondBatch, d_s0, d_s1
+				);
+				const float zero = 0.0f;
+				const cublasStatus_t status = cublasGemmBatchedEx(
+						ctx->blas, p.first.op, p.second.op, static_cast<int>(p.rows), static_cast<int>(p.cols),
+						static_cast<int>(K), &alpha, ap, Types<T>::data, static_cast<int>(p.first.ld), bp, Types<T>::data,
+						static_cast<int>(p.second.ld), &zero, dp, Types<T>::data, static_cast<int>(p.ldd),
+						static_cast<int>(count), Types<T>::compute, CUBLAS_GEMM_DEFAULT
+				);
+				if (status == CUBLAS_STATUS_SUCCESS)
+					return cudaGetLastError() == cudaSuccess ? 0 : 6;
+			}
+		}
+
 		bool done = true;
 		for (int64_t i = 0; i < b0 && done; ++i)
 			done = ltMatmul(
