@@ -5,8 +5,10 @@
 #include <tvm_ported/s_tir/dlight/base/utils.hpp>
 
 #include <tvm/sym/analyzer.h>
+#include <tvm/tirx/analysis.h>
 
 #include <exception>
+#include <unordered_set>
 
 namespace mdl::backend::tvm::gpu {
 
@@ -83,6 +85,29 @@ namespace mdl::backend::tvm::gpu {
 		const auto rows = product(rowDoms);
 		if (rows && *rows < kMinRows)
 			return std::nullopt;
+
+		// ... and where a row is contiguous in memory (coalesced reads of the warp): the innermost index of every input of
+		// the reductions is a reduction iterator (not e.g. the sums over the leading dimensions of a bias gradient).
+		for (size_t b = 0; b < numReductions; ++b) {
+			const auto block = sch->Get((*infos)[b].block_rv);
+			std::unordered_set<const void*> reductionVars;
+			for (const auto& iv : block->iter_vars)
+				if (iv->iter_type == ::tvm::tirx::kCommReduce)
+					reductionVars.insert(iv->var.get());
+			for (const auto& read : block->reads) {
+				if (read->region.empty())
+					continue;
+				bool innermostReduced = false;
+				for (const auto& v : ::tvm::tirx::UndefinedVars(read->region.back()->min))
+					innermostReduced |= reductionVars.contains(v.get());
+				bool reads = false; // (a read that does not depend on the reduction, e.g. the maximum in softmax's sum)
+				for (const auto& range : read->region)
+					for (const auto& v : ::tvm::tirx::UndefinedVars(range->min))
+						reads |= reductionVars.contains(v.get());
+				if (reads && !innermostReduced)
+					return std::nullopt;
+			}
+		}
 
 		try {
 			schedule(sch, *infos, numLeadingS, numTrailingR, numReductions);
