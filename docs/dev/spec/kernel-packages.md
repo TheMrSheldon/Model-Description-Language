@@ -218,7 +218,11 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
     `relax.matmul`: the permutations of the operands and the result become strides (at most two batch dimensions after
     merging), with bias, scale, activation, and addend;
   - `matmul-quantized`: `mdl_matmul_q_<type>`'s arguments for an `mdl.matmul` with quantized weights (a linear layer;
-    other layouts use TVM's code).
+    other layouts use TVM's code);
+  - `attention-strided`: `mdl_attention_<type>`'s arguments (`kernels/cudnn/include/mdl_cudnn.h`) for attention
+    `softmax(scale * Q @ K^T) @ V`: the root is the product with V, the pattern captures the scores Q @ K^T as the call
+    `scores` (both `mdl.matmul`); the permutations of Q, K, V and the result become strides of two batch dimensions,
+    sequence, and head dimension (e.g. [batch, seq, heads, dim] in place).
 
 ### Expressions
 Values and conditions are written in one small typed language:

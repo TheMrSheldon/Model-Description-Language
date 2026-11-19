@@ -385,14 +385,26 @@ namespace mdl::backend::tvm {
 	} // namespace
 
 	namespace {
-		/** @brief The plan of a named adapter (see `adapter:` in docs/dev/spec/kernel-packages.md) for the root call of a region. */
-		std::expected<ExternPlan, std::string> adapterPlan(const std::string& adapter, const Expr& root) {
+		/**
+		 * @brief The plan of a named adapter (see `adapter:` in docs/dev/spec/kernel-packages.md) for the root call of a region; @p calls:
+		 * the region's named calls (`capture:` on operator nodes).
+		 */
+		std::expected<ExternPlan, std::string> adapterPlan(
+				const std::string& adapter, const Expr& root, const std::map<std::string, Expr>& calls
+		) {
 			const auto* call = root.as<::tvm::CallNode>();
 			if (call == nullptr)
 				return std::unexpected("the region's result is not an operator call");
 			const auto c = ::tvm::ffi::GetRef<Call>(call);
 			if (adapter == "matmul-strided" || adapter == "matmul-quantized")
 				return matmulAdapter(c, adapter == "matmul-quantized");
+			if (adapter == "attention-strided") {
+				auto it = calls.find("scores");
+				const auto* scores = it == calls.end() ? nullptr : it->second.as<::tvm::CallNode>();
+				if (scores == nullptr)
+					return std::unexpected("the pattern has no call captured as `scores` (Q @ K^T)");
+				return attentionAdapter(c, ::tvm::ffi::GetRef<Call>(scores));
+			}
 			return std::unexpected("unknown adapter " + adapter);
 		}
 	} // namespace
@@ -596,7 +608,9 @@ namespace mdl::backend::tvm {
 							evaluate(w, "where " + w);
 						// The arguments: integers must be computable, and fit their type (a checked conversion).
 						if (!e.impl->adapter.empty()) {
-							auto plan = adapterPlan(e.impl->adapter, vb->value);
+							auto plan = adapterPlan(
+									e.impl->adapter, vb->value, std::map<std::string, Expr>(c.calls.begin(), c.calls.end())
+							);
 							c.verdicts.push_back(
 									{"the argument adapter " + e.impl->adapter + " applies",
 									 plan ? Verdict::Result::proven : Verdict::Result::refuted,
@@ -831,7 +845,7 @@ namespace mdl::backend::tvm {
 
 				ExternCall ext{builder_, impl.symbol};
 				if (!impl.adapter.empty()) {
-					auto plan = adapterPlan(impl.adapter, valueOf.at(root.get())).value(); // (checked when matching)
+					auto plan = adapterPlan(impl.adapter, valueOf.at(root.get()), calls).value(); // (checked when matching)
 					std::vector<Expr> pointers;
 					for (const auto& input : plan.inputs)
 						pointers.push_back(ext.input(VisitExpr(input), "in" + std::to_string(pointers.size())));

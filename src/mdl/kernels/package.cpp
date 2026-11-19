@@ -310,7 +310,7 @@ namespace mdl::kernels {
 				if (n["abi"])
 					impl.abi = choice(n["abi"], "abi", {"c"});
 				if (n["adapter"])
-					impl.adapter = choice(n["adapter"], "adapter", {"matmul-strided", "matmul-quantized"});
+					impl.adapter = choice(n["adapter"], "adapter", {"matmul-strided", "matmul-quantized", "attention-strided"});
 				if (const auto sig = n["signature"]; sig && isMap(sig, "'signature'")) {
 					onlyKeys(sig, {"returns", "arguments", "aliasing", "outputs"}, "a signature");
 					if (const auto ret = sig["returns"]) {

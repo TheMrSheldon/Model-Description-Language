@@ -81,6 +81,12 @@ namespace mdl::backend::tvm {
 	 */
 	std::expected<ExternPlan, std::string> matmulAdapter(const ::tvm::Call& call, bool quantized);
 
+	/**
+	 * @brief The adapter `attention-strided` (mdl_attention_<type>) for attention `softmax(scale * Q @ K^T) @ V`: @p out
+	 * is the product with V, @p scores the product Q @ K^T (both mdl.matmul), or why the kernel does not cover it.
+	 */
+	std::expected<ExternPlan, std::string> attentionAdapter(const ::tvm::Call& out, const ::tvm::Call& scores);
+
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */
 	::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> legalizeMap(const mdl::CompileOptions& opts);
 

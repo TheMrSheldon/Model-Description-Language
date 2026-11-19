@@ -66,3 +66,16 @@ if(TARGET mdl_kernel_package_cublas)
 	set_tests_properties(cuda_cublas_kernels PROPERTIES PASS_REGULAR_EXPRESSION "cublas/matmul-f32"
 		FAIL_REGULAR_EXPRESSION " 0 selected")
 endif()
+
+# The cuDNN package (kernels/cudnn): fused attention is selected for BERT in bfloat16 (all twelve layers of both
+# exported functions, forward and hiddenStates), not in
+# float32 (cuDNN's attention has no float32).
+if(TARGET mdl_kernel_package_cudnn)
+	set(_bert_args ${_examples}/02_transformer/model.dlm -a ${_examples}/02_transformer/model.yml --ellipsis-rank 2
+		--kernel-package cudnn --target "${_target}")
+	add_test(NAME cuda_cudnn_attention COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check ${_bert_args}
+		--float bf16)
+	set_tests_properties(cuda_cudnn_attention PROPERTIES PASS_REGULAR_EXPRESSION "cudnn/attention-bf16.* 24 selected")
+	add_test(NAME cuda_cudnn_attention_f32 COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check ${_bert_args})
+	set_tests_properties(cuda_cudnn_attention_f32 PROPERTIES PASS_REGULAR_EXPRESSION " 0 selected")
+endif()

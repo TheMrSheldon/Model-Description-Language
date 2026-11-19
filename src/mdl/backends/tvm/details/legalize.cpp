@@ -592,6 +592,78 @@ namespace mdl::backend::tvm {
 			return plan;
 		}
 
+		/**
+		 * @brief The arguments of mdl_attention_<type> for attention `softmax(scale * Q @ K^T) @ V` (@p s: the scores
+		 * Q @ K^T, @p o: the product with V; both mdl.matmul): two batch dimensions (e.g. batch and heads) with the
+		 * strides of Q, K, V and the result from the permutations, so the layouts of the model (e.g. [batch, seq,
+		 * heads, dim]) are read and written in place.
+		 */
+		std::expected<ExternPlan, std::string> attentionPlan(const MatmulArgs& s, const MatmulArgs& o) {
+			using std::unexpected;
+			if (s.bias || s.addend || s.activation != 0 || s.quant || o.bias || o.addend || o.activation != 0 ||
+				o.quant || o.alpha != 1.0)
+				return unexpected("the products have a bias, addend, activation, or scale (other than the scores')");
+			const auto* qi = tensorInfo(s.a);
+			const auto* ki = tensorInfo(s.b);
+			const auto* vi = tensorInfo(o.b);
+			if (!qi || !ki || !vi || qi->dtype.value() != ki->dtype.value() || qi->dtype.value() != vi->dtype.value())
+				return unexpected("Q, K, and V have different element types");
+			const auto qs = shapeOf(s.a), ks = s.bShape(), vs = shapeOf(o.b);
+			const auto lq = permuted(qs, s.permA), lk = permuted(ks, s.permB), lv = permuted(vs, o.permB);
+			const auto sq = permuted(contiguousStrides(qs), s.permA), sk = permuted(contiguousStrides(ks), s.permB),
+					   sv = permuted(contiguousStrides(vs), o.permB);
+			const size_t r = lq.size();
+			if ((r != 3 && r != 4) || lk.size() != r || lv.size() != r)
+				return unexpected("Q, K, and V are not [batch..., seq, dim] with one or two batch dimensions");
+			::tvm::sym::Analyzer analyzer;
+			auto equal = [&](const PrimExpr& x, const PrimExpr& y) { return analyzer->CanProveEqual(x, y); };
+			for (size_t i = 0; i + 2 < r; ++i)
+				if (!equal(lq[i], lk[i]) || !equal(lq[i], lv[i]))
+					return unexpected("the batch dimensions of Q, K, and V differ (broadcasts are not supported)");
+			const PrimExpr Sq = lq[r - 2], D = lq[r - 1], Skv = lk[r - 1], Dv = lv[r - 1];
+			if (!equal(lk[r - 2], D) || !equal(lv[r - 2], Skv))
+				return unexpected("the dimensions of Q, K, and V do not match");
+			// The result: the product's dimension j is the result's dimension at position p with perm_out[p] == j.
+			const auto lo = o.productShape();
+			const auto resultShape = permuted(lo, o.permOut);
+			const auto rs = contiguousStrides(resultShape);
+			std::vector<PrimExpr> so(lo.size());
+			for (size_t p = 0; p < lo.size(); ++p)
+				so[o.permOut.empty() ? p : static_cast<size_t>(o.permOut[p])] = rs[p];
+
+			// Two batch dimensions (an outer one of size 1 for a single one).
+			struct Dim {
+				PrimExpr size, q, k, v, out;
+			};
+			std::vector<Dim> batch;
+			for (size_t i = 0; i + 2 < r; ++i)
+				batch.push_back({lq[i], sq[i], sk[i], sv[i], so[i]});
+			if (batch.size() == 1) {
+				const Dim& b = batch.front();
+				batch.insert(
+						batch.begin(),
+						Dim{::tvm::IntImm(::tvm::PrimType::Int(64), 1), b.q * b.size, b.k * b.size, b.v * b.size,
+							b.out * b.size}
+				);
+			}
+
+			auto i64 = [](PrimExpr e) { return ExternPlan::scalar(::tvm::prim::cast(::tvm::PrimType::Int(64), e)); };
+			ExternPlan plan{.inputs = {s.a, s.b, o.b}, .outShape = resultShape, .outDtype = qi->dtype.value()};
+			const ExternPlan::Arg q = plan.input(0), k = plan.input(1), v = plan.input(2);
+			plan.args = {
+					ExternPlan::output(), q, k, v,
+					// dimensions
+					i64(batch[0].size), i64(batch[1].size), i64(Sq), i64(Skv), i64(D), i64(Dv),
+					// strides (in elements) of Q, K, V, and the result: [batch 0, batch 1, seq, dim]
+					i64(batch[0].q), i64(batch[1].q), i64(sq[r - 2]), i64(sq[r - 1]),
+					i64(batch[0].k), i64(batch[1].k), i64(sk[r - 1]), i64(sk[r - 2]),
+					i64(batch[0].v), i64(batch[1].v), i64(sv[r - 2]), i64(sv[r - 1]),
+					i64(batch[0].out), i64(batch[1].out), i64(so[r - 2]), i64(so[r - 1]),
+					ExternPlan::scalar(::tvm::FloatImm(::tvm::PrimType::Float(32), s.alpha))
+			};
+			return plan;
+		}
+
 		/** @brief @p m with a quantized b replaced by its dequantization (emitted as a kernel of its own). */
 		MatmulArgs dequantized(const BlockBuilder& bb, MatmulArgs m) {
 			if (!m.quant)
@@ -890,6 +962,13 @@ namespace mdl::backend::tvm {
 		if (call->op.same_as(relaxMatmul))
 			return matmulPlan(MatmulArgs{call->args[0], call->args[1]}, quantized);
 		return std::unexpected("not a matrix product");
+	}
+
+	std::expected<ExternPlan, std::string> attentionAdapter(const ::tvm::Call& out, const ::tvm::Call& scores) {
+		static const auto& matmul = ::tvm::Op::Get("mdl.matmul");
+		if (!out->op.same_as(matmul) || !scores->op.same_as(matmul))
+			return std::unexpected("the products are not mdl.matmul");
+		return attentionPlan(MatmulArgs{scores}, MatmulArgs{out});
 	}
 
 	Map<String, Function> legalizeMap(const mdl::CompileOptions& opts) {

@@ -169,11 +169,13 @@ function(mdl_add_model target)
 	if(NOT _none AND _cpu AND TARGET mdl_kernel_package_onednn AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
 		list(APPEND ARG_KERNEL_PACKAGES onednn)
 	endif()
-	# The cuBLAS kernels (kernels/cublas), for CUDA targets.
-	if(NOT _none AND ARG_TARGET MATCHES "^cuda" AND TARGET mdl_kernel_package_cublas
-			AND NOT "cublas" IN_LIST ARG_KERNEL_PACKAGES)
-		list(APPEND ARG_KERNEL_PACKAGES cublas)
-	endif()
+	# The cuBLAS and cuDNN kernels (kernels/cublas, kernels/cudnn), for CUDA targets.
+	foreach(package IN ITEMS cublas cudnn)
+		if(NOT _none AND ARG_TARGET MATCHES "^cuda" AND TARGET mdl_kernel_package_${package}
+				AND NOT "${package}" IN_LIST ARG_KERNEL_PACKAGES)
+			list(APPEND ARG_KERNEL_PACKAGES ${package})
+		endif()
+	endforeach()
 	# No package to link: none may be used (an unlisted package found elsewhere could not be linked).
 	if(NOT ARG_KERNEL_PACKAGES)
 		set(_none ON)
