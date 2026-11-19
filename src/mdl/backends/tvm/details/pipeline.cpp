@@ -3,6 +3,7 @@
 
 #include "../../../logging.hpp"
 #include "./aot.hpp"
+#include "./flatten_injective.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
@@ -313,6 +314,7 @@ namespace mdl::backend::tvm {
 				kernels->Add(gv, func);
 		}
 		kernels = runPasses(kernels, {::tvm::tirx::transform::BindTarget(tvmTarget)}, tvmTarget);
+		kernels = flattenInjective(kernels, tvmTarget); // (target-independent: flat loops for injective kernels)
 		kernels = target.schedule(kernels);
 		mod = runPasses(kernels, target.blockLowering(), tvmTarget);
 		for (const auto& [gv, func] : entries)

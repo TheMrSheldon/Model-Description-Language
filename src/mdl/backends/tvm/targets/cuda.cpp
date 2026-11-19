@@ -1,5 +1,6 @@
 #include "./cuda.hpp"
 
+#include "./gpu/row_reduction.hpp"
 #include "./llvm.hpp"
 
 #include <tvm_ported/globals.hpp>
@@ -18,6 +19,7 @@
 #include <target/build_common.h>
 
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -37,6 +39,7 @@ namespace mdl::backend::tvm {
 					"target '" + opts.target + "': the GPU architecture is required, e.g. --target 'cuda -arch=sm_80'"
 			);
 		arch = a.value();
+		dumpDir = opts.dumpDir;
 		// Device code through TVM's CUDA C code generation, compiled with NVRTC (cubin). Its Python callbacks (the
 		// CUDA header, intrinsic codegens, the compiler) and the tensor intrinsics are ported to C++ (src/tvm_ported).
 		target = ::tvm::Target(::tvm::Target(R"({"kind": "cuda", "arch": ")" + arch + "\"}"), LLVMTarget::host(opts));
@@ -74,7 +77,9 @@ namespace mdl::backend::tvm {
 		return runPasses(
 				std::move(kernels),
 				{mdl::tvm_ported::dlight::ApplyDefaultSchedule({
-						std::make_shared<gpu::Matmul>(), std::make_shared<gpu::Reduction>(),
+						// (RowReduction: ours, for rows of symbolic or moderate length, before DLight's reductions.)
+						std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
+						std::make_shared<gpu::Reduction>(),
 						std::make_shared<gpu::GeneralReduction>(), std::make_shared<gpu::Transpose>(),
 						std::make_shared<gpu::Fallback>()
 				})},
@@ -145,6 +150,10 @@ namespace mdl::backend::tvm {
 			// compilation when the model is loaded: compile it now (NVRTC, cubin), so that models load machine code.
 			if (!::tvm::ffi::Function::GetGlobal("ffi.Module.create.cuda")) {
 				const std::string source = device->InspectSource("cuda");
+				if (!dumpDir.empty()) {
+					std::filesystem::create_directories(dumpDir);
+					std::ofstream(dumpDir / (output.stem().string() + ".cu")) << source;
+				}
 				const std::string cubin = mdl::tvm_ported::support::nvcc::compile_cuda(source, "cubin", arch);
 				device = ::tvm::target::CUDAFallbackModuleCreate(
 						::tvm::ffi::Bytes(cubin.data(), cubin.size()), "cubin",

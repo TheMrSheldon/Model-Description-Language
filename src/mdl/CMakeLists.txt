@@ -62,6 +62,7 @@ add_library(mdl
 	backends/tvm/details/patterns.cpp
 	backends/tvm/details/schedule.cpp
 	backends/tvm/details/pipeline.cpp
+	backends/tvm/details/flatten_injective.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp
@@ -90,7 +91,7 @@ if(MDL_ENABLE_CUDA)
 	# The GPU schedules, the tensor intrinsics, and the CUDA C code generation callbacks: parts of TVM's Python package
 	# translated to C++, kept separate in src/tvm_ported (see its README.md).
 	target_link_libraries(mdl PRIVATE mdl_tvm_ported)
-	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp)
+	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp backends/tvm/targets/gpu/row_reduction.cpp)
 	# The CUDA target uses TVM internals (the CUDA module of the code generation; see targets/cuda.cpp).
 	set_source_files_properties(backends/tvm/targets/cuda.cpp PROPERTIES INCLUDE_DIRECTORIES "${tvm_SOURCE_DIR}/src")
 	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}")
