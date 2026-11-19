@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--attention", default="eager", choices=["eager", "sdpa"])
     parser.add_argument("--sizes", nargs="+", default=["base", "tiny"])
     parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--seq", type=int, default=None, help="sequence length (default: 128, tiny: 32)")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=20)
     args = parser.parse_args()
@@ -54,6 +55,8 @@ def main():
     for size in args.sizes:
         cfg = dict(SIZES[size])
         seq = cfg.pop("seq")
+        if args.seq is not None:
+            seq = args.seq
         # Dropout off, as in the MDL model.
         config = BertConfig(**cfg, hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0)
         config._attn_implementation = args.attention
