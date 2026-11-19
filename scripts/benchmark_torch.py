@@ -4,7 +4,9 @@ layers, hidden size 768, 12 heads, FFN size 3072; tiny: model_grad.yml), inferen
 backward with respect to the weights and the input), float32 and bfloat16, batch 8 x sequence 128 (tiny: 8 x 32), 3
 warm-up and 20 timed runs; prints the medians in the format of bench.cpp.
 
-Usage: scripts/benchmark_torch.py [--device cuda|cpu] [--compile] [--sizes base tiny]
+Usage: scripts/benchmark_torch.py [--device cuda|cpu] [--compile] [--attention eager|sdpa] [--sizes base tiny]
+  --attention: transformers' attention implementation: eager (matmul, softmax, matmul; the default, as MDL's model) or
+  sdpa (torch's scaled_dot_product_attention: fused attention kernels).
 Needs torch and transformers.
 """
 
@@ -42,6 +44,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile", action="store_true", help="torch.compile the encoder")
+    parser.add_argument("--attention", default="eager", choices=["eager", "sdpa"])
     parser.add_argument("--sizes", nargs="+", default=["base", "tiny"])
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=3)
@@ -51,8 +54,9 @@ def main():
     for size in args.sizes:
         cfg = dict(SIZES[size])
         seq = cfg.pop("seq")
-        # Dropout off, as in the MDL model; the attention implementation of the installed transformers (SDPA).
+        # Dropout off, as in the MDL model.
         config = BertConfig(**cfg, hidden_dropout_prob=0.0, attention_probs_dropout_prob=0.0)
+        config._attn_implementation = args.attention
         for mode in ("infer", "train"):
             for precision, dtype in (("f32", torch.float32), ("bf16", torch.bfloat16)):
                 torch.manual_seed(7)
@@ -72,7 +76,7 @@ def main():
                         y = run(x).last_hidden_state
                         y.backward(dy)
 
-                suffix = "_compile" if args.compile else ""
+                suffix = ("_compile" if args.compile else "") + ("_sdpa" if args.attention == "sdpa" else "")
                 bench(f"torch_{size}_{mode}_{precision}_{args.device}{suffix}", step, args.device, args.warmup,
                       args.iters)
 
