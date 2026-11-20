@@ -2,6 +2,7 @@
 
 #include <mdl/computegraphv2/builtins.hpp>
 
+#include "./attention.hpp"
 #include "./legalize.hpp"
 #include "./tvm_compat.hpp"
 
@@ -32,6 +33,14 @@ namespace mdl::backend::tvm {
 			std::function<::tvm::relax::Expr(::tvm::relax::BlockBuilder&, std::vector<::tvm::relax::Expr>)>;
 
 	// ── helpers ─────────────────────────────────────────────────────────────────
+
+	/** @brief The scale of attention (a compile-time constant). */
+	static inline double attentionScale(const ::tvm::relax::Expr& e) {
+		auto value = scalarConstant(e);
+		if (!value)
+			throw std::runtime_error("attention: the scale is not a compile-time constant");
+		return *value;
+	}
 
 	/** Call a registered Relax op via the global function registry. */
 	template <typename... Args>
@@ -120,78 +129,22 @@ namespace mdl::backend::tvm {
 
 	/**
  * `out = zeros like `like` ([V, ...])`, then `out[ids[n]] += g[n]` for every index n (the adjoint of `take`, e.g. the
- * gradient of an embedding table). A hand-written kernel (TVM's scatter is only available in Python): `g` and `ids`
- * are flattened to [N, R] and [N]; the columns are split into chunks of 16 that are processed in parallel, so threads
- * never write the same element (repeated indices accumulate correctly). Indices are clipped like `take(mode="clip")`.
+ * gradient of an embedding table): the backend operator mdl.scatter_add_rows over `g` and `ids` flattened to [N, R]
+ * and [N], in float32 (also for 16-bit gradients; the translation converts the result).
  */
 	static inline ::tvm::relax::Expr scatterAddRows(
 			::tvm::relax::BlockBuilder& bb, const ::tvm::relax::Expr& g, const ::tvm::relax::Expr& ids,
 			const ::tvm::relax::Expr& like
 	) {
-		namespace tirx = ::tvm::tirx;
-		using ::tvm::IntImm;
-		const auto i64 = ::tvm::PrimType::Int(64);
 		const auto likeShape = tensorShape(like);
 		const ::tvm::PrimExpr V = likeShape.at(0), R = shapeProduct(likeShape, 1), N = shapeProduct(tensorShape(ids));
 		auto flat = [&](const ::tvm::relax::Expr& x, ::tvm::ffi::Array<::tvm::PrimExpr> shape, const char* hint) {
 			return bb->Emit(callRelaxOp("relax.op.reshape", x, ::tvm::relax::ShapeExpr(shape)), hint);
 		};
-		// The kernel adds in float32 (also for 16-bit gradients; the translation converts the result).
 		auto g32 = dtypeOf(g) == ::tvm::PrimType::Float(32)
 						   ? g
 						   : bb->Emit(callRelaxOp("relax.op.astype", g, ::tvm::PrimType::Float(32)->dtype), "g32");
-		auto g2 = flat(g32, {N, R}, "g_rows");
-		auto ids1 = flat(ids, {N}, "ids_flat");
-		const auto idsType = ids->ty.as<::tvm::relax::TensorTypeNode>()->dtype.value();
-
-		// The kernel's dimensions are its own variables (bound from the buffers).
-		::tvm::PrimVar n("n", i64), r("r", i64), v("v", i64);
-		auto G = tirx::decl_buffer({n, r}, ::tvm::PrimType::Float(32), "g");
-		auto I = tirx::decl_buffer({n}, idsType, "ids");
-		auto O = tirx::decl_buffer({v, r}, ::tvm::PrimType::Float(32), "out");
-
-		constexpr int64_t kChunk = 16;
-		::tvm::PrimVar row("row", i64), col("col", i64), chunk("chunk", i64), lane("lane", i64), k("k", i64);
-		auto zero = tirx::For(
-				row, IntImm(i64, 0), v, tirx::ForKind::kParallel,
-				tirx::For(
-						col, IntImm(i64, 0), r, tirx::ForKind::kSerial,
-						tirx::BufferStore(O, ::tvm::FloatImm(::tvm::PrimType::Float(32), 0.0), {row, col})
-				)
-		);
-		const ::tvm::PrimExpr chunkSize = IntImm(i64, kChunk);
-		const ::tvm::PrimExpr c = chunk * chunkSize + lane;
-		const ::tvm::PrimExpr index =
-				::tvm::max(::tvm::min(::tvm::prim::cast(i64, tirx::BufferLoad(I, {k})), v - 1), IntImm(i64, 0));
-		auto accumulate = tirx::For(
-				chunk, IntImm(i64, 0), ::tvm::floordiv(r + IntImm(i64, kChunk - 1), chunkSize),
-				tirx::ForKind::kParallel,
-				tirx::For(
-						k, IntImm(i64, 0), n, tirx::ForKind::kSerial,
-						tirx::For(
-								lane, IntImm(i64, 0), IntImm(i64, kChunk), tirx::ForKind::kSerial,
-								tirx::IfThenElse(
-										c < r, tirx::BufferStore(
-													   O, tirx::BufferLoad(O, {index, c}) + tirx::BufferLoad(G, {k, c}),
-													   {index, c}
-											   )
-								)
-						)
-				)
-		);
-		auto body = rootBlock(tirx::SeqStmt(::tvm::ffi::Array<tirx::Stmt>{zero, accumulate}));
-		auto func = tirx::PrimFunc({G, I, O}, body, ::tvm::VoidType());
-		func = ::tvm::WithAttr(std::move(func), "op_pattern", 8); // opaque: not fused or rescheduled
-		auto gv = bb->AddFunction(func, "scatter_add_rows");
-
-		static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
-		auto out = bb->Emit(
-				::tvm::Call(
-						::tvm::Type::Missing(), callTir, {gv, ::tvm::relax::Tuple({g2, ids1})}, ::tvm::Attrs(),
-						{::tvm::relax::TensorType(::tvm::relax::ShapeExpr({V, R}), ::tvm::PrimType::Float(32))}
-				),
-				"scatter"
-		);
+		auto out = bb->Emit(makeScatterAddRows(flat(g32, {N, R}, "g_rows"), flat(ids, {N}, "ids_flat"), V), "scatter");
 		return callRelaxOp(
 				"relax.op.reshape", out,
 				::tvm::relax::ShapeExpr(::tvm::ffi::Array<::tvm::PrimExpr>(likeShape.begin(), likeShape.end()))
@@ -259,6 +212,22 @@ namespace mdl::backend::tvm {
 	/** Emit a value into the BlockBuilder and return the bound Var. */
 	static inline ::tvm::Var emitAs(::tvm::relax::BlockBuilder& bb, ::tvm::relax::Expr e, const char* hint = "v") {
 		return bb->Emit(std::move(e), hint);
+	}
+
+	/**
+	 * @brief The result @p i of attention for the operands (q, k, v, scale) @p ts: out and lse of mdl.attention, or the
+	 * probabilities softmax(scale * q @ k^T) as the unfused operations (the same as mdl.attention's expansion).
+	 */
+	static inline ::tvm::relax::Expr
+	attentionResult(::tvm::relax::BlockBuilder& bb, const std::vector<::tvm::relax::Expr>& ts, int i) {
+		const double scale = attentionScale(ts[3]);
+		if (i == 2) {
+			const size_t rank = static_cast<size_t>(tensorNdim(ts[0]));
+			auto scores = emitAs(bb, makeMatmul(ts[0], ts[1], {}, swapLastTwo(rank), {}, scale), "scores");
+			return callRelaxOp("relax.op.nn.softmax", scores, -1);
+		}
+		auto call = emitAs(bb, makeAttention(ts[0], ts[1], ts[2], scale), "attention");
+		return ::tvm::relax::TupleGetItem(call, i);
 	}
 
 	/**
@@ -584,6 +553,18 @@ namespace mdl::backend::tvm {
 				const int64_t format = intValue(extractPrim(ts[3]).template as<::tvm::IntImmNode>());
 				const int64_t group = intValue(extractPrim(ts[4]).template as<::tvm::IntImmNode>());
 				return makeDequant(ts[0], ts[1], ts[2], format, group);
+			},
+			/** ATTENTION, ATTENTION_LSE, ATTENTION_PROBS — the results of mdl.attention (one call: merged by CSE) **/
+			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 0); },
+			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 1); },
+			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 2); },
+			/** ATTENTION_GRAD — a result of mdl.attention_grad (q, k, v, scale, out, lse, probs, dy, which) **/
+			[](auto& bb, auto ts) -> ::tvm::relax::Expr {
+				const auto which = scalarConstant(ts[8]);
+				if (!which || *which < 0 || *which > 2)
+					throw std::runtime_error("attention gradient: expected the operand 0, 1, or 2");
+				auto grad = makeAttentionGrad(ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]));
+				return ::tvm::relax::TupleGetItem(emitAs(bb, grad, "attention_grad"), static_cast<int>(*which));
 			},
 	});
 

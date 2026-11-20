@@ -1,6 +1,7 @@
 // Matching kernel packages at the matching boundary (see kernel_match.hpp and docs/dev/spec/kernel-packages.md).
 #include "./kernel_match.hpp"
 #include "./extern_call.hpp"
+#include "./attention.hpp"
 #include "./legalize.hpp"
 #include "./tvm_compat.hpp"
 
@@ -88,7 +89,12 @@ namespace mdl::backend::tvm {
 				Array<relax::DFPattern> args;
 				for (const auto& arg : node.args)
 					args.push_back(compileNode(arg, out));
-				relax::DFPattern p = relax::IsOp(node.op)(args); // throws for an unknown operator
+				const auto& op = ::tvm::Op::Get(node.op); // (throws for an unknown operator)
+				if (op->num_inputs >= 0 && static_cast<size_t>(op->num_inputs) != node.args.size())
+					throw std::runtime_error(std::format(
+							"{} has {} argument(s), the pattern {}", node.op, op->num_inputs, node.args.size()
+					));
+				relax::DFPattern p = relax::IsOp(node.op)(args);
 				if (!node.attrs.empty()) {
 					Map<::tvm::ffi::String, ::tvm::ffi::Any> attrs;
 					for (const auto& [name, value] : node.attrs)
@@ -398,13 +404,10 @@ namespace mdl::backend::tvm {
 			const auto c = ::tvm::ffi::GetRef<Call>(call);
 			if (adapter == "matmul-strided" || adapter == "matmul-quantized")
 				return matmulAdapter(c, adapter == "matmul-quantized");
-			if (adapter == "attention-strided") {
-				auto it = calls.find("scores");
-				const auto* scores = it == calls.end() ? nullptr : it->second.as<::tvm::CallNode>();
-				if (scores == nullptr)
-					return std::unexpected("the pattern has no call captured as `scores` (Q @ K^T)");
-				return attentionAdapter(c, ::tvm::ffi::GetRef<Call>(scores));
-			}
+			if (adapter == "attention-forward")
+				return attentionForwardAdapter(c);
+			if (adapter == "attention-backward")
+				return attentionBackwardAdapter(c);
 			return std::unexpected("unknown adapter " + adapter);
 		}
 	} // namespace
@@ -849,7 +852,9 @@ namespace mdl::backend::tvm {
 					std::vector<Expr> pointers;
 					for (const auto& input : plan.inputs)
 						pointers.push_back(ext.input(VisitExpr(input), "in" + std::to_string(pointers.size())));
-					auto out = ext.output(plan.outShape, plan.outDtype);
+					std::vector<Expr> outs{ext.output(plan.outShape, plan.outDtype)};
+					for (const auto& [shape, dtype] : plan.moreOutputs)
+						outs.push_back(ext.output(shape, dtype));
 					std::vector<Expr> args;
 					std::vector<PrimExpr> scalars;
 					for (const auto& arg : plan.args)
@@ -858,7 +863,7 @@ namespace mdl::backend::tvm {
 							args.push_back(pointers[arg.input]);
 							break;
 						case ExternPlan::Arg::Kind::output:
-							args.push_back(out);
+							args.push_back(outs.at(arg.input));
 							break;
 						case ExternPlan::Arg::Kind::scalar:
 							scalars.push_back(arg.value);

@@ -4,6 +4,7 @@
 #include "../../../logging.hpp"
 #include "./aot.hpp"
 #include "./flatten_injective.hpp"
+#include "./attention.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
@@ -249,6 +250,9 @@ namespace mdl::backend::tvm {
 		return runPasses(
 				mod,
 				{
+						// (e.g. the calls of mdl.attention of an attention's result and its statistics are one)
+						RT::EliminateCommonSubexpr(),
+						foldPermutesIntoAttention(),
 						foldPermutesIntoMatmul(),
 						RT::Normalize(),
 						RT::DeadCodeElimination({}),
@@ -260,12 +264,31 @@ namespace mdl::backend::tvm {
 		);
 	}
 
-	IRModule lowerRelax(IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts) {
+	IRModule expandUnmatched(IRModule mod, const ::tvm::Target& target) {
+		return runPasses(
+				mod,
+				{expandAttention(), RT::Normalize(), RT::EliminateCommonSubexpr(), RT::CanonicalizeBindings(),
+				 RT::DeadCodeElimination({}), RT::Normalize()},
+				target
+		);
+	}
+
+	IRModule afterPruning(IRModule mod, const ::tvm::Target& target) {
+		// (foldPermutesIntoAttention: whether the attention's row statistics are still used)
+		return runPasses(
+				mod, {RT::DeadCodeElimination({}), foldPermutesIntoAttention(), RT::Normalize()}, target
+		);
+	}
+
+	IRModule lowerRelax(IRModule mod, const Target& device, const mdl::CompileOptions& opts) {
 		auto logger = mdl::log::getLogger("compiler");
+		const auto& target = device.tvm();
+		auto handlers = legalizeMap(opts);
+		device.overrideLegalizations(handlers);
 		mod = runPasses(
 				mod,
 				{
-						RT::LegalizeOps(legalizeMap(opts), std::nullopt, /*enable_warning=*/true),
+						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
 						RT::AnnotateTIROpPattern(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
 						// Python in TVM 0.24 (constants were folded before the patterns).
@@ -293,8 +316,8 @@ namespace mdl::backend::tvm {
 		return mod;
 	}
 
-	IRModule runRelaxPipeline(IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts) {
-		return lowerRelax(canonicalize(std::move(mod), target), target, opts);
+	IRModule runRelaxPipeline(IRModule mod, const Target& target, const mdl::CompileOptions& opts) {
+		return lowerRelax(canonicalize(std::move(mod), target.tvm()), target, opts);
 	}
 
 	void buildObject(IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output) {

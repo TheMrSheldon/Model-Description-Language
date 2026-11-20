@@ -58,6 +58,29 @@ foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "f16;float16;5e-3;" 
 	add_test(NAME cuda_bert_${name} COMMAND cuda_bert_${name})
 endforeach()
 
+# Training BERT on the GPU: the gradients of `--grad forward` (residuals in a context buffer on the GPU) against Hugging
+# Face's autograd (bert_grad.cpp; reference: export_bert_reference.py --grad). In bfloat16 and float16, attention and
+# its gradient use fused kernels (the cuDNN package), in float32 the unfused operations.
+foreach(variant IN ITEMS "f32;;1e-3" "bf16;bfloat16;5e-2" "f16;float16;2e-2")
+	list(GET variant 0 name)
+	list(GET variant 1 type)
+	list(GET variant 2 tolerance)
+	set(options --ellipsis-rank 2 --grad forward)
+	if(type)
+		list(APPEND options --float ${name})
+	endif()
+	mdl_add_model(cuda_bert_grad_${name}_model SOURCE ${_bert_dir}/model.dlm CONFIG ${_bert_dir}/model_bert_tiny.yml
+		TARGET "${_target}" OPTIONS ${options})
+	add_executable(cuda_bert_grad_${name} bert_grad.cpp)
+	target_link_libraries(cuda_bert_grad_${name} PRIVATE cuda_bert_grad_${name}_model)
+	target_compile_definitions(cuda_bert_grad_${name} PRIVATE
+		MDL_GRAD_REFERENCE="${_bert_dir}/data/bert_tiny_grad.safetensors" MDL_GRAD_TOLERANCE=${tolerance})
+	if(type)
+		target_compile_definitions(cuda_bert_grad_${name} PRIVATE MDL_GRAD_FLOAT=${type})
+	endif()
+	add_test(NAME cuda_bert_grad_${name} COMMAND cuda_bert_grad_${name})
+endforeach()
+
 # The cuBLAS package (kernels/cublas) is selected for the CUDA target (BERT's matrix products).
 if(TARGET mdl_kernel_package_cublas)
 	add_test(NAME cuda_cublas_kernels COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
@@ -68,7 +91,7 @@ if(TARGET mdl_kernel_package_cublas)
 endif()
 
 # The cuDNN package (kernels/cudnn): fused attention is selected for BERT in bfloat16 (all twelve layers of both
-# exported functions, forward and hiddenStates), not in
+# exported functions, forward and hiddenStates; with --grad, forward, hiddenStates and the twelve gradients), not in
 # float32 (cuDNN's attention has no float32).
 if(TARGET mdl_kernel_package_cudnn)
 	set(_bert_args ${_examples}/02_transformer/model.dlm -a ${_examples}/02_transformer/model.yml --ellipsis-rank 2
@@ -78,4 +101,7 @@ if(TARGET mdl_kernel_package_cudnn)
 	set_tests_properties(cuda_cudnn_attention PROPERTIES PASS_REGULAR_EXPRESSION "cudnn/attention-bf16.* 24 selected")
 	add_test(NAME cuda_cudnn_attention_f32 COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check ${_bert_args})
 	set_tests_properties(cuda_cudnn_attention_f32 PROPERTIES PASS_REGULAR_EXPRESSION " 0 selected")
+	add_test(NAME cuda_cudnn_attention_grad COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		${_bert_args} --float bf16 --grad forward)
+	set_tests_properties(cuda_cudnn_attention_grad PROPERTIES PASS_REGULAR_EXPRESSION "cudnn/attention-grad-bf16.* 36 selected")
 endif()

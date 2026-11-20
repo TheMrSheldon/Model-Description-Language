@@ -6,6 +6,7 @@
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
+#include <mdl/passes/attention.hpp>
 #include <mdl/passes/masking.hpp>
 #include <mdl/passes/shapes.hpp>
 #include <mdl/utils/overload.hpp>
@@ -462,6 +463,16 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		std::map<std::string, std::string> quantizedFrom; // quantized weight -> its rule's description (diagnostics)
 		if (!quantize.empty())
 			quantizeWeights(unit, argvals, moduleName, quantize, decls, order, quantizedParts, quantizedFrom);
+
+		// Attention: `softmax(scale * q @ k^T) @ v` becomes the attention builtins (before differentiation, whose rule
+		// then yields the fused gradient; see passes/attention.hpp).
+		for (auto& [funcName, decl] : decls) {
+			FunctionDecl fused = attention::fuse(unit.graph(), *decl);
+			if (!std::ranges::equal(fused.outputs, decl->outputs, [](const auto& a, const auto& b) {
+					return &a.get() == &b.get();
+				}))
+				decl = &unit.keep(std::move(fused));
+		}
 
 		for (const auto& [funcName, decl] : decls)
 			if (!requested(funcName))

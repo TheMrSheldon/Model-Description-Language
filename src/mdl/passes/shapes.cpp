@@ -366,6 +366,35 @@ namespace mdl::shapes {
 						s[1] = s[1] * Dim::constant(2);
 					return s;
 				}
+				case FIDs::ATTENTION: { // q [..., Sq, D], v [..., Skv, Dv] -> [..., Sq, Dv]
+					Shape s = arg(0);
+					const Shape& v = arg(2);
+					arg(1);
+					if (s.empty() || v.empty())
+						fail("attention of a vector");
+					if (!s.back().group && !v.back().group)
+						s.back() = v.back();
+					return s;
+				}
+				case FIDs::ATTENTION_LSE: {
+					Shape s = arg(0);
+					if (s.empty())
+						fail("attention of a vector");
+					if (!s.back().group)
+						s.pop_back();
+					return s;
+				}
+				case FIDs::ATTENTION_PROBS: { // [..., Sq, Skv]
+					Shape s = arg(0);
+					const Shape& k = arg(1);
+					if (s.size() < 2 || k.size() < 2)
+						fail("attention of a vector");
+					if (!s.back().group && !k[k.size() - 2].group)
+						s.back() = k[k.size() - 2];
+					return s;
+				}
+				case FIDs::ATTENTION_GRAD:
+					return arg(static_cast<size_t>(integer(args.at(8).get())));
 				case FIDs::STACK: {
 					if (args.empty())
 						fail("stack of no tensors");
@@ -613,6 +642,8 @@ namespace mdl::shapes {
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::SCATTER_ADD_ROWS:
 				return of(2).value_or(PrimitiveType::float32);
+			case FIDs::ATTENTION_LSE: // (row statistics in full precision)
+				return PrimitiveType::float32;
 			case FIDs::DEQUANT: // the type of the scales
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::UNSELECT_LIKE:

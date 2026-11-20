@@ -95,6 +95,22 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
   rebuilds the model.
 - `mdl-kernels link-args REPORT [--style gnu|msvc]` prints linker arguments for a report (for builds without CMake).
 
+### Rounds of selection
+Some backend operators exist so that a kernel can take a larger computation at once, and are expanded into the
+operations they stand for where no kernel takes them. For example, attention `softmax(scale * Q @ K^T) @ V` in the
+model becomes the builtin `ATTENTION` (target-independent; `src/mdl/passes/attention.cpp`), whose gradient is
+`ATTENTION_GRAD`. In Relax, these are `mdl.attention` and `mdl.attention_grad`. Where no implementation is selected,
+they become `mdl.matmul` and softmax, which are matched in a further round (e.g. by the matrix products of `cublas`).
+
+**Context buffers.** A gradient build saves values of the forward pass for the backward pass in a context buffer
+(`forward_ctx`). The gradient pass offers every value that some computation of the gradient may read. For attention,
+that is the result and its row statistics (for a fused gradient) and the probabilities (for the unfused operations).
+After each round, the backend removes the values that no consumer reads anymore from the buffer, and their
+computation from the forward pass. So a fused gradient saves the row statistics but not the probabilities, the
+unfused operations the reverse, and neither recomputes the scores. Removing values may enable further kernels, so the
+rounds repeat until nothing is removed. The buffer's layout and size function are computed afterwards; the bindings do
+not change.
+
 ### CMake
 - `mdl_add_model(... KERNEL_PACKAGES <name>...)` lets the model use these packages and links their libraries (and
   their dependencies) into the model's target, so that they propagate to the executable. Without it, the model uses no
@@ -219,10 +235,14 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
     merging), with bias, scale, activation, and addend;
   - `matmul-quantized`: `mdl_matmul_q_<type>`'s arguments for an `mdl.matmul` with quantized weights (a linear layer;
     other layouts use TVM's code);
-  - `attention-strided`: `mdl_attention_<type>`'s arguments (`kernels/cudnn/include/mdl_cudnn.h`) for attention
-    `softmax(scale * Q @ K^T) @ V`: the root is the product with V, the pattern captures the scores Q @ K^T as the call
-    `scores` (both `mdl.matmul`); the permutations of Q, K, V and the result become strides of two batch dimensions,
-    sequence, and head dimension (e.g. [batch, seq, heads, dim] in place).
+  - `attention-forward`: `mdl_attention_fwd_<type>`'s arguments (`kernels/cudnn/include/mdl_cudnn.h`) for
+    `mdl.attention` (attention `softmax(scale * Q @ K^T) @ V`, formed from the model's operations by the attention
+    pass, and the row statistics for its gradient; a tuple of two results); the permutations of Q, K, V and the result
+    become strides of two batch dimensions, sequence, and head dimension (e.g. [batch, seq, heads, dim] in place);
+  - `attention-backward`: `mdl_attention_bwd_<type>`'s arguments for `mdl.attention_grad` (the gradients w.r.t. Q, K,
+    and V; a tuple of three results), strided likewise.
+  Calls of `mdl.attention` and `mdl.attention_grad` that no implementation covers become their unfused operations
+  (`mdl.matmul`, softmax), which are matched in a second round.
 
 ### Expressions
 Values and conditions are written in one small typed language:

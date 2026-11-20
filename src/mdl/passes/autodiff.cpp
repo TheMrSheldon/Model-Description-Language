@@ -251,6 +251,15 @@ namespace mdl::autodiff {
 				return b.op(FIDs::TAKE, {g, *other});
 			case FIDs::CAST: // the gradient in the argument's type
 				return b.castLike(g, x);
+			case FIDs::ATTENTION: { // see ATTENTION_GRAD (and passes/attention.hpp)
+				const std::vector<Computegraph::NodeRef> operands(inv.arguments.begin(), inv.arguments.begin() + 4);
+				std::vector<Computegraph::NodeRef> args = operands;
+				for (const Node* n :
+					 {&node, &b.op(FIDs::ATTENTION_LSE, operands), &b.op(FIDs::ATTENTION_PROBS, operands), &g,
+					  &graph.addConstNode(Atomic{static_cast<int>(arg)})})
+					args.push_back(std::cref(*n));
+				return b.op(FIDs::ATTENTION_GRAD, std::move(args));
+			}
 			case FIDs::STACK: // the slice of the stacked tensor
 				return b.op(
 						FIDs::SELECT,
@@ -276,6 +285,12 @@ namespace mdl::autodiff {
 				return false; // piecewise constant
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
+			case FIDs::ATTENTION:
+				return arg < 3; // not the scale (a constant)
+			case FIDs::ATTENTION_LSE:
+			case FIDs::ATTENTION_PROBS:
+			case FIDs::ATTENTION_GRAD:
+				return false; // (only in gradients; no higher-order derivatives)
 			case FIDs::STOP_GRADIENT:
 			case FIDs::ONE_HOT_LIKE:
 				return false;

@@ -24,14 +24,23 @@ namespace mdl::backend::tvm {
 	 */
 	::tvm::IRModule canonicalize(::tvm::IRModule mod, const ::tvm::Target& target);
 
+	/**
+	 * @brief Expands the backend operators that no kernel package covered into their unfused operations (e.g.
+	 * mdl.attention into products and softmax), which a second round of matching sees (see expandAttention).
+	 */
+	::tvm::IRModule expandUnmatched(::tvm::IRModule mod, const ::tvm::Target& target);
+
+	/** @brief Removes the computations that pruned context buffers no longer save (see pruneContexts). */
+	::tvm::IRModule afterPruning(::tvm::IRModule mod, const ::tvm::Target& target);
+
 	/** @brief The Relax passes after the matching boundary: legalization, fusion, and memory planning. */
-	::tvm::IRModule lowerRelax(::tvm::IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts);
+	::tvm::IRModule lowerRelax(::tvm::IRModule mod, const Target& target, const mdl::CompileOptions& opts);
 
 	/**
 	 * @brief Runs the Relax passes: canonicalize, then lowerRelax.
 	 * @return the module in the form expected by lowerToAOT.
 	 */
-	::tvm::IRModule runRelaxPipeline(::tvm::IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts);
+	::tvm::IRModule runRelaxPipeline(::tvm::IRModule mod, const Target& target, const mdl::CompileOptions& opts);
 
 	/**
 	 * @brief Runs the TIR passes on a PrimFunc-only module and writes the generated code for @p target into an object file.

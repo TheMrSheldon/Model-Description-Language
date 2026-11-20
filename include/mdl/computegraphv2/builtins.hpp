@@ -75,6 +75,16 @@ namespace mdl::builtins {
 		STACK, /**< (x_0, ..., x_{n-1}): the tensors (of equal shapes) stacked along a new first dimension [n, ...] */
 		/** Quantization **/
 		DEQUANT, /**< (q, scales, zeros, format, group): the float weight [N, K] of a quantized one (see QuantFormat) */
+		/** Attention (formed by the attention pass from `softmax(scale * q @ k^T) @ v`; see passes/attention.hpp) **/
+		ATTENTION, /**< (q [..., Sq, D], k [..., Skv, D], v [..., Skv, Dv], scale): softmax(scale * q @ k^T) @ v */
+		ATTENTION_LSE,	 /**< (q, k, v, scale): the log-sum-exp of the rows of scale * q @ k^T ([..., Sq], float32) */
+		ATTENTION_PROBS, /**< (q, k, v, scale): the probabilities softmax(scale * q @ k^T) ([..., Sq, Skv]) */
+		/**
+		 * (q, k, v, scale, out, lse, probs, dy, which): the gradient of ATTENTION w.r.t. q, k, or v (which: 0..2) for
+		 * the cotangent dy, from the forward's results: a fused kernel uses out and lse, the unfused operations probs
+		 * (the backend saves only what the selected computation reads).
+		 */
+		ATTENTION_GRAD,
 
 		COUNT
 	};

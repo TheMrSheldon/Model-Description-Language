@@ -3,6 +3,8 @@
 #include "../../argvals.hpp"
 #include "../../logging.hpp"
 #include "./details/aot.hpp"
+#include "./details/attention.hpp"
+#include "./details/contexts.hpp"
 #include "./details/kernel_match.hpp"
 #include "./details/pipeline.hpp"
 #include "./details/relax_builtins.hpp"
@@ -386,7 +388,13 @@ static ::tvm::relax::Expr translateRelax(
 		const auto& argRef = node.arguments[i];
 		if (!isShapeOp && node.id != FIDs::CAST) {
 			if (auto value = evalScalar(argRef.get(), argVals)) {
-				translatedArgs.push_back(mdl::backend::tvm::makeFloatConst(static_cast<float>(*value), floatType));
+				// (The scale of attention is an attribute: float32 whatever the element type, so that the results of
+				// one attention, e.g. its output and row statistics, have the same operands.)
+				const bool attribute = node.id == FIDs::ATTENTION || node.id == FIDs::ATTENTION_LSE ||
+									   node.id == FIDs::ATTENTION_PROBS || node.id == FIDs::ATTENTION_GRAD;
+				translatedArgs.push_back(mdl::backend::tvm::makeFloatConst(
+						static_cast<float>(*value), attribute ? ::tvm::PrimType::Float(32) : floatType
+				));
 				continue;
 			}
 		}
@@ -569,6 +577,8 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 	RelaxCache cache;
 	mdl::backend::tvm::EntrySignature packing;
 	packing.context = fn.context.has_value();
+	if (fn.context)
+		packing.contextName = fn.context->name;
 	::tvm::ffi::Array<::tvm::Var> bbParams;
 	auto bind = [&](const mdl::TensorSignature& t, ::tvm::Var var, bool packed) {
 		bbParams.push_back(var);
@@ -692,21 +702,54 @@ void mdl::backends::tvm::compileToFile(
 		return !opts.useKernelPackages || opts.kernels == mdl::Kernels::None || !allowed ||
 			   std::ranges::contains(opts.noKernelPackages, p.name);
 	});
-	auto matches = backend::matchKernels(mod, discovery.packages, device->kernelPlatform());
+	auto matchAndApply = [&](::tvm::IRModule m, backend::MatchResult& matches) {
+		if (backend::needsNonDataflow(matches)) {
+			// Runtime guards are `If`s, which cannot be inside dataflow blocks: match again without them (the same
+			// selection, of the new variables), then restore the blocks and their DataflowVars (only these can be fused).
+			m = ::tvm::relax::transform::ToNonDataflow()(m);
+			matches = backend::matchKernels(m, discovery.packages, device->kernelPlatform());
+			m = backend::applyKernels(m, matches);
+			m = ::tvm::relax::transform::ConvertToDataflow()(m);
+			return ::tvm::relax::transform::CanonicalizeBindings()(m);
+		}
+		return backend::applyKernels(m, matches);
+	};
+	// Kernel selection in rounds: after each, the context buffers keep only what their consumers still read (e.g. a
+	// fused gradient reads other residuals than the unfused operations), which may make more kernels applicable (e.g.
+	// the fused forward pass of attention without its probabilities). Then the backend operators that no kernel covers
+	// (e.g. attention without a fused kernel) become their unfused operations, matched in further rounds (e.g. by
+	// kernels of matrix products). The candidates of all rounds are reported.
+	backend::MatchResult matches;
+	auto select = [&] {
+		for (;;) {
+			auto round = backend::matchKernels(mod, discovery.packages, device->kernelPlatform());
+			mod = matchAndApply(mod, round);
+			// (A candidate that is not selected appears again in later rounds while its region exists: once.)
+			for (auto& c : round.candidates) {
+				const bool seen = std::ranges::any_of(matches.candidates, [&](const backend::Candidate& o) {
+					return o.outcome != backend::Candidate::Outcome::selected && o.function == c.function &&
+						   o.implementation == c.implementation && o.replaced.back()->name == c.replaced.back()->name;
+				});
+				if (!seen)
+					matches.candidates.push_back(std::move(c));
+			}
+			if (matches.problems.empty())
+				matches.problems = round.problems;
+			if (!backend::pruneContexts(mod, packing)) // (terminates: every round removes tensors)
+				return;
+			mod = backend::afterPruning(mod, target);
+		}
+	};
+	select();
+	if (backend::hasAttention(mod)) {
+		mod = backend::expandUnmatched(mod, target);
+		select();
+	}
 	if (opts.inspectKernels != Inspection::none) {
 		backend::explain(*opts.inspectOut, matches, discovery, opts.inspectKernels == Inspection::explain);
 		return;
 	}
-	if (backend::needsNonDataflow(matches)) {
-		// Runtime guards are `If`s, which cannot be inside dataflow blocks: match again without them (the same
-		// selection, of the new variables), then restore the blocks and their DataflowVars (only these can be fused).
-		mod = ::tvm::relax::transform::ToNonDataflow()(mod);
-		matches = backend::matchKernels(mod, discovery.packages, device->kernelPlatform());
-		mod = backend::applyKernels(mod, matches);
-		mod = ::tvm::relax::transform::ConvertToDataflow()(mod);
-		mod = ::tvm::relax::transform::CanonicalizeBindings()(mod);
-	} else
-		mod = backend::applyKernels(mod, matches);
+	dump(mod, "relax-kernels");
 	for (const auto& c : matches.candidates) {
 		if (c.outcome != backend::Candidate::Outcome::selected)
 			continue;
@@ -757,7 +800,7 @@ void mdl::backends::tvm::compileToFile(
 		}
 		opts.selectedKernels->push_back(std::move(k));
 	}
-	mod = backend::lowerRelax(mod, target, opts);
+	mod = backend::lowerRelax(mod, *device, opts);
 	dump(mod, "relax-lowered");
 	const auto prefix = mdl::systemLibPrefix(output);
 	mod = backend::lowerToAOT(mod, prefix + "k_", packing, opts.profile);

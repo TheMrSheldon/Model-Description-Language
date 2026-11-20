@@ -16,49 +16,60 @@ artifacts:
       - { kind: system-library, name: cudart }
 
 patterns:
-  attention:   # softmax(scale * Q @ K^T) @ V, the scores and probabilities used nowhere else
-    op: mdl.matmul
+  attention:   # mdl.attention: softmax(scale * Q @ K^T) @ V and the row statistics (see the backend's attention.hpp)
+    op: mdl.attention
     args:
-      - op: relax.nn.softmax
-        attrs: { axis: -1 }
-        args:
-          - op: mdl.matmul
-            capture: scores
-            args:
-              - { capture: q }
-              - { capture: k }
-              - { capture: scores_bias }
-              - { capture: perm_q }
-              - { capture: perm_k }
-              - { capture: perm_scores }
-              - { capture: scale }
-              - { capture: scores_activation }
-              - { capture: scores_addend }
-              - { capture: scores_scales }
-              - { capture: scores_zeros }
-              - { capture: scores_quant }
+      - { capture: q }
+      - { capture: k }
       - { capture: v }
-      - { capture: bias }
-      - { capture: perm_p }
+      - { capture: scale }
+      - { capture: perm_q }
+      - { capture: perm_k }
       - { capture: perm_v }
       - { capture: perm_out }
-      - { capture: alpha }
-      - { capture: activation }
-      - { capture: addend }
-      - { capture: scales }
-      - { capture: zeros }
-      - { capture: quant }
+      - { capture: with_lse }
+  attention-grad:   # mdl.attention_grad: the gradients w.r.t. Q, K, and V
+    op: mdl.attention_grad
+    args:
+      - { capture: q }
+      - { capture: k }
+      - { capture: v }
+      - { capture: o }
+      - { capture: lse }
+      - { capture: probs }
+      - { capture: dy }
+      - { capture: scale }
+      - { capture: perm_q }
+      - { capture: perm_k }
+      - { capture: perm_v }
+      - { capture: perm_o }
+      - { capture: perm_dy }
+      - { capture: perm_dq }
+      - { capture: perm_dk }
+      - { capture: perm_dv }
 
 implementations:
   attention-bf16: &attention
     pattern: attention
     artifacts: [mdl-kernels]
-    priority: 200   # (over the separate products of the cuBLAS package)
-    symbol: mdl_attention_bf16
-    adapter: attention-strided
+    priority: 200
+    symbol: mdl_attention_fwd_bf16
+    adapter: attention-forward
     applicability:
       dtype: { q: bfloat16 }
   attention-f16:
     <<: *attention
-    symbol: mdl_attention_f16
+    symbol: mdl_attention_fwd_f16
+    applicability: { dtype: { q: float16 } }
+  attention-grad-bf16: &attention-grad
+    pattern: attention-grad
+    artifacts: [mdl-kernels]
+    priority: 200
+    symbol: mdl_attention_bwd_bf16
+    adapter: attention-backward
+    applicability:
+      dtype: { q: bfloat16 }
+  attention-grad-f16:
+    <<: *attention-grad
+    symbol: mdl_attention_bwd_f16
     applicability: { dtype: { q: float16 } }

@@ -19,6 +19,7 @@ namespace mdl::backend::tvm {
 
 		const ::tvm::Target& tvm() const override { return target; }
 		kernels::Platform kernelPlatform() const override;
+		void overrideLegalizations(::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function>& handlers) const override;
 		::tvm::IRModule schedule(::tvm::IRModule kernels) const override;
 		std::vector<::tvm::transform::Pass> blockLowering() const override;
 		std::vector<::tvm::transform::Pass> afterVectorize() const override;

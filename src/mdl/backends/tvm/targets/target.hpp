@@ -12,6 +12,7 @@
 #include <mdl/compiler.hpp>
 #include <mdl/kernels.hpp>
 
+#include <tvm/ffi/container/map.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
@@ -34,6 +35,12 @@ namespace mdl::backend::tvm {
 
 		/** @brief What an artifact of a kernel package must run on (see kernels::runsOn). */
 		virtual kernels::Platform kernelPlatform() const = 0;
+
+		/**
+		 * @brief The device's own legalizations of backend operators (operator name → LegalizeOps handler), replacing
+		 * the default ones (see legalizeMap), e.g. kernels written for the device. Default: none.
+		 */
+		virtual void overrideLegalizations(::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function>& /*handlers*/) const {}
 
 		/** @brief Schedules the TVM-generated kernels (PrimFuncs with blocks) of @p kernels for this device. */
 		virtual ::tvm::IRModule schedule(::tvm::IRModule kernels) const = 0;

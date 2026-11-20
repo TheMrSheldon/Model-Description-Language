@@ -65,7 +65,7 @@ namespace mdl::backend::tvm {
 	 * the inputs (the PrimFunc's parameters: inputs, variables, output).
 	 */
 	inline Expr
-	callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const TensorType& out,
+	callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const ::tvm::Type& out,
 			const Array<::tvm::Var>& vars) {
 		static const auto& op = ::tvm::Op::Get("relax.call_tir");
 		Array<Expr> args = inputs;
@@ -88,10 +88,11 @@ namespace mdl::backend::tvm {
 			return buffer(*shape, tensorInfo(arg)->dtype.value(), argName, /*write=*/false);
 		}
 
+		/** @brief Adds an output (several: the call's result is a tuple); returns its pointer expression. */
 		Expr output(const Array<PrimExpr>& shape, ::tvm::PrimType dtype) {
-			outInfo = TensorType(ShapeExpr(shape), dtype);
-			auto ptr = buffer(shape, dtype, "out", /*write=*/true);
-			outputBuffer = params.back();
+			outInfos.push_back(TensorType(ShapeExpr(shape), dtype));
+			auto ptr = buffer(shape, dtype, outInfos.size() == 1 ? "out" : "out" + std::to_string(outInfos.size() - 1), true);
+			outputBuffers.push_back(params.back());
 			return ptr;
 		}
 
@@ -100,11 +101,11 @@ namespace mdl::backend::tvm {
 			// The parameters: the inputs, the unbound symbolic variables, then the output (destination passing style).
 			std::vector<::tvm::Var> ordered;
 			for (const auto& p : params)
-				if (!p.same_as(outputBuffer))
+				if (std::none_of(outputBuffers.begin(), outputBuffers.end(), [&](const auto& o) { return o.same_as(p); }))
 					ordered.push_back(p);
 			auto vars = unboundVars(shapes, scalars);
 			ordered.insert(ordered.end(), vars.begin(), vars.end());
-			ordered.push_back(outputBuffer);
+			ordered.insert(ordered.end(), outputBuffers.begin(), outputBuffers.end());
 			Array<Expr> callArgs{::tvm::StringImm(kernel)};
 			for (auto& arg : kernelArgs)
 				callArgs.push_back(std::move(arg));
@@ -118,7 +119,9 @@ namespace mdl::backend::tvm {
 			// Opaque (kOpaque = 8): extern calls must not be fused with other kernels.
 			func = ::tvm::WithAttr(std::move(func), "op_pattern", 8);
 			auto gv = bb->AddFunction(func, kernel);
-			return callTir(gv, inputs, outInfo.value(), vars);
+			if (outInfos.size() == 1)
+				return callTir(gv, inputs, outInfos.front(), vars);
+			return callTir(gv, inputs, ::tvm::TupleType(Array<::tvm::Type>(outInfos.begin(), outInfos.end())), vars);
 		}
 
 	private:
@@ -127,8 +130,8 @@ namespace mdl::backend::tvm {
 		Array<Expr> inputs;
 		std::vector<::tvm::Var> params; ///< the buffers
 		std::vector<Array<PrimExpr>> shapes;
-		std::optional<TensorType> outInfo;
-		::tvm::Var outputBuffer;
+		std::vector<TensorType> outInfos;
+		std::vector<::tvm::Var> outputBuffers;
 
 		Expr buffer(const Array<PrimExpr>& shape, ::tvm::PrimType dtype, const std::string& n, bool write) {
 			auto buf = tirx::decl_buffer(shape, dtype, n);
