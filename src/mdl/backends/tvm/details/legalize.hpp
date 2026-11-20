@@ -82,38 +82,6 @@ namespace mdl::backend::tvm {
 	 */
 	::tvm::transform::Pass foldPermutesIntoMatmul();
 
-	/**
-	 * @brief The arguments of an extern kernel call, computed by an adapter (see kernel packages, `adapter:`): the
-	 * tensors it reads (in the order of their buffers), and the kernel's arguments in order.
-	 */
-	struct ExternPlan {
-		struct Arg {
-			enum class Kind { input, output, scalar } kind;
-			size_t input = 0;	   ///< the index into inputs (of an output: into the outputs)
-			::tvm::PrimExpr value; ///< a scalar
-		};
-		std::vector<::tvm::relax::Expr> inputs;
-		std::vector<Arg> args;
-		::tvm::ffi::Array<::tvm::PrimExpr> outShape;
-		::tvm::PrimType outDtype = ::tvm::PrimType::Void();
-		/** @brief The further outputs (shape, element type): the kernel's result is then a tuple. */
-		std::vector<std::pair<::tvm::ffi::Array<::tvm::PrimExpr>, ::tvm::PrimType>> moreOutputs;
-
-		Arg input(size_t i) const { return {.kind = Arg::Kind::input, .input = i}; }
-		Arg add(const ::tvm::relax::Expr& e) {
-			inputs.push_back(e);
-			return input(inputs.size() - 1);
-		}
-		static Arg output(size_t i = 0) { return {.kind = Arg::Kind::output, .input = i}; }
-		static Arg scalar(::tvm::PrimExpr v) { return {.kind = Arg::Kind::scalar, .value = std::move(v)}; }
-	};
-
-	/**
-	 * @brief The adapters `matmul-strided` (@p quantized false: mdl_matmul_<type>) and `matmul-quantized`
-	 * (mdl_matmul_q_<type>) for a call of mdl.matmul or relax.matmul, or why the kernel does not cover it.
-	 */
-	std::expected<ExternPlan, std::string> matmulAdapter(const ::tvm::Call& call, bool quantized);
-
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */
 	::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> legalizeMap(const mdl::CompileOptions& opts);
 

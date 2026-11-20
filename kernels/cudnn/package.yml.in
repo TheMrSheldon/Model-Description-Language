@@ -49,27 +49,89 @@ patterns:
       - { capture: perm_dv }
 
 implementations:
+  # The tensors as strided views in their logical layout (the permutations of the operators applied to their shapes and
+  # strides), e.g. the layout [batch, seq, heads, dim] of a model read and written in place.
   attention-bf16: &attention
     pattern: attention
     artifacts: [mdl-kernels]
     priority: 200
     symbol: mdl_attention_fwd_bf16
-    adapter: attention-forward
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out0.data }    # the result
+        - { type: pointer, access: write, value: $out1.data }    # the row statistics (float32)
+        - { type: pointer, access: read, value: $q.data }
+        - { type: pointer, access: read, value: $k.data }
+        - { type: pointer, access: read, value: $v.data }
+        - { type: int64, value: $q.ndim }
+        - { type: "int64[]", value: "permute($q.shape, $perm_q.values)" }
+        - { type: "int64[]", value: "permute(strides($q.shape), $perm_q.values)" }
+        - { type: "int64[]", value: "permute($k.shape, $perm_k.values)" }
+        - { type: "int64[]", value: "permute(strides($k.shape), $perm_k.values)" }
+        - { type: "int64[]", value: "permute($v.shape, $perm_v.values)" }
+        - { type: "int64[]", value: "permute(strides($v.shape), $perm_v.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out0.shape), $perm_out.values)" }
+        - { type: int32, value: $with_lse.value }
+        - { type: float32, value: $scale.real }
     applicability:
       dtype: { q: bfloat16 }
+      where: &attention-where
+        - "permute($q.shape, $perm_q.values)[:-2] == permute($k.shape, $perm_k.values)[:-2]"
+        - "permute($q.shape, $perm_q.values)[:-2] == permute($v.shape, $perm_v.values)[:-2]"
+        # cuDNN reads and writes the head dimension contiguously.
+        - "permute(strides($q.shape), $perm_q.values)[-1] == 1"
+        - "permute(strides($k.shape), $perm_k.values)[-1] == 1"
+        - "permute(strides($v.shape), $perm_v.values)[-1] == 1"
+        - "unpermute(strides($out0.shape), $perm_out.values)[-1] == 1"
   attention-f16:
     <<: *attention
     symbol: mdl_attention_fwd_f16
-    applicability: { dtype: { q: float16 } }
-  attention-grad-bf16: &attention-grad
+    applicability: { dtype: { q: float16 }, where: *attention-where }
+  attention-grad-bf16: &attention-grad   # (the probabilities are not read: the statistics replace them)
     pattern: attention-grad
     artifacts: [mdl-kernels]
     priority: 200
     symbol: mdl_attention_bwd_bf16
-    adapter: attention-backward
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out0.data }    # dq
+        - { type: pointer, access: write, value: $out1.data }    # dk
+        - { type: pointer, access: write, value: $out2.data }    # dv
+        - { type: pointer, access: read, value: $q.data }
+        - { type: pointer, access: read, value: $k.data }
+        - { type: pointer, access: read, value: $v.data }
+        - { type: pointer, access: read, value: $o.data }
+        - { type: pointer, access: read, value: $dy.data }
+        - { type: pointer, access: read, value: $lse.data }
+        - { type: int64, value: $q.ndim }
+        - { type: "int64[]", value: "permute($q.shape, $perm_q.values)" }
+        - { type: "int64[]", value: "permute(strides($q.shape), $perm_q.values)" }
+        - { type: "int64[]", value: "permute($k.shape, $perm_k.values)" }
+        - { type: "int64[]", value: "permute(strides($k.shape), $perm_k.values)" }
+        - { type: "int64[]", value: "permute($v.shape, $perm_v.values)" }
+        - { type: "int64[]", value: "permute(strides($v.shape), $perm_v.values)" }
+        - { type: "int64[]", value: "permute(strides($o.shape), $perm_o.values)" }
+        - { type: "int64[]", value: "permute(strides($dy.shape), $perm_dy.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out0.shape), $perm_dq.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out1.shape), $perm_dk.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out2.shape), $perm_dv.values)" }
+        - { type: float32, value: $scale.real }
     applicability:
-      dtype: { q: bfloat16 }
+      dtype: { q: bfloat16, o: bfloat16, dy: bfloat16 }
+      where: &attention-grad-where
+        - "permute($q.shape, $perm_q.values)[:-2] == permute($k.shape, $perm_k.values)[:-2]"
+        - "permute($q.shape, $perm_q.values)[:-2] == permute($v.shape, $perm_v.values)[:-2]"
+        - "permute(strides($q.shape), $perm_q.values)[-1] == 1"
+        - "permute(strides($k.shape), $perm_k.values)[-1] == 1"
+        - "permute(strides($v.shape), $perm_v.values)[-1] == 1"
+        - "permute(strides($o.shape), $perm_o.values)[-1] == 1"
+        - "permute(strides($dy.shape), $perm_dy.values)[-1] == 1"
+        - "unpermute(strides($out0.shape), $perm_dq.values)[-1] == 1"
+        - "unpermute(strides($out1.shape), $perm_dk.values)[-1] == 1"
+        - "unpermute(strides($out2.shape), $perm_dv.values)[-1] == 1"
   attention-grad-f16:
     <<: *attention-grad
     symbol: mdl_attention_bwd_f16
-    applicability: { dtype: { q: float16 } }
+    applicability: { dtype: { q: float16, o: float16, dy: float16 }, where: *attention-grad-where }

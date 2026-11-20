@@ -11,6 +11,7 @@
 // batch of attention, whose matrices are interleaved) are one pointer-array batched GEMM: the pointers are computed on
 // the GPU.
 #include "mdl_cublas.h"
+#include "mdl_strided.hpp"
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -476,16 +477,25 @@ namespace {
 
 #define MDL_CUBLAS_MATMUL_DEFINE(suffix, type, device)                                                                 \
 	extern "C" int mdl_cublas_matmul_##suffix(                                                                         \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,       \
-			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,     \
-			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
-			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
+			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
+			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
+			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
+			int32_t activation, float alpha                                                                            \
 	) {                                                                                                                \
-		return matmul<device>(                                                                                         \
-				reinterpret_cast<device*>(dst), reinterpret_cast<const device*>(A),                                    \
-				reinterpret_cast<const device*>(B), reinterpret_cast<const device*>(bias), has_bias, b0, b1, M, K, N,  \
-				a_s0, a_s1, a_sM, a_sK, b_s0, b_s1, b_sK, b_sN, d_s0, d_s1, d_sM, d_sN,                                \
-				reinterpret_cast<const device*>(addend), has_addend, activation, alpha                                 \
+		using T = device;                                                                                              \
+		const auto offset = [](const type* p, int64_t o) {                                                             \
+			return p == nullptr ? nullptr : reinterpret_cast<const T*>(p) + o;                                         \
+		};                                                                                                             \
+		return mdl::kernels::forEachGemm(                                                                              \
+				{a_rank, a_shape, a_strides}, {b_rank, b_shape, b_strides}, {c_rank, c_shape, c_strides}, 2,           \
+				[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t bo, int64_t co) {                                 \
+					return matmul<T>(                                                                                  \
+							reinterpret_cast<T*>(out) + co, offset(A, ao), offset(B, bo), offset(bias, 0),             \
+							bias != nullptr, g.b0, g.b1, g.M, g.K, g.N, g.a_s0, g.a_s1, g.a_sM, g.a_sK, g.b_s0,        \
+							g.b_s1, g.b_sK, g.b_sN, g.c_s0, g.c_s1, g.c_sM, g.c_sN, offset(addend, co),               \
+							addend != nullptr, activation, alpha                                                       \
+					);                                                                                                 \
+				}                                                                                                      \
 		);                                                                                                             \
 	}
 MDL_CUBLAS_MATMUL_DEFINE(f32, float, float)

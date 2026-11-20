@@ -24,6 +24,7 @@ find_package(CUDAToolkit REQUIRED)
 
 add_library(mdl_cudnn STATIC src/attention.cpp)
 target_include_directories(mdl_cudnn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(mdl_cudnn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include) # (mdl_strided.hpp)
 target_include_directories(mdl_cudnn PRIVATE ${cudnn_frontend_SOURCE_DIR}/include ${MDL_CUDNN_INCLUDE_DIR})
 target_compile_features(mdl_cudnn PUBLIC cxx_std_20)
 set_property(TARGET mdl_cudnn PROPERTY POSITION_INDEPENDENT_CODE ON)

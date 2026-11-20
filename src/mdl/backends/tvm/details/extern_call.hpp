@@ -96,6 +96,27 @@ namespace mdl::backend::tvm {
 			return ptr;
 		}
 
+		/**
+		 * @brief An int64 array with @p values on the caller's stack (an `int64[]` argument, e.g. the shape of a strided
+		 * view); returns its pointer expression.
+		 */
+		Expr array(const Array<PrimExpr>& values) {
+			const auto i64 = ::tvm::PrimType::Int(64);
+			const auto n = ::tvm::IntImm(i64, std::max<int64_t>(static_cast<int64_t>(values.size()), 1));
+			auto buffer = tirx::BufferVar(
+					"array" + std::to_string(prologue.size()),
+					tirx::BufferType("", i64, {n}, {}, ::tvm::IntImm(i64, 0), 0, 0)
+			);
+			prologue.push_back(tirx::DeclBuffer(
+					buffer, Call(::tvm::PointerType(i64), tirx::builtin::tvm_stack_alloca(), {::tvm::StringImm("shape"), n})
+			));
+			for (size_t i = 0; i < values.size(); ++i)
+				prologue.push_back(tirx::BufferStore(
+						buffer, ::tvm::prim::cast(i64, values[i]), {::tvm::IntImm(i64, static_cast<int64_t>(i))}
+				));
+			return buffer.data();
+		}
+
 		/** @param scalars the integer arguments (their symbolic variables become parameters if no buffer binds them) */
 		Expr finish(std::vector<Expr> kernelArgs, const std::vector<PrimExpr>& scalars = {}) {
 			// The parameters: the inputs, the unbound symbolic variables, then the output (destination passing style).
@@ -113,8 +134,13 @@ namespace mdl::backend::tvm {
 			auto check = tirx::AssertStmt(
 					call == 0, ::tvm::StringImm("RuntimeError"), {::tvm::StringImm("mdl kernel " + kernel + " failed")}
 			);
+			std::vector<tirx::Stmt> stmts = prologue;
+			stmts.push_back(check);
 			// Wrap the call in a root block like any other (TE-generated) PrimFunc; Relax analyses expect it.
-			auto body = ::tvm::s_tir::SBlockRealize({}, ::tvm::IntImm::Bool(true), ::tvm::s_tir::SBlock("root", check));
+			auto body = ::tvm::s_tir::SBlockRealize(
+					{}, ::tvm::IntImm::Bool(true),
+					::tvm::s_tir::SBlock("root", tirx::SeqStmt::Flatten(Array<tirx::Stmt>(stmts.begin(), stmts.end())))
+			);
 			auto func = tirx::PrimFunc(Array<::tvm::Var>(ordered.begin(), ordered.end()), body, ::tvm::VoidType());
 			// Opaque (kOpaque = 8): extern calls must not be fused with other kernels.
 			func = ::tvm::WithAttr(std::move(func), "op_pattern", 8);
@@ -130,6 +156,7 @@ namespace mdl::backend::tvm {
 		Array<Expr> inputs;
 		std::vector<::tvm::Var> params; ///< the buffers
 		std::vector<Array<PrimExpr>> shapes;
+		std::vector<tirx::Stmt> prologue; ///< the arrays on the stack
 		std::vector<TensorType> outInfos;
 		std::vector<::tvm::Var> outputBuffers;
 

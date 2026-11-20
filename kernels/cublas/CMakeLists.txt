@@ -22,6 +22,7 @@ set(MDL_CUBLAS_VERSION "${CUDAToolkit_VERSION}")
 
 add_library(mdl_cublas STATIC src/cublas.cu)
 target_include_directories(mdl_cublas PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(mdl_cublas PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include) # (mdl_strided.hpp)
 target_compile_features(mdl_cublas PUBLIC cxx_std_17)
 target_compile_options(mdl_cublas PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>)
 set_target_properties(mdl_cublas PROPERTIES CUDA_ARCHITECTURES "${MDL_CUBLAS_ARCHITECTURES}"

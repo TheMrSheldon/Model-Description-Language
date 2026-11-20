@@ -295,7 +295,7 @@ namespace mdl::kernels {
 					return impl;
 				onlyKeys(
 						n,
-						{"pattern", "artifacts", "priority", "symbol", "abi", "adapter", "signature", "applicability",
+						{"pattern", "artifacts", "priority", "symbol", "abi", "signature", "applicability",
 						 "guarantees"},
 						"an implementation"
 				);
@@ -309,8 +309,6 @@ namespace mdl::kernels {
 				impl.symbol = requiredString(n, "symbol", where);
 				if (n["abi"])
 					impl.abi = choice(n["abi"], "abi", {"c"});
-				if (n["adapter"])
-					impl.adapter = choice(n["adapter"], "adapter", {"matmul-strided", "matmul-quantized", "attention-forward", "attention-backward"});
 				if (const auto sig = n["signature"]; sig && isMap(sig, "'signature'")) {
 					onlyKeys(sig, {"returns", "arguments", "aliasing", "outputs"}, "a signature");
 					if (const auto ret = sig["returns"]) {
@@ -329,7 +327,7 @@ namespace mdl::kernels {
 								continue;
 							onlyKeys(a, {"type", "access", "value", "align"}, "an argument");
 							Argument arg;
-							arg.type = choice(a["type"], "type", {"pointer", "int64", "int32", "float32", "float64"});
+							arg.type = choice(a["type"], "type", {"pointer", "int64", "int32", "float32", "float64", "int64[]"});
 							arg.value = requiredString(a, "value", "an argument");
 							if (arg.type == "pointer") {
 								if (a["access"])
@@ -365,8 +363,8 @@ namespace mdl::kernels {
 						}
 					}
 				}
-				if (impl.adapter.empty() && impl.arguments.empty())
-					problem(n, where + " needs 'signature.arguments' (or an 'adapter')");
+				if (impl.arguments.empty())
+					problem(n, where + " needs 'signature.arguments'");
 				if (const auto app = n["applicability"]; app && isMap(app, "'applicability'")) {
 					onlyKeys(app, {"dtype", "layout", "where"}, "'applicability'");
 					if (const auto d = app["dtype"]; d && isMap(d, "'dtype'"))
@@ -504,9 +502,10 @@ namespace mdl::kernels {
 					if (real && parsed && (*parsed)->type == expr::Type::integer)
 						continue; // an integer converts to a float argument
 					check(arg.value,
-						  arg.type == "pointer" ? expr::Type::pointer
-						  : real				? expr::Type::real
-												: expr::Type::integer,
+						  arg.type == "pointer"	  ? expr::Type::pointer
+						  : arg.type == "int64[]" ? expr::Type::shape
+						  : real				  ? expr::Type::real
+												  : expr::Type::integer,
 						  sig["arguments"][i]["value"], std::format("argument {}", i + 1));
 				}
 				for (size_t i = 0; i < impl.outputs.size(); ++i) {

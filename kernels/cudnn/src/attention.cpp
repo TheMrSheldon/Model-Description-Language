@@ -2,12 +2,14 @@
 // with cuDNN's scaled dot product attention through the cuDNN frontend (an operation graph per configuration, built
 // once and cached).
 #include "mdl_cudnn.h"
+#include "mdl_strided.hpp"
 
 #include <cuda_runtime.h>
 #include <cudnn_frontend.h>
 #include <tvm/ffi/extra/c_env_api.h>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -150,45 +152,111 @@ namespace {
 
 	void* mut(const void* p) { return const_cast<void*>(p); }
 
+	template <typename T>
+	T* at(T* p, int64_t offset, size_t size) {
+		return p == nullptr ? nullptr : reinterpret_cast<T*>(reinterpret_cast<std::uintptr_t>(p) + offset * size);
+	}
+
+	/** @brief A view with @p shape and @p strides (pointers into the caller's arrays). */
+	mdl::kernels::View view(int64_t rank, const int64_t* shape, const int64_t* strides) { return {rank, shape, strides}; }
+
+	/** @brief The shape [..., Sq, Dv] of the result (Q's batch dimensions and rows, V's columns). */
+	std::vector<int64_t> outShape(int64_t rank, const int64_t* q_shape, const int64_t* v_shape) {
+		std::vector<int64_t> s(q_shape, q_shape + rank);
+		s.back() = v_shape[rank - 1];
+		return s;
+	}
+
+	int forward(
+			fe::DataType_t type, size_t size, void* out, float* lse, const void* Q, const void* K, const void* V,
+			int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,
+			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,
+			int32_t with_lse, float scale
+	) {
+		const auto o_shape = outShape(rank, q_shape, v_shape);
+		const int64_t Sq = q_shape[rank - 2], Skv = k_shape[rank - 2], D = q_shape[rank - 1], Dv = v_shape[rank - 1];
+		int64_t slice = 0; // (the index of the slice: lse is contiguous)
+		return mdl::kernels::forEachBatch2(
+				{view(rank, q_shape, q_strides), view(rank, k_shape, k_strides), view(rank, v_shape, v_strides),
+				 view(rank, o_shape.data(), o_strides)},
+				[&](int64_t b0, int64_t b1, const std::vector<std::vector<int64_t>>& s, const std::vector<int64_t>& o) {
+					std::unordered_map<int64_t, void*> pack{
+							{kQ, at(mut(Q), o[0], size)}, {kK, at(mut(K), o[1], size)}, {kV, at(mut(V), o[2], size)},
+							{kO, at(out, o[3], size)}
+					};
+					if (with_lse)
+						pack.emplace(kStats, lse + slice * b0 * b1 * Sq);
+					++slice;
+					Strides strides;
+					for (const auto& t : s)
+						strides.insert(strides.end(), t.begin(), t.end());
+					return run(
+							with_lse ? Kind::forwardWithStats : Kind::forward, type, {b0, b1, Sq, Skv, D, Dv}, strides,
+							scale, std::move(pack)
+					);
+				}
+		);
+	}
+
+	int backward(
+			fe::DataType_t type, size_t size, void* dq, void* dk, void* dv, const void* Q, const void* K, const void* V,
+			const void* O, const void* dO, const float* lse, int64_t rank, const int64_t* q_shape,
+			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,
+			const int64_t* v_strides, const int64_t* o_strides, const int64_t* do_strides, const int64_t* dq_strides,
+			const int64_t* dk_strides, const int64_t* dv_strides, float scale
+	) {
+		const auto o_shape = outShape(rank, q_shape, v_shape);
+		const int64_t Sq = q_shape[rank - 2], Skv = k_shape[rank - 2], D = q_shape[rank - 1], Dv = v_shape[rank - 1];
+		int64_t slice = 0;
+		return mdl::kernels::forEachBatch2(
+				{view(rank, q_shape, q_strides), view(rank, k_shape, k_strides), view(rank, v_shape, v_strides),
+				 view(rank, o_shape.data(), o_strides), view(rank, o_shape.data(), do_strides),
+				 view(rank, q_shape, dq_strides), view(rank, k_shape, dk_strides), view(rank, v_shape, dv_strides)},
+				[&](int64_t b0, int64_t b1, const std::vector<std::vector<int64_t>>& s, const std::vector<int64_t>& o) {
+					Strides strides;
+					for (const auto& t : s)
+						strides.insert(strides.end(), t.begin(), t.end());
+					const float* stats = lse + slice * b0 * b1 * Sq;
+					++slice;
+					return run(
+							Kind::backward, type, {b0, b1, Sq, Skv, D, Dv}, strides, scale,
+							{{kQ, at(mut(Q), o[0], size)},
+							 {kK, at(mut(K), o[1], size)},
+							 {kV, at(mut(V), o[2], size)},
+							 {kO, at(mut(O), o[3], size)},
+							 {kdO, at(mut(dO), o[4], size)},
+							 {kStats, mut(stats)},
+							 {kdQ, at(dq, o[5], size)},
+							 {kdK, at(dk, o[6], size)},
+							 {kdV, at(dv, o[7], size)}}
+					);
+				}
+		);
+	}
+
 } // namespace
 
 #define MDL_ATTENTION_DEFINE(suffix, type, cudnnType)                                                                  \
 	extern "C" int mdl_attention_fwd_##suffix(                                                                         \
-			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t b0, int64_t b1, int64_t Sq,    \
-			int64_t Skv, int64_t D, int64_t Dv, MDL_ATTENTION_STRIDES(q), MDL_ATTENTION_STRIDES(k),                    \
-			MDL_ATTENTION_STRIDES(v), MDL_ATTENTION_STRIDES(o), int32_t with_lse, float scale                          \
+			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t rank, const int64_t* q_shape,  \
+			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,        \
+			const int64_t* v_strides, const int64_t* o_strides, int32_t with_lse, float scale                          \
 	) {                                                                                                                \
-		std::unordered_map<int64_t, void*> pack{{kQ, mut(Q)}, {kK, mut(K)}, {kV, mut(V)}, {kO, out}};                  \
-		if (with_lse)                                                                                                  \
-			pack.emplace(kStats, lse);                                                                                 \
-		return run(                                                                                                    \
-				with_lse ? Kind::forwardWithStats : Kind::forward, cudnnType, {b0, b1, Sq, Skv, D, Dv},                \
-				{q_s0, q_s1, q_sS, q_sD, k_s0, k_s1, k_sS, k_sD, v_s0, v_s1, v_sS, v_sD, o_s0, o_s1, o_sS, o_sD},      \
-				scale, std::move(pack)                                                                                 \
+		return forward(                                                                                                \
+				cudnnType, sizeof(type), out, lse, Q, K, V, rank, q_shape, q_strides, k_shape, k_strides, v_shape,     \
+				v_strides, o_strides, with_lse, scale                                                                  \
 		);                                                                                                             \
 	}                                                                                                                  \
 	extern "C" int mdl_attention_bwd_##suffix(                                                                         \
 			type* dq, type* dk, type* dv, const type* Q, const type* K, const type* V, const type* O, const type* dO,  \
-			const float* lse, int64_t b0, int64_t b1, int64_t Sq, int64_t Skv, int64_t D, int64_t Dv,                  \
-			MDL_ATTENTION_STRIDES(q), MDL_ATTENTION_STRIDES(k), MDL_ATTENTION_STRIDES(v), MDL_ATTENTION_STRIDES(o),    \
-			MDL_ATTENTION_STRIDES(do), MDL_ATTENTION_STRIDES(dq), MDL_ATTENTION_STRIDES(dk),                           \
-			MDL_ATTENTION_STRIDES(dv), float scale                                                                     \
+			const float* lse, int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,  \
+			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,      \
+			const int64_t* do_strides, const int64_t* dq_strides, const int64_t* dk_strides,                           \
+			const int64_t* dv_strides, float scale                                                                     \
 	) {                                                                                                                \
-		return run(                                                                                                    \
-				Kind::backward, cudnnType, {b0, b1, Sq, Skv, D, Dv},                                                   \
-				{q_s0,	q_s1,  q_sS,  q_sD,	 k_s0,	k_s1,  k_sS,  k_sD,	 v_s0,	v_s1,  v_sS,  v_sD,	 o_s0,	o_s1,  o_sS,   \
-				 o_sD,	do_s0, do_s1, do_sS, do_sD, dq_s0, dq_s1, dq_sS, dq_sD, dk_s0, dk_s1, dk_sS, dk_sD, dv_s0, dv_s1, \
-				 dv_sS, dv_sD},                                                                                        \
-				scale,                                                                                                 \
-				{{kQ, mut(Q)},                                                                                         \
-				 {kK, mut(K)},                                                                                         \
-				 {kV, mut(V)},                                                                                         \
-				 {kO, mut(O)},                                                                                         \
-				 {kdO, mut(dO)},                                                                                       \
-				 {kStats, mut(lse)},                                                                                   \
-				 {kdQ, dq},                                                                                            \
-				 {kdK, dk},                                                                                            \
-				 {kdV, dv}}                                                                                            \
+		return backward(                                                                                               \
+				cudnnType, sizeof(type), dq, dk, dv, Q, K, V, O, dO, lse, rank, q_shape, q_strides, k_shape,           \
+				k_strides, v_shape, v_strides, o_strides, do_strides, dq_strides, dk_strides, dv_strides, scale        \
 		);                                                                                                             \
 	}
 MDL_ATTENTION_DEFINE(bf16, uint16_t, fe::DataType_t::BFLOAT16)

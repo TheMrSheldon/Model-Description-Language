@@ -6,6 +6,7 @@
  * and reused afterwards. Lookups take a shared lock; only the creation of a new primitive takes an exclusive one.
  */
 #include <mdl_onednn.h>
+#include <mdl_strided.hpp>
 
 #include <oneapi/dnnl/dnnl.hpp>
 
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <stdexcept>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -573,52 +575,87 @@ namespace {
 
 // ── C ABI ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+namespace {
+	/** @brief The product of one Gemm (see mdl_strided.hpp) at the offsets of a slice. */
+	void gemm(
+			dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
+			int32_t activation, float alpha
+	) {
+		// A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not with a
+		// bias along N, or a broadcast B, which would become the left operand).
+		const bool broadcastB = (g.b0 > 1 && g.b_s0 == 0) || (g.b1 > 1 && g.b_s1 == 0);
+		if (g.c_sM == 1 && g.c_sN != 1 && bias == nullptr && !broadcastB) {
+			const int64_t aM = g.a_sM, aK = g.a_sK, bK = g.b_sK, bN = g.b_sN;
+			std::swap(A, B), std::swap(g.M, g.N), std::swap(g.a_s0, g.b_s0), std::swap(g.a_s1, g.b_s1);
+			g.a_sM = bN, g.a_sK = bK, g.b_sK = aK, g.b_sN = aM;
+			std::swap(g.c_sM, g.c_sN);
+		}
+		// Batch dimensions of size 1 are left out (oneDNN's brgemm computes wrong results for some strided layouts with
+		// them); B's broadcast batch dimensions (stride 0) have size 1 for oneDNN.
+		View a{{}, {}}, b{{}, {}}, d{{}, {}};
+		const int64_t sizes[2] = {g.b0, g.b1}, as[2] = {g.a_s0, g.a_s1}, bs[2] = {g.b_s0, g.b_s1},
+					  ds[2] = {g.c_s0, g.c_s1};
+		for (int i = 0; i < 2; ++i) {
+			if (sizes[i] == 1)
+				continue;
+			a.dims.push_back(sizes[i]), a.strides.push_back(as[i]);
+			b.dims.push_back(bs[i] == 0 ? 1 : sizes[i]), b.strides.push_back(bs[i]);
+			d.dims.push_back(sizes[i]), d.strides.push_back(ds[i]);
+		}
+		a.dims.insert(a.dims.end(), {g.M, g.K}), a.strides.insert(a.strides.end(), {g.a_sM, g.a_sK});
+		b.dims.insert(b.dims.end(), {g.K, g.N}), b.strides.insert(b.strides.end(), {g.b_sK, g.b_sN});
+		d.dims.insert(d.dims.end(), {g.M, g.N}), d.strides.insert(d.strides.end(), {g.c_sM, g.c_sN});
+		matmul(t, dst, A, B, bias, a, b, d, addend, activation, alpha);
+	}
+
+	size_t elementSize(dt t) { return t == dt::f32 ? 4 : 2; }
+	const char* at(const void* p, int64_t offset, dt t) {
+		return p == nullptr ? nullptr : static_cast<const char*>(p) + offset * static_cast<int64_t>(elementSize(t));
+	}
+} // namespace
+
 #define MDL_MATMUL(suffix, type, dtype)                                                                                \
 	extern "C" int mdl_matmul_##suffix(                                                                                \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,       \
-			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,     \
-			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
-			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
-	) {                                                                                                                \
-		return guarded([&] {                                                                                           \
-			/* A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not  \
-			   with a bias along N, or a broadcast B, which would become the left operand). */  \
-			const bool broadcastB = (b0 > 1 && b_s0 == 0) || (b1 > 1 && b_s1 == 0);                                    \
-			if (d_sM == 1 && d_sN != 1 && !has_bias && !broadcastB) {                                                  \
-				const int64_t aM = a_sM, aK = a_sK, bK = b_sK, bN = b_sN;                                              \
-				std::swap(A, B), std::swap(M, N), std::swap(a_s0, b_s0), std::swap(a_s1, b_s1);                        \
-				a_sM = bN, a_sK = bK, b_sK = aK, b_sN = aM;                                                            \
-				std::swap(d_sM, d_sN);                                                                                 \
-			}                                                                                                          \
-			/* Batch dimensions of size 1 are left out (oneDNN's brgemm computes wrong results for some strided   \
-			   layouts with them); B's broadcast batch dimensions (stride 0) have size 1 for oneDNN. */    \
-			View a{{}, {}}, b{{}, {}}, d{{}, {}};                                                                      \
-			const int64_t sizes[2] = {b0, b1}, as[2] = {a_s0, a_s1}, bs[2] = {b_s0, b_s1}, ds[2] = {d_s0, d_s1};       \
-			for (int i = 0; i < 2; ++i) {                                                                              \
-				if (sizes[i] == 1)                                                                                     \
-					continue;                                                                                          \
-				a.dims.push_back(sizes[i]), a.strides.push_back(as[i]);                                                \
-				b.dims.push_back(bs[i] == 0 ? 1 : sizes[i]), b.strides.push_back(bs[i]);                               \
-				d.dims.push_back(sizes[i]), d.strides.push_back(ds[i]);                                                \
-			}                                                                                                          \
-			a.dims.insert(a.dims.end(), {M, K}), a.strides.insert(a.strides.end(), {a_sM, a_sK});                      \
-			b.dims.insert(b.dims.end(), {K, N}), b.strides.insert(b.strides.end(), {b_sK, b_sN});                      \
-			d.dims.insert(d.dims.end(), {M, N}), d.strides.insert(d.strides.end(), {d_sM, d_sN});                      \
-			matmul(dtype, dst, A, B, has_bias ? bias : nullptr, a, b, d, has_addend ? addend : nullptr, activation,    \
-				   alpha);                                                                                             \
-		});                                                                                                            \
-	}                                                                                                                  \
-	extern "C" int mdl_matmul_q_##suffix(                                                                              \
-			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,     \
-			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,        \
-			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,            \
+			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
+			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
+			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
 			int32_t activation, float alpha                                                                            \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
-			matmulQuantized(                                                                                           \
-					dtype, dst, A, q, scales, has_zeros ? zeros : nullptr, format, group, has_bias ? bias : nullptr,   \
-					M, K, N, a_sM, a_sK, d_sM, d_sN, has_addend ? addend : nullptr, activation, alpha                  \
+			const int r = mdl::kernels::forEachGemm(                                                                   \
+					{a_rank, a_shape, a_strides}, {b_rank, b_shape, b_strides}, {c_rank, c_shape, c_strides}, 2,       \
+					[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t bo, int64_t co) {                             \
+						gemm(dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), at(B, bo, dtype), bias,   \
+							 g, at(addend, co, dtype), activation, alpha);                                             \
+						return 0;                                                                                      \
+					}                                                                                                  \
 			);                                                                                                         \
+			if (r != 0)                                                                                                \
+				throw std::runtime_error("mdl_matmul: invalid views");                                                 \
+		});                                                                                                            \
+	}                                                                                                                  \
+	extern "C" int mdl_matmul_q_##suffix(                                                                              \
+			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
+			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
+			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
+			int32_t activation, float alpha                                                                            \
+	) {                                                                                                                \
+		return guarded([&] {                                                                                           \
+			/* W^T [K, N] (unused strides: the batch dimensions only need its rank). */                                \
+			const int64_t K = a_shape[a_rank - 1], wShape[2] = {K, N}, wStrides[2] = {1, K};                            \
+			const int r = mdl::kernels::forEachGemm(                                                                   \
+					{a_rank, a_shape, a_strides}, {2, wShape, wStrides}, {c_rank, c_shape, c_strides}, 0,             \
+					[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t, int64_t co) {                                \
+						matmulQuantized(                                                                               \
+								dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), q, scales, zeros,      \
+								format, group, bias, g.M, g.K, g.N, g.a_sM, g.a_sK, g.c_sM, g.c_sN,                    \
+								at(addend, co, dtype), activation, alpha                                               \
+						);                                                                                             \
+						return 0;                                                                                      \
+					}                                                                                                  \
+			);                                                                                                         \
+			if (r != 0)                                                                                                \
+				throw std::runtime_error("mdl_matmul_q: invalid views");                                               \
 		});                                                                                                            \
 	}                                                                                                                  \
 	extern "C" int mdl_softmax_##suffix(type* dst, const type* src, int64_t outer, int64_t axis) {                     \

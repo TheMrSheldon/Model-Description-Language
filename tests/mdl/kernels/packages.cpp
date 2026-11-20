@@ -89,7 +89,7 @@ TEST_CASE("problems of a manifest are reported with their positions", "[kernels]
 						   {16, "implementation 'i' refers to an unknown artifact 'nope'"},
 						   {20, "a pointer argument needs 'access' (read, write, readwrite)"},
 						   {21, "unknown key 'colour' in an implementation (expected: pattern, artifacts, priority, "
-								"symbol, abi, adapter, signature, applicability, guarantees)"},
+								"symbol, abi, signature, applicability, guarantees)"},
 				   });
 
 	TempDir dir{"mdl-kernels-schema"};
@@ -153,13 +153,24 @@ TEST_CASE("expressions are parsed and type-checked over the captures", "[kernels
 	CHECK(type("$x.shape[1:]") == e::Type::shape);
 	CHECK(type("$out.attr.epsilon") == e::Type::real); // (for float arguments)
 	CHECK(e::str(*e::parse("prod($x.shape[:-1])", captures).value()) == "prod($x.shape[:-1])");
+	// Strided views of operands read through permutations (e.g. of mdl.matmul), several results, other values.
+	CHECK(type("permute(strides($x.shape), $y.values)") == e::Type::shape);
+	CHECK(type("unpermute($out0.shape, $y.values)[-2:]") == e::Type::shape);
+	CHECK(type("1 in permute(strides($x.shape), $y.values)[-2:]") == e::Type::boolean);
+	CHECK(type("not $x.is_tensor or $x.shape == $out.shape") == e::Type::boolean);
+	CHECK(type("$y.value") == e::Type::integer);
+	CHECK(type("$y.real") == e::Type::real);
+	CHECK(e::str(*e::parse("permute($x.shape, $y.values)", captures).value()) == "permute($x.shape, $y.values)");
 
 	auto error = [&](const std::string& text) { return e::parse(text, captures).error(); };
 	CHECK(error("$z.shape") == "column 1: unknown capture '$z'");
 	CHECK(error("$x.attr.axis + 1") == "column 14: an operand of '+' must be an integer, not a number");
 	CHECK(error("$x.shape + 1") == "column 10: an operand of '+' must be an integer, not a shape");
 	CHECK(error("$x.dtype == 3") == "column 10: '==' compares an element type with an integer");
-	CHECK(error("$x.size") == "column 4: unknown field 'size' (shape, ndim, dtype, data, attr.<name>)");
+	CHECK(error("$x.size") ==
+		  "column 4: unknown field 'size' (shape, ndim, dtype, data, is_tensor, values, value, real, attr.<name>)");
+	CHECK(error("permute($x.shape)") == "column 17: expected ','");
+	CHECK(error("$out1x.data") == "column 1: unknown capture '$out1x'");
 	CHECK(error("prod($x.shape") == "column 14: expected ')'");
 	CHECK(error("$x.data < $y.data") == "column 9: an operand of '<' must be an integer, not a pointer");
 }

@@ -19,18 +19,18 @@ extern "C" {
 #endif
 
 /**
- * @brief Strided batched matrix multiplication `dst[i, j] = act(alpha * (A[i, j] @ B[i, j]) + bias) + addend` over two
- * batch dimensions i < b0, j < b1 (see mdl_matmul_f32 of mdl_onednn.h for the layout of the strided views).
+ * @brief Matrix multiplication `C = act(alpha * A @ B + bias) + addend` of strided views (see mdl_matmul_f32 of
+ * mdl_onednn.h: the same arguments).
  * @details Each matrix must have a unit stride in one of its two dimensions (row- or column-major; cuBLAS cannot read
  * other layouts): otherwise, the function fails.
  * @param activation 0: none, 1: GELU (erf)
  */
 #define MDL_CUBLAS_MATMUL_DECLARE(suffix, type)                                                                        \
 	int mdl_cublas_matmul_##suffix(                                                                                    \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,       \
-			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,     \
-			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
-			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
+			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
+			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
+			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
+			int32_t activation, float alpha                                                                            \
 	);
 MDL_CUBLAS_MATMUL_DECLARE(f32, float)
 MDL_CUBLAS_MATMUL_DECLARE(bf16, uint16_t)

@@ -7,7 +7,8 @@ compiler selects implementations and falls back to TVM's code generation for eve
 **Status:** the package format (`schema: 1`), the kernel directories, matching, selection, runtime guards, compiling
 with the selected implementations, the link report, and the CMake integration are implemented. The built-in oneDNN
 kernels are the package `kernels/onednn` (matrix products, also quantized; softmax; GELU and its gradient; layer
-normalization; column sums); the compiler calls no kernel directly. CUDA artifacts are not supported yet.
+normalization; column sums), for CUDA `kernels/cublas` (matrix products) and `kernels/cudnn` (fused attention and its
+gradient); the compiler calls no kernel directly and knows none of their ABIs.
 
 ## Kernel directories
 Each immediate subdirectory of a kernel directory that contains a `package.yml` is a package. Its directory must have
@@ -228,28 +229,30 @@ legalization; `mdlc --dump-dir` will write it as `<stem>.relax-match.txt`):
   cannot be decided at compile time makes the implementation ineligible for that match (`check --explain` says why).
 - **Priority:** among overlapping candidates, the higher priority wins, then the larger region, then the package and
   implementation names (deterministic).
-- **Adapters:** argument lists that are impractical to write as expressions use a named adapter of the compiler
-  instead of `arguments`. Whether the adapter applies is a constraint of its own (`check --explain` says why not):
-  - `matmul-strided`: `mdl_matmul_<type>`'s arguments (`kernels/onednn/include/mdl_onednn.h`) for `mdl.matmul` and
-    `relax.matmul`: the permutations of the operands and the result become strides (at most two batch dimensions after
-    merging), with bias, scale, activation, and addend;
-  - `matmul-quantized`: `mdl_matmul_q_<type>`'s arguments for an `mdl.matmul` with quantized weights (a linear layer;
-    other layouts use TVM's code);
-  - `attention-forward`: `mdl_attention_fwd_<type>`'s arguments (`kernels/cudnn/include/mdl_cudnn.h`) for
-    `mdl.attention` (attention `softmax(scale * Q @ K^T) @ V`, formed from the model's operations by the attention
-    pass, and the row statistics for its gradient; a tuple of two results); the permutations of Q, K, V and the result
-    become strides of two batch dimensions, sequence, and head dimension (e.g. [batch, seq, heads, dim] in place);
-  - `attention-backward`: `mdl_attention_bwd_<type>`'s arguments for `mdl.attention_grad` (the gradients w.r.t. Q, K,
-    and V; a tuple of three results), strided likewise.
-  Calls of `mdl.attention` and `mdl.attention_grad` that no implementation covers become their unfused operations
-  (`mdl.matmul`, softmax), which are matched in a second round.
+- **Operators with several results** (e.g. `mdl.attention`: the output and its row statistics) have `$out0`,
+  `$out1`, ... instead of `$out`.
+- **Strided views.** Kernels take tensors as views (rank, shape, strides) in the logical layout of the operation, so
+  the backend's operators with permutations (e.g. `mdl.matmul`, `mdl.attention`) are read and written in place:
+  `permute($a.shape, $perm_a.values)` and `permute(strides($a.shape), $perm_a.values)` give the logical shape and
+  strides of an operand read through the permutation `perm_a`, `unpermute(strides($out.shape), $perm_out.values)` the
+  strides of a result written through one. The kernels of this project (`kernels/*/include`) take such views and
+  merge their dimensions where the layout allows it (`kernels/common/include/mdl_strided.hpp`).
+- An input that the kernel does not take is not mentioned in `arguments` (e.g. the attention's probabilities for its
+  fused gradient): the call no longer depends on it, so it is not computed, or not saved for a backward pass (see
+  Rounds of selection).
 
 ### Expressions
 Values and conditions are written in one small typed language:
 - types: `int64`, `bool`, `dtype`, `shape` (a list of `int64`);
-- accessors: `$x.shape`, `$x.shape[i]` (negative from the end), `$x.ndim`, `$x.dtype`, `$x.attr.<name>` (a number,
-  only as the value of a `float32` or `float64` argument; `$x` must be a captured operator or `$out`), `$x.data`
-  (pointers only), and `$out` for the result;
-- operators: `+ - * // %`, comparisons, `and`, `or`, `not`, `prod(shape[a:b])`, `x in [...]`;
+- accessors of tensors: `$x.shape`, `$x.shape[i]` (negative from the end), `$x.ndim`, `$x.dtype`, `$x.data`
+  (pointers only; NULL if the capture is not a tensor, e.g. an absent bias), `$x.is_tensor`; of other values:
+  `$x.values` (a shape value, e.g. a permutation), `$x.value` (an integer), `$x.real` (a number, only as the value of a
+  `float32` or `float64` argument); of operators: `$x.attr.<name>` (a number, like `real`; `$x` must be a captured
+  operator or `$out`); and `$out` (`$out0`, `$out1`, ...) for the result(s);
+- operators: `+ - * // %`, comparisons (also of shapes), `and`, `or`, `not`, `x in [...]` (or in a shape);
+- functions: `prod(shape)`, `len(shape)`, `strides(shape)` (the row-major strides of a contiguous tensor),
+  `permute(list, perm)` (entry i is `list[perm[i]]`), `unpermute(list, perm)` (its inverse; an empty permutation is the
+  identity for both);
+- argument types: `pointer`, `int32`, `int64`, `float32`, `float64`, and `int64[]` (a shape: a pointer to its values);
 - integer overflow and division by zero are errors; a value that may not fit its argument type (e.g. `int32`) is a
   condition of its own.

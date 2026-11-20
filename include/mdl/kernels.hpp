@@ -101,7 +101,7 @@ namespace mdl::kernels {
 
 	/** @brief An argument of the C signature of an implementation. */
 	struct Argument {
-		std::string type;	///< pointer, int64, int32, float32, float64
+		std::string type;	///< pointer, int64, int32, float32, float64, int64[] (a pointer to the values of a shape)
 		std::string access; ///< pointers: read, write, readwrite
 		std::string value;	///< an expression over the match, e.g. `$x.data`, `prod($x.shape[:-1])`
 		int64_t align = 0;	///< pointers: the required alignment in bytes (0: none)
@@ -114,7 +114,6 @@ namespace mdl::kernels {
 		int64_t priority = 0;
 		std::string symbol;
 		std::string abi = "c";
-		std::string adapter; ///< a named argument adapter of the compiler (instead of `arguments`), e.g. matmul-strided
 		std::vector<Argument> arguments;
 		std::string returns = "int32";							  ///< the return type; nonzero is an error
 		std::string aliasing = "none";							  ///< or `out=<capture>` (in place)

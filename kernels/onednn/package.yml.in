@@ -50,9 +50,6 @@ patterns:
       - { capture: scales }
       - { capture: zeros }
       - { capture: quant }
-  relax-matmul:
-    op: relax.matmul
-    args: [{ capture: a }, { capture: b }]
   layer-norm-backward:   # the input's gradient of a layer norm as MDL's autodiff writes it: rsqrt(var) *
     # (g - mean(g) - xhat * mean(g * xhat)), g = dy * gamma (xhat: the normalized input, var: the variance + eps)
     op: relax.multiply
@@ -238,48 +235,85 @@ implementations:
       layout: { x: row-major }
       where: ["$x.ndim > 1", "$out.ndim == 1", "$out.shape[0] == $x.shape[-1]"]
 
-  # Matrix products: the adapters compute the strided views (see docs/dev/spec/kernel-packages.md, adapters).
+  # Matrix products of strided views: the operands in the product's logical layout (the permutations of mdl.matmul
+  # applied to their shapes and strides), so permuted operands and results are read and written in place.
   matmul-f32: &matmul
     pattern: matmul
     artifacts: [mdl-kernels]
     priority: 100
     symbol: mdl_matmul_f32
-    adapter: matmul-strided
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $a.data }
+        - { type: pointer, access: read, value: $b.data }
+        - { type: pointer, access: read, value: $bias.data }     # (NULL without a bias)
+        - { type: pointer, access: read, value: $addend.data }   # (NULL without an addend)
+        - { type: int64, value: $a.ndim }
+        - { type: "int64[]", value: "permute($a.shape, $perm_a.values)" }
+        - { type: "int64[]", value: "permute(strides($a.shape), $perm_a.values)" }
+        - { type: int64, value: $b.ndim }
+        - { type: "int64[]", value: "permute($b.shape, $perm_b.values)" }
+        - { type: "int64[]", value: "permute(strides($b.shape), $perm_b.values)" }
+        - { type: int64, value: $out.ndim }
+        - { type: "int64[]", value: "unpermute($out.shape, $perm_out.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out.shape), $perm_out.values)" }
+        - { type: int32, value: $activation.value }
+        - { type: float32, value: $alpha.real }
     applicability:
       dtype: { a: float32 }
+      where: &matmul-where
+        - "not $scales.is_tensor"   # (quantized weights: below)
+        - "not $addend.is_tensor or $addend.shape == $out.shape"
   matmul-bf16:
     <<: *matmul
     symbol: mdl_matmul_bf16
-    applicability: { dtype: { a: bfloat16 } }
+    applicability: { dtype: { a: bfloat16 }, where: *matmul-where }
   matmul-f16:
     <<: *matmul
     symbol: mdl_matmul_f16
-    applicability: { dtype: { a: float16 } }
-  relax-matmul-f32:
-    <<: *matmul
-    pattern: relax-matmul
-  relax-matmul-bf16:
-    <<: *matmul
-    pattern: relax-matmul
-    symbol: mdl_matmul_bf16
-    applicability: { dtype: { a: bfloat16 } }
-  relax-matmul-f16:
-    <<: *matmul
-    pattern: relax-matmul
-    symbol: mdl_matmul_f16
-    applicability: { dtype: { a: float16 } }
-  matmul-quantized-f32: &matmul-quantized   # quantized weights (a linear layer)
-    <<: *matmul
+    applicability: { dtype: { a: float16 }, where: *matmul-where }
+  matmul-quantized-f32: &matmul-quantized   # quantized weights W [N, K] of a linear layer (B = W^T)
+    pattern: matmul
+    artifacts: [mdl-kernels]
+    priority: 100
     symbol: mdl_matmul_q_f32
-    adapter: matmul-quantized
+    signature:
+      returns: { type: int32, error: nonzero }
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $a.data }
+        - { type: pointer, access: read, value: $b.data }        # the quantized values
+        - { type: pointer, access: read, value: $scales.data }
+        - { type: pointer, access: read, value: $zeros.data }    # (NULL for symmetric formats)
+        - { type: int32, value: "$quant.values[0]" }             # the format
+        - { type: int64, value: "$quant.values[1]" }             # the group
+        - { type: int64, value: "$scales.shape[1]" }             # N
+        - { type: pointer, access: read, value: $bias.data }
+        - { type: pointer, access: read, value: $addend.data }
+        - { type: int64, value: $a.ndim }
+        - { type: "int64[]", value: "permute($a.shape, $perm_a.values)" }
+        - { type: "int64[]", value: "permute(strides($a.shape), $perm_a.values)" }
+        - { type: int64, value: $out.ndim }
+        - { type: "int64[]", value: "unpermute($out.shape, $perm_out.values)" }
+        - { type: "int64[]", value: "unpermute(strides($out.shape), $perm_out.values)" }
+        - { type: int32, value: $activation.value }
+        - { type: float32, value: $alpha.real }
+    applicability:
+      dtype: { a: float32 }
+      where: &matmul-quantized-where
+        - "$scales.is_tensor"
+        - "$perm_b.values == [1, 0]"   # (B = W^T)
+        - "not $addend.is_tensor or $addend.shape == $out.shape"
   matmul-quantized-bf16:
     <<: *matmul-quantized
     symbol: mdl_matmul_q_bf16
-    applicability: { dtype: { a: bfloat16 } }
+    applicability: { dtype: { a: bfloat16 }, where: *matmul-quantized-where }
   matmul-quantized-f16:
     <<: *matmul-quantized
     symbol: mdl_matmul_q_f16
-    applicability: { dtype: { a: float16 } }
+    applicability: { dtype: { a: float16 }, where: *matmul-quantized-where }
 
   layer-norm-backward-f32: &layer-norm-backward
     pattern: layer-norm-backward

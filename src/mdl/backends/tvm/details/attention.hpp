@@ -16,7 +16,6 @@
 #include <tvm/ir/transform.h>
 #include <tvm/relax/expr.h>
 
-#include <expected>
 #include <string>
 
 namespace mdl::backend::tvm {
@@ -53,17 +52,5 @@ namespace mdl::backend::tvm {
 
 	/** @brief Whether @p mod calls an attention operator. */
 	bool hasAttention(const ::tvm::IRModule& mod);
-
-	/**
-	 * @brief The adapter `attention-forward` (mdl_attention_fwd_<type>, kernels/cudnn/include/mdl_cudnn.h) for a call
-	 * of mdl.attention, or why the kernel does not cover it.
-	 */
-	std::expected<ExternPlan, std::string> attentionForwardAdapter(const ::tvm::Call& call);
-
-	/**
-	 * @brief The adapter `attention-backward` (mdl_attention_bwd_<type>) for a call of mdl.attention_grad, or why the
-	 * kernel does not cover it.
-	 */
-	std::expected<ExternPlan, std::string> attentionBackwardAdapter(const ::tvm::Call& call);
 
 } // namespace mdl::backend::tvm

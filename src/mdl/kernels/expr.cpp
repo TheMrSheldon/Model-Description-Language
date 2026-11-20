@@ -178,8 +178,8 @@ namespace mdl::kernels::expr {
 				const auto& at = peek();
 				if (acceptName("in")) {
 					auto list = postfix();
-					if (list->kind != Node::Kind::list)
-						fail(at, "'in' needs a list, e.g. [float32, bfloat16]");
+					if (list->type != Type::shape && list->kind != Node::Kind::list)
+						fail(at, "'in' needs a list, e.g. [float32, bfloat16], or a shape");
 					const Type element = list->type == Type::shape ? Type::integer : Type::dtype;
 					require(lhs, element, at, "the left operand of 'in'");
 					return make({.kind = Node::Kind::in, .type = Type::boolean, .args = {lhs, list}});
@@ -296,12 +296,23 @@ namespace mdl::kernels::expr {
 					next();
 					if (std::ranges::find(kDtypes, t.text) != kDtypes.end())
 						return make({.kind = Node::Kind::dtypeName, .type = Type::dtype, .name = t.text});
-					if (t.text == "prod" || t.text == "len") {
+					if (t.text == "prod" || t.text == "len" || t.text == "strides") {
 						expect("(");
 						auto arg = orExpr();
 						expect(")");
 						require(arg, Type::shape, t, std::format("the argument of {}", t.text));
-						return make({.kind = Node::Kind::call, .type = Type::integer, .name = t.text, .args = {arg}});
+						const Type type = t.text == "strides" ? Type::shape : Type::integer;
+						return make({.kind = Node::Kind::call, .type = type, .name = t.text, .args = {arg}});
+					}
+					if (t.text == "permute" || t.text == "unpermute") { // (list, permutation)
+						expect("(");
+						auto list = orExpr();
+						expect(",");
+						auto perm = orExpr();
+						expect(")");
+						require(list, Type::shape, t, std::format("the first argument of {}", t.text));
+						require(perm, Type::shape, t, std::format("the permutation of {}", t.text));
+						return make({.kind = Node::Kind::call, .type = Type::shape, .name = t.text, .args = {list, perm}});
 					}
 					fail(t, std::format("unknown name '{}' (captures are written $name)", t.text));
 				}
@@ -335,25 +346,38 @@ namespace mdl::kernels::expr {
 				return make(std::move(node));
 			}
 
+			/** @brief `out`, or `out0`, `out1`, ... (the results of an operator with several). */
+			static bool isOutput(const std::string& name) {
+				return name == "out" || (name.size() > 3 && name.starts_with("out") &&
+										 std::all_of(name.begin() + 3, name.end(), [](char c) {
+											 return std::isdigit(static_cast<unsigned char>(c));
+										 }));
+			}
+
 			NodePtr access() {
 				const auto& t = next();
-				if (t.text != "out" && std::ranges::find(captures, t.text) == captures.end())
+				if (!isOutput(t.text) && std::ranges::find(captures, t.text) == captures.end())
 					fail(t, std::format("unknown capture '${}'", t.text));
 				Node node{.kind = Node::Kind::access, .type = Type::integer, .name = t.text};
+				constexpr const char* kFields = "shape, ndim, dtype, data, is_tensor, values, value, real, attr.<name>";
 				if (!accept("."))
-					fail(peek(), std::format("'${}' needs a field: shape, ndim, dtype, data, attr.<name>", t.text));
+					fail(peek(), std::format("'${}' needs a field: {}", t.text, kFields));
 				const auto& field = next();
 				if (field.kind != Token::Kind::name)
-					fail(field, "expected a field: shape, ndim, dtype, data, attr.<name>");
+					fail(field, std::format("expected a field: {}", kFields));
 				node.field = field.text;
-				if (field.text == "shape")
+				if (field.text == "shape" || field.text == "values")
 					node.type = Type::shape;
-				else if (field.text == "ndim")
+				else if (field.text == "ndim" || field.text == "value")
 					node.type = Type::integer;
 				else if (field.text == "dtype")
 					node.type = Type::dtype;
 				else if (field.text == "data")
 					node.type = Type::pointer;
+				else if (field.text == "is_tensor")
+					node.type = Type::boolean;
+				else if (field.text == "real")
+					node.type = Type::real;
 				else if (field.text == "attr") {
 					expect(".");
 					const auto& name = next();
@@ -362,7 +386,7 @@ namespace mdl::kernels::expr {
 					node.field = "attr." + name.text;
 					node.type = Type::real; // (for float arguments)
 				} else
-					fail(field, std::format("unknown field '{}' (shape, ndim, dtype, data, attr.<name>)", field.text));
+					fail(field, std::format("unknown field '{}' ({})", field.text, kFields));
 				return make(std::move(node));
 			}
 		};
@@ -401,8 +425,12 @@ namespace mdl::kernels::expr {
 		case Node::Kind::slice:
 			return str(*node.args[0]) + "[" + (node.hasFrom ? std::to_string(node.from) : "") + ":" +
 				   (node.hasTo ? std::to_string(node.to) : "") + "]";
-		case Node::Kind::call:
-			return node.name + "(" + str(*node.args[0]) + ")";
+		case Node::Kind::call: {
+			std::string s = node.name + "(";
+			for (size_t i = 0; i < node.args.size(); ++i)
+				s += (i > 0 ? ", " : "") + str(*node.args[i]);
+			return s + ")";
+		}
 		}
 		return "";
 	}

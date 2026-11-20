@@ -361,61 +361,6 @@ namespace mdl::backend::tvm {
 			);
 		}
 
-		auto i64(const PrimExpr& e) { return ExternPlan::scalar(::tvm::prim::cast(::tvm::PrimType::Int(64), e)); }
-
-		/**
-		 * @brief The dimensions of attention for a strided kernel: two batch dimensions (an outer one of size 1 for a
-		 * single one) and Sq, Skv, D, Dv, or why there are none.
-		 */
-		struct Dims {
-			std::vector<PrimExpr> batch; ///< [b0, b1]
-			PrimExpr Sq, Skv, D, Dv;
-			size_t rank;
-		};
-
-		std::expected<Dims, std::string> dimsOf(const AttentionArgs& a) {
-			const auto lq = a.q.shape(), lk = a.k.shape(), lv = a.v.shape();
-			const size_t r = lq.size();
-			if ((r != 3 && r != 4) || lk.size() != r || lv.size() != r)
-				return std::unexpected("Q, K, and V are not [batch..., seq, dim] with one or two batch dimensions");
-			::tvm::sym::Analyzer analyzer;
-			for (size_t i = 0; i + 2 < r; ++i)
-				if (!analyzer->CanProveEqual(lq[i], lk[i]) || !analyzer->CanProveEqual(lq[i], lv[i]))
-					return std::unexpected("the batch dimensions of Q, K, and V differ (broadcasts are not supported)");
-			if (!analyzer->CanProveEqual(lk[r - 1], lq[r - 1]) || !analyzer->CanProveEqual(lv[r - 2], lk[r - 2]))
-				return std::unexpected("the dimensions of Q, K, and V do not match");
-			const auto* ti = tensorInfo(a.q.x);
-			for (const Operand* x : {&a.k, &a.v})
-				if (tensorInfo(x->x)->dtype.value() != ti->dtype.value())
-					return std::unexpected("Q, K, and V have different element types");
-			Dims d{.batch = {}, .Sq = lq[r - 2], .Skv = lk[r - 2], .D = lq[r - 1], .Dv = lv[r - 1], .rank = r};
-			if (r == 3)
-				d.batch.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), 1));
-			for (size_t i = 0; i + 2 < r; ++i)
-				d.batch.push_back(lq[i]);
-			return d;
-		}
-
-		/** @brief The strides [b0, b1, seq, dim] of a tensor with logical strides @p s (rank 3 or 4). */
-		void addStrides(std::vector<ExternPlan::Arg>& args, const Array<PrimExpr>& s, const Dims& d) {
-			const size_t r = d.rank;
-			if (r == 3)
-				args.push_back(i64(s[0] * d.batch[1])); // (the outer dimension of size 1)
-			for (size_t i = 0; i < r; ++i)
-				args.push_back(i64(s[i]));
-		}
-
-		/** @brief The logical strides of a result written as permute(X, perm) (contiguous). */
-		Array<PrimExpr> resultStrides(const Array<PrimExpr>& logical, const Perm& perm) {
-			const auto stored = permuted(logical, perm);
-			const auto rs = contiguousStrides(stored);
-			if (perm.empty())
-				return rs;
-			std::vector<PrimExpr> s(logical.size());
-			for (size_t p = 0; p < perm.size(); ++p)
-				s[static_cast<size_t>(perm[p])] = rs[p];
-			return Array<PrimExpr>(s.begin(), s.end());
-		}
 	} // namespace
 
 	// ── operators ─────────────────────────────────────────────────────────────
@@ -499,66 +444,6 @@ namespace mdl::backend::tvm {
 					found |= isAttention(e.as<::tvm::CallNode>());
 				});
 		return found;
-	}
-
-	// ── adapters ──────────────────────────────────────────────────────────────
-
-	std::expected<ExternPlan, std::string> attentionForwardAdapter(const Call& call) {
-		if (!call->op.same_as(attentionOp()))
-			return std::unexpected("not mdl.attention");
-		const AttentionArgs a{call};
-		auto dims = dimsOf(a);
-		if (!dims)
-			return std::unexpected(dims.error());
-		const auto& d = *dims;
-		ExternPlan plan{
-				.inputs = {a.q.x, a.k.x, a.v.x},
-				.outShape = permuted(a.outShape(), a.outPerms[0]),
-				.outDtype = tensorInfo(a.q.x)->dtype.value()
-		};
-		auto qs = a.q.shape();
-		plan.moreOutputs.emplace_back(Array<PrimExpr>(qs.begin(), qs.end() - 1), ::tvm::PrimType::Float(32));
-		std::vector<ExternPlan::Arg> args{ExternPlan::output(0), ExternPlan::output(1), plan.input(0), plan.input(1), plan.input(2)};
-		for (const auto& e : {d.batch[0], d.batch[1], d.Sq, d.Skv, d.D, d.Dv})
-			args.push_back(i64(e));
-		addStrides(args, a.q.strides(), d);
-		addStrides(args, a.k.strides(), d);
-		addStrides(args, a.v.strides(), d);
-		addStrides(args, resultStrides(a.outShape(), a.outPerms[0]), d);
-		args.push_back(ExternPlan::scalar(::tvm::IntImm(::tvm::PrimType::Int(32), a.withLse ? 1 : 0)));
-		args.push_back(ExternPlan::scalar(::tvm::FloatImm(::tvm::PrimType::Float(32), a.scale)));
-		plan.args = std::move(args);
-		return plan;
-	}
-
-	std::expected<ExternPlan, std::string> attentionBackwardAdapter(const Call& call) {
-		if (!call->op.same_as(attentionGradOp()))
-			return std::unexpected("not mdl.attention_grad");
-		const AttentionArgs a{call};
-		auto dims = dimsOf(a);
-		if (!dims)
-			return std::unexpected(dims.error());
-		const auto& d = *dims;
-		for (const Operand* x : {&a.o, &a.dy})
-			if (tensorInfo(x->x)->dtype.value() != tensorInfo(a.q.x)->dtype.value())
-				return std::unexpected("the result or its cotangent has another element type than Q");
-		const auto dtype = tensorInfo(a.q.x)->dtype.value();
-		ExternPlan plan{.inputs = {a.q.x, a.k.x, a.v.x, a.o.x, a.dy.x, a.lse}, .outShape = permuted(a.q.shape(), a.outPerms[0]), .outDtype = dtype};
-		plan.moreOutputs.emplace_back(permuted(a.k.shape(), a.outPerms[1]), dtype);
-		plan.moreOutputs.emplace_back(permuted(a.v.shape(), a.outPerms[2]), dtype);
-		std::vector<ExternPlan::Arg> args{ExternPlan::output(0), ExternPlan::output(1), ExternPlan::output(2)};
-		for (size_t i = 0; i < 6; ++i)
-			args.push_back(plan.input(i));
-		for (const auto& e : {d.batch[0], d.batch[1], d.Sq, d.Skv, d.D, d.Dv})
-			args.push_back(i64(e));
-		for (const Operand* x : {&a.q, &a.k, &a.v, &a.o, &a.dy})
-			addStrides(args, x->strides(), d);
-		addStrides(args, resultStrides(a.q.shape(), a.outPerms[0]), d);
-		addStrides(args, resultStrides(a.k.shape(), a.outPerms[1]), d);
-		addStrides(args, resultStrides(a.v.shape(), a.outPerms[2]), d);
-		args.push_back(ExternPlan::scalar(::tvm::FloatImm(::tvm::PrimType::Float(32), a.scale)));
-		plan.args = std::move(args);
-		return plan;
 	}
 
 } // namespace mdl::backend::tvm
