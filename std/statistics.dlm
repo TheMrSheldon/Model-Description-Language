@@ -37,7 +37,8 @@ float[...] mean(x: float[..., N]) => __builtin_mean(x);
  * @ingroup Statistics
  * \todo `dof` is not yet forwarded (default values are not yet supported).
  */
-public float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
+public template<N: uint>
+float[...] var(x: float[..., N], dof: uint) => __builtin_var(x, dof);
 
 /**
  * @brief Sum of all elements (a scalar), e.g. for objectives: the sum of the flattened tensor.

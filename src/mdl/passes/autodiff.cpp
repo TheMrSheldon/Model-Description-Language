@@ -115,6 +115,61 @@ namespace mdl::autodiff {
 			}
 		};
 
+		/**
+		 * @brief The template arguments of a call of @p func with @p arguments, as a parsed call infers them (see the
+		 * parser's inferTemplateValues): a template parameter that is a dimension of a parameter's type (e.g. N in
+		 * `x: float[..., N]`) takes the argument's size there (dimensions before `...` from the front, those after it
+		 * from the back). Empty unless every template parameter is determined by a constant or compile-time size (a
+		 * runtime size, e.g. a sequence length, leaves the parameters unbound, as for a parsed call).
+		 */
+		std::vector<Computegraph::NodeRef> templateArguments(
+				Builder& b, Computegraph& graph, const FunctionDecl& func, const std::vector<Computegraph::NodeRef>& arguments
+		) {
+			std::vector<const Node*> values(func.templateParameters.size(), nullptr);
+			auto index = [&](const TensorType::Shape::value_type& dim) -> std::optional<size_t> {
+				const auto* node = std::get_if<const Node*>(&dim);
+				const auto* hp = node ? std::get_if<HyperparameterNode>(*node) : nullptr;
+				for (size_t i = 0; i < func.templateParameters.size(); ++i)
+					if (hp == &func.templateParameters[i].second.get())
+						return i;
+				return std::nullopt;
+			};
+			auto sizeNode = [&](const shapes::Dim& d) -> const Node* {
+				if (d.isConstant())
+					return &graph.addConstNode(Atomic{static_cast<int>(d.factor)});
+				return d.known && !d.group && d.symbols.empty() && d.factor == 1 ? d.node : nullptr;
+			};
+			for (size_t i = 0; i < func.parameters.size() && i < arguments.size(); ++i) {
+				const auto* p = std::get_if<TensorType>(&func.parameters[i].second.get().type);
+				std::optional<shapes::Shape> a;
+				if (const shapes::Shape* exact = b.shapeOf(arguments[i].get()))
+					a = *exact;
+				else
+					a = shapes::shapeOfType(getDataType(arguments[i].get()));
+				if (p == nullptr || !a)
+					continue;
+				auto bind = [&](const auto& pdim, const shapes::Dim& adim) {
+					if (auto t = index(pdim); t && values[*t] == nullptr)
+						values[*t] = sizeNode(adim);
+				};
+				const auto ellipsis =
+						std::ranges::find_if(p->shape, [](const auto& d) { return std::holds_alternative<Elipsis>(d); });
+				const size_t before = static_cast<size_t>(ellipsis - p->shape.begin());
+				for (size_t k = 0; k < before && k < a->size(); ++k)
+					bind(p->shape[k], (*a)[k]);
+				if (ellipsis != p->shape.end())
+					for (size_t k = 1; k + before < p->shape.size() && k <= a->size(); ++k)
+						bind(p->shape[p->shape.size() - k], (*a)[a->size() - k]);
+			}
+			std::vector<Computegraph::NodeRef> result;
+			for (const Node* v : values) {
+				if (v == nullptr)
+					return {};
+				result.push_back(std::cref(*v));
+			}
+			return result;
+		}
+
 		/** @brief The size of the last dimension of @p type as a node (for the gradient of mean), if known. */
 		const Node* lastDimSize(Computegraph& graph, const DataType& type) {
 			const auto* tensor = std::get_if<TensorType>(&type);
@@ -402,8 +457,10 @@ namespace mdl::autodiff {
 				return {};
 
 			auto results = [&] {
-				if (call.module == nullptr)
-					return graph.addInvocationNode(gradient, std::move(arguments));
+				if (call.module == nullptr) {
+					auto templateArgs = templateArguments(b, graph, gradient, arguments);
+					return graph.addInvocationNode(gradient, std::move(arguments), std::move(templateArgs));
+				}
 				BoundModuleType bound{.definition = *call.module, .hyperparamValues = call.hyperparameters};
 				return graph.addModuleInvocationNode(bound, call.scope, call.path, gradient, std::move(arguments));
 			}();

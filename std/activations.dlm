@@ -18,7 +18,8 @@ from .statistics import *;
  * @param x the input tensor.
  * @return The softmax of \p x .
  */
-public float[...] softmax(x: float[...]) {
+public template<N: uint>
+float[..., N] softmax(x: float[..., N]) {
     auto power = exp(x - max(x)[... -> ... 1]);
     return power / sum(power)[... -> ... 1];
 }
@@ -27,7 +28,8 @@ public float[...] softmax(x: float[...]) {
  * @brief Closed-form gradient of softmax (used by the gradient pass): only needs the result \f(y\f), which the
  * backward pass of attention saves anyway.
  */
-float[...] softmax_gradient(x: float[...], dy: float[...]) {
+template<N: uint>
+float[..., N] softmax_gradient(x: float[..., N], dy: float[..., N]) {
     auto y = softmax(x);  // the forward pass's node (common subexpression)
     return y * (dy - sum(dy * y)[... -> ... 1]);
 }
@@ -37,7 +39,8 @@ float[...] softmax_gradient(x: float[...], dy: float[...]) {
  * @details Adds a large negative bias at the masked elements (like an additive attention mask), so that this is an
  * ordinary softmax: backends can use their fused softmax, and the gradient pass uses softmax_gradient.
  */
-public float[...] softmax(x: masked float[...]) => softmax(x.data + (x.mask - 1) * 3.4028234e38);
+public template<N: uint>
+float[..., N] softmax(x: masked float[..., N]) => softmax(x.data + (x.mask - 1) * 3.4028234e38);
 
 /**
  * @brief Gaussian Error Linear Unit (exact, erf-based).

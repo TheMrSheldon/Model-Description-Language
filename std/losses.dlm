@@ -24,7 +24,8 @@ public float[...] one_hot_like(labels: int[...], like: float[...]) => __builtin_
  * @brief `log(sum(exp(x)))` over the last dimension, computed stably (the maximum is subtracted first).
  * @ingroup Losses
  */
-public float[...] logsumexp(x: float[...]) {
+public template<N: uint>
+float[...] logsumexp(x: float[..., N]) {
     auto m = max(x);
     return m + log(sum(exp(x - m[... -> ... 1])));
 }
