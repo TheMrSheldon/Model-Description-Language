@@ -1,6 +1,7 @@
 #include "./cuda.hpp"
 
 #include "./gpu/column_reduction.hpp"
+#include "./gpu/elementwise.hpp"
 #include "./gpu/row_reduction.hpp"
 #include "./gpu/scatter_add_rows.hpp"
 #include "./llvm.hpp"
@@ -87,7 +88,8 @@ namespace mdl::backend::tvm {
 				std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
 				std::make_shared<mdl::backend::tvm::gpu::ColumnReduction>(),
 				std::make_shared<gpu::Reduction>(), std::make_shared<gpu::GeneralReduction>(),
-				std::make_shared<gpu::Transpose>(), std::make_shared<gpu::Fallback>()
+				std::make_shared<gpu::Transpose>(), std::make_shared<mdl::backend::tvm::gpu::Elementwise>(),
+				std::make_shared<gpu::Fallback>()
 		});
 		try {
 			return runPasses(kernels, {apply}, target);
