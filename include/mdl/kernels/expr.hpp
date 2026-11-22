@@ -46,6 +46,7 @@ namespace mdl::kernels::expr {
 			 * the identity
 			 */
 			call,
+			conditional, ///< args[1] if args[0] else args[2] (only the chosen branch is evaluated if args[0] is constant)
 		};
 		Kind kind;
 		Type type;

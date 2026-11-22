@@ -138,6 +138,8 @@ def main() -> None:
     tensors["reference.pooled"] = result.pooler_output.float().contiguous()
     if args.grad:
         dy = torch.randn_like(output)
+        if mask is not None:  # (the masked function's output is zero at the padding: no cotangent there)
+            dy = dy * mask[:, :, None]
         out = model(input_ids=ids, token_type_ids=types, position_ids=positions,
                     attention_mask=None if mask is None else mask.to(torch.long)).last_hidden_state
         (out * dy).sum().backward()

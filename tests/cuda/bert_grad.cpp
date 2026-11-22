@@ -1,8 +1,10 @@
 // The gradients of BERT (examples/02_transformer, `Bert` compiled with `--grad forward` for CUDA) against Hugging Face's
 // autograd: forward (which saves the residuals in a context buffer on the GPU), then forward_backward with the
 // cotangent dy; every weight gradient is compared with the reference of export_bert_reference.py --grad, relative to
-// the largest reference value of the weight (at least 1% of the largest of all). With MDL_GRAD_FLOAT (bfloat16 or float16), the model is compiled with
-// `--float bf16|f16` (attention then uses fused kernels, e.g. cuDNN's, forward and backward).
+// the largest reference value of the weight (at least 1% of the largest of all). With MDL_GRAD_FLOAT (bfloat16 or
+// float16), the model is compiled with `--float bf16|f16` (attention then uses fused kernels, e.g. cuDNN's, forward and
+// backward). With MDL_GRAD_MASKED, the model is compiled with `--mask forward` and the reference has padded sequences
+// of different lengths (its cotangent is zero at the padding).
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -65,14 +67,22 @@ int main() {
 	constexpr float kPrevious = 0.5f;
 	std::vector<mdl::runtime::BasicTensor<Float>> gradsHost;
 	std::vector<DLTensor*> grads;
+	std::vector<size_t> gradIndices; // (into deviceTensors)
 	for (const auto& info : Model::forward_backward_outputs) {
 		std::vector<int64_t> shape(info.shape.begin(), info.shape.begin() + info.ndim);
 		auto& g = gradsHost.emplace_back(shape);
 		std::fill(g.values().begin(), g.values().end(), Float(kPrevious));
 		grads.push_back(onDevice(g));
+		gradIndices.push_back(deviceTensors.size() - 1);
 	}
 	auto ctx = Model::forward_ctx_alloc(batch, seq, device);
+#ifdef MDL_GRAD_MASKED
+	auto masks = mdl::runtime::loadSafetensorsAs<uint8_t>(path);
+	const DLTensor* mask = onDevice(masks.at("input.mask"));
+	Model::forward(ids, types, positions, mask, weights, out, ctx);
+#else
 	Model::forward(ids, types, positions, weights, out, ctx);
+#endif
 	[&]<size_t... I>(std::index_sequence<I...>) {
 		Model::forward_backward(dy, weights, grads[I]..., ctx);
 	}(std::make_index_sequence<Model::forward_backward_outputs.size()>{});
@@ -103,7 +113,7 @@ int main() {
 			continue;
 		}
 		auto& host = gradsHost[p];
-		deviceTensors[deviceTensors.size() - grads.size() + p].CopyTo(host.dl());
+		deviceTensors[gradIndices[p]].CopyTo(host.dl());
 		double maxErr = 0, maxRef = 0;
 		for (size_t i = 0; i < host.size(); ++i) {
 			maxErr = std::max(maxErr, double(std::abs(float(host.data()[i]) - kPrevious - it->second->data()[i])));

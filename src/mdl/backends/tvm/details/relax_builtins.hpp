@@ -221,12 +221,15 @@ namespace mdl::backend::tvm {
 	static inline ::tvm::relax::Expr
 	attentionResult(::tvm::relax::BlockBuilder& bb, const std::vector<::tvm::relax::Expr>& ts, int i) {
 		const double scale = attentionScale(ts[3]);
+		const auto bias = ts.size() > 4 ? std::optional<::tvm::relax::Expr>{ts[4]} : std::nullopt;
 		if (i == 2) {
 			const size_t rank = static_cast<size_t>(tensorNdim(ts[0]));
 			auto scores = emitAs(bb, makeMatmul(ts[0], ts[1], {}, swapLastTwo(rank), {}, scale), "scores");
+			if (bias)
+				scores = emitAs(bb, callRelaxOp("relax.op.add", scores, *bias), "biased");
 			return callRelaxOp("relax.op.nn.softmax", scores, -1);
 		}
-		auto call = emitAs(bb, makeAttention(ts[0], ts[1], ts[2], scale), "attention");
+		auto call = emitAs(bb, makeAttention(ts[0], ts[1], ts[2], scale, bias), "attention");
 		return ::tvm::relax::TupleGetItem(call, i);
 	}
 
@@ -562,12 +565,13 @@ namespace mdl::backend::tvm {
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 0); },
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 1); },
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr { return attentionResult(bb, ts, 2); },
-			/** ATTENTION_GRAD — a result of mdl.attention_grad (q, k, v, scale, out, lse, probs, dy, which) **/
+			/** ATTENTION_GRAD — a result of mdl.attention_grad (q, k, v, scale, out, lse, probs, dy, which[, bias]) **/
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr {
 				const auto which = scalarConstant(ts[8]);
 				if (!which || *which < 0 || *which > 2)
 					throw std::runtime_error("attention gradient: expected the operand 0, 1, or 2");
-				auto grad = makeAttentionGrad(ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]));
+				const auto bias = ts.size() > 9 ? std::optional<::tvm::relax::Expr>{ts[9]} : std::nullopt;
+				auto grad = makeAttentionGrad(ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]), bias);
 				return ::tvm::relax::TupleGetItem(emitAs(bb, grad, "attention_grad"), static_cast<int>(*which));
 			},
 	});

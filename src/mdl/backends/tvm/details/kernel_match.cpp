@@ -167,6 +167,16 @@ namespace mdl::backend::tvm {
 				}
 				case K::access:
 					return access(n);
+				case K::conditional: {
+					const auto cond = ::tvm::sym::Analyzer()->Simplify(eval(*n.args[0]).scalar);
+					const auto* imm = cond.as<::tvm::IntImmNode>();
+					if (imm != nullptr)
+						return eval(*n.args[intValue(imm) != 0 ? 1 : 2]); // (the other branch may not be computable)
+					auto a = eval(*n.args[1]), b = eval(*n.args[2]);
+					if (n.type == expr::Type::shape || n.type == expr::Type::dtype || n.type == expr::Type::pointer)
+						throw EvalError{"a condition that decides a shape, element type, or pointer must be constant"};
+					return {.type = n.type, .scalar = ::tvm::prim::Select(cond, a.scalar, b.scalar)};
+				}
 				case K::unary: {
 					auto x = eval(*n.args[0]);
 					if (n.op == "not")
@@ -680,19 +690,19 @@ namespace mdl::backend::tvm {
 							}
 							if (arg.type == "int32")
 								evaluate(
-										std::format("{} >= -2147483648 and {} <= 2147483647", arg.value, arg.value),
+										std::format("({}) >= -2147483648 and ({}) <= 2147483647", arg.value, arg.value),
 										std::format("argument {} ({}) fits int32", i + 1, arg.value)
 								);
 							else
 								evaluate(
-										std::format("{} == {}", arg.value, arg.value),
+										std::format("({}) == ({})", arg.value, arg.value),
 										std::format("argument {} ({}) can be computed", i + 1, arg.value)
 								);
 						}
 						if (!e.impl->outputs.empty()) {
 							const auto& [shape, dtype] = e.impl->outputs.front();
-							evaluate(std::format("{} == $out.shape", shape), "the result's shape is " + shape);
-							evaluate(std::format("{} == $out.dtype", dtype), "the result's element type is " + dtype);
+							evaluate(std::format("({}) == $out.shape", shape), "the result's shape is " + shape);
+							evaluate(std::format("({}) == $out.dtype", dtype), "the result's element type is " + dtype);
 						}
 
 						// Unknown shape arithmetic becomes a runtime guard (the original region is the fallback).

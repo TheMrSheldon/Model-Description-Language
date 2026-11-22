@@ -49,7 +49,7 @@ namespace mdl::kernels::expr {
 			}
 
 			NodePtr parseAll() {
-				auto node = orExpr();
+				auto node = conditional();
 				if (peek().kind != Token::Kind::end)
 					fail(peek(), std::format("unexpected '{}'", peek().text));
 				return node;
@@ -135,6 +135,22 @@ namespace mdl::kernels::expr {
 			void require(const NodePtr& n, Type type, const Token& at, std::string_view what) {
 				if (n->type != type)
 					fail(at, std::format("{} must be {}, not {}", what, str(type), str(n->type)));
+			}
+
+			/** @brief `a if cond else b` (the lowest precedence; cond a condition, a and b of the same type). */
+			NodePtr conditional() {
+				auto value = orExpr();
+				const auto& at = peek();
+				if (!acceptName("if"))
+					return value;
+				auto cond = orExpr();
+				require(cond, Type::boolean, at, "the condition of 'if'");
+				if (!acceptName("else"))
+					fail(peek(), "expected 'else'");
+				auto alternative = conditional();
+				if (alternative->type != value->type)
+					fail(at, std::format("the branches of 'if' are {} and {}", str(value->type), str(alternative->type)));
+				return make({.kind = Node::Kind::conditional, .type = value->type, .args = {cond, value, alternative}});
 			}
 
 			NodePtr orExpr() {
@@ -318,7 +334,7 @@ namespace mdl::kernels::expr {
 				}
 				case Token::Kind::symbol:
 					if (accept("(")) {
-						auto inner = orExpr();
+						auto inner = conditional();
 						expect(")");
 						return inner;
 					}
@@ -425,6 +441,8 @@ namespace mdl::kernels::expr {
 		case Node::Kind::slice:
 			return str(*node.args[0]) + "[" + (node.hasFrom ? std::to_string(node.from) : "") + ":" +
 				   (node.hasTo ? std::to_string(node.to) : "") + "]";
+		case Node::Kind::conditional:
+			return "(" + str(*node.args[1]) + " if " + str(*node.args[0]) + " else " + str(*node.args[2]) + ")";
 		case Node::Kind::call: {
 			std::string s = node.name + "(";
 			for (size_t i = 0; i < node.args.size(); ++i)

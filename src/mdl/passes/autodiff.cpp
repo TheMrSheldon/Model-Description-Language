@@ -317,13 +317,21 @@ namespace mdl::autodiff {
 			case FIDs::CAST: // the gradient in the argument's type
 				return b.castLike(g, x);
 			case FIDs::ATTENTION: { // see ATTENTION_GRAD (and passes/attention.hpp)
-				const std::vector<Computegraph::NodeRef> operands(inv.arguments.begin(), inv.arguments.begin() + 4);
+				if (arg == 4)
+					throw NoGradientRule{inv.id}; // \todo the gradient of the bias (the scores' gradient, summed)
+				std::vector<Computegraph::NodeRef> operands(inv.arguments.begin(), inv.arguments.begin() + 4);
+				const Node* bias = inv.arguments.size() > 4 ? &inv.arguments[4].get() : nullptr;
+				auto withBias = [&](std::vector<Computegraph::NodeRef> args) {
+					if (bias != nullptr)
+						args.push_back(std::cref(*bias));
+					return args;
+				};
 				std::vector<Computegraph::NodeRef> args = operands;
 				for (const Node* n :
-					 {&node, &b.op(FIDs::ATTENTION_LSE, operands), &b.op(FIDs::ATTENTION_PROBS, operands), &g,
-					  &graph.addConstNode(Atomic{static_cast<int>(arg)})})
+					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)), &b.op(FIDs::ATTENTION_PROBS, withBias(operands)),
+					  &g, &graph.addConstNode(Atomic{static_cast<int>(arg)})})
 					args.push_back(std::cref(*n));
-				return b.op(FIDs::ATTENTION_GRAD, std::move(args));
+				return b.op(FIDs::ATTENTION_GRAD, withBias(std::move(args)));
 			}
 			case FIDs::STACK: // the slice of the stacked tensor
 				return b.op(
@@ -353,7 +361,7 @@ namespace mdl::autodiff {
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
 			case FIDs::ATTENTION:
-				return arg < 3; // not the scale (a constant)
+				return arg != 3; // not the scale (a constant); the bias: an error if it needs a gradient (see rule)
 			case FIDs::ATTENTION_LSE:
 			case FIDs::ATTENTION_PROBS:
 			case FIDs::ATTENTION_GRAD:

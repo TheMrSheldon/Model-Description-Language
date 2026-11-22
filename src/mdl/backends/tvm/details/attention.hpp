@@ -16,28 +16,34 @@
 #include <tvm/ir/transform.h>
 #include <tvm/relax/expr.h>
 
+#include <optional>
 #include <string>
 
 namespace mdl::backend::tvm {
 
 	/**
-	 * @brief `mdl.attention(q, k, v, scale, perm_q, perm_k, perm_v, perm_out, with_lse)`: the tuple (out, lse) with
-	 * Q = permute(q, perm_q) [..., Sq, D], K = permute(k, perm_k) [..., Skv, D], V = permute(v, perm_v) [..., Skv, Dv],
-	 * out = permute(softmax(scale * Q @ K^T) @ V, perm_out), and lse [..., Sq] (float32) the log-sum-exp of the rows
-	 * of scale * Q @ K^T. with_lse: whether lse is used (otherwise its contents are unspecified).
+	 * @brief `mdl.attention(q, k, v, scale, perm_q, perm_k, perm_v, perm_out, with_lse, bias)`: the tuple (out, lse)
+	 * with Q = permute(q, perm_q) [..., Sq, D], K = permute(k, perm_k) [..., Skv, D], V = permute(v, perm_v)
+	 * [..., Skv, Dv], S = scale * Q @ K^T + bias (bias: of S's rank, broadcast, e.g. a mask; PrimValue(0) for none),
+	 * out = permute(softmax(S) @ V, perm_out), and lse [..., Sq] (float32) the log-sum-exp of the rows of S. with_lse:
+	 * whether lse is used (otherwise its contents are unspecified).
 	 */
-	::tvm::relax::Expr makeAttention(::tvm::relax::Expr q, ::tvm::relax::Expr k, ::tvm::relax::Expr v, double scale);
+	::tvm::relax::Expr makeAttention(
+			::tvm::relax::Expr q, ::tvm::relax::Expr k, ::tvm::relax::Expr v, double scale,
+			std::optional<::tvm::relax::Expr> bias = std::nullopt
+	);
 
 	/**
 	 * @brief `mdl.attention_grad(q, k, v, out, lse, probs, dy, scale, perm_q, perm_k, perm_v, perm_out, perm_dy,
-	 * perm_dq, perm_dk, perm_dv)`: the tuple (dq, dk, dv) of the gradients of mdl.attention for the cotangent dy of its
+	 * perm_dq, perm_dk, perm_dv, bias)`: the tuple (dq, dk, dv) of the gradients of mdl.attention for the cotangent dy of its
 	 * result (out, lse: its results; probs: softmax(scale * Q @ K^T); O = permute(out, perm_out) and dY = permute(dy,
 	 * perm_dy) like the inputs; the gradients are written as permute(dQ, perm_dq) etc.). A fused kernel reads out and
 	 * lse, the unfused operations (expandAttention) probs; the backend saves only what is read (see pruneContexts).
 	 */
 	::tvm::relax::Expr makeAttentionGrad(
 			::tvm::relax::Expr q, ::tvm::relax::Expr k, ::tvm::relax::Expr v, ::tvm::relax::Expr out,
-			::tvm::relax::Expr lse, ::tvm::relax::Expr probs, ::tvm::relax::Expr dy, double scale
+			::tvm::relax::Expr lse, ::tvm::relax::Expr probs, ::tvm::relax::Expr dy, double scale,
+			std::optional<::tvm::relax::Expr> bias = std::nullopt
 	);
 
 	/**

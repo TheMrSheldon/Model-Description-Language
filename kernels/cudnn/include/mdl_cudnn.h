@@ -17,8 +17,10 @@ extern "C" {
 #endif
 
 /**
- * @brief Fused attention `out = softmax(scale * Q @ K^T) @ V` (cuDNN's scaled dot product attention), batched over the
- * leading dimensions, and (if @p with_lse) the log-sum-exp of the rows of `scale * Q @ K^T` for the backward pass.
+ * @brief Fused attention `out = softmax(scale * Q @ K^T + bias) @ V` (cuDNN's scaled dot product attention), batched
+ * over the leading dimensions, and (if @p with_lse) the log-sum-exp of the rows of the biased scores for the backward
+ * pass. bias (or NULL) is a view of the scores' rank whose dimensions are the scores' or 1 (broadcast), e.g. a padding
+ * mask (0 at valid positions, the most negative value elsewhere).
  * @details Every tensor is a strided view (strides in elements) of rank @p rank: Q [..., Sq, D], K [..., Skv, D],
  * V [..., Skv, Dv] with their shapes, out [..., Sq, Dv] with Q's batch dimensions (its strides only), e.g. the layout
  * [batch, seq, heads, dim] of the model in place. The score matrix is never stored. The head dimension must be
@@ -28,7 +30,8 @@ extern "C" {
 	int mdl_attention_fwd_##suffix(                                                                                    \
 			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t rank, const int64_t* q_shape,  \
 			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,        \
-			const int64_t* v_strides, const int64_t* o_strides, int32_t with_lse, float scale                          \
+			const int64_t* v_strides, const int64_t* o_strides, const type* bias, const int64_t* bias_shape,           \
+			const int64_t* bias_strides, int32_t with_lse, float scale                                                 \
 	);                                                                                                                 \
 	/**                                                                                                                \
 	 * @brief The gradients dQ, dK, dV of fused attention for the cotangent dO of its result O, from its statistics lse \
@@ -39,7 +42,8 @@ extern "C" {
 			const float* lse, int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,  \
 			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,      \
 			const int64_t* do_strides, const int64_t* dq_strides, const int64_t* dk_strides,                           \
-			const int64_t* dv_strides, float scale                                                                     \
+			const int64_t* dv_strides, const type* bias, const int64_t* bias_shape, const int64_t* bias_strides,       \
+			float scale                                                                                                \
 	);
 MDL_ATTENTION_DECLARE(bf16, uint16_t)
 MDL_ATTENTION_DECLARE(f16, uint16_t)
