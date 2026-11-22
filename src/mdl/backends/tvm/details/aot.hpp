@@ -39,6 +39,11 @@ namespace mdl::backend::tvm {
 		std::vector<bool> params;	  ///< per Relax parameter: packed
 		std::vector<bool> outputs;	  ///< per returned tensor: packed
 		std::vector<bool> accumulate; ///< per returned tensor: added to the output buffer
+		/**
+		 * @brief Per Relax parameter: the index of the returned tensor whose output buffer it is (the previous value of
+		 * an accumulated output, updated in place), or -1 for an argument of the entry.
+		 */
+		std::vector<int> aliases;
 		bool context = false;		  ///< whether the function takes a context buffer (as its last argument)
 		std::string contextName;	  ///< the context buffer's name (shared by its producer and consumers)
 		/** @brief For the producer: global symbol of the size function to emit (`dims... -> bytes`); else empty. */

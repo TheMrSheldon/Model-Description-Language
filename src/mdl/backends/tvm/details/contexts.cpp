@@ -138,6 +138,8 @@ namespace mdl::backend::tvm {
 				auto& sig = packing.at(c.consumers[i]);
 				const auto positions = select(sig.params);
 				mod->Update(mod->GetGlobalVar(c.consumers[i]), withoutParams(consumers[i], positions));
+				if (sig.aliases.size() == sig.params.size())
+					erase(sig.aliases, positions);
 				erase(sig.params, positions);
 			}
 			auto& sig = packing.at(c.producer);

@@ -61,13 +61,14 @@ int main() {
 	mdl::runtime::BasicTensor<Float> outHost(reference.shape());
 	DLTensor* out = onDevice(outHost);
 
-	// The gradients (accumulated: zero-initialized).
+	// The gradients are added to the buffers: they start at kPrevious (checks the update in place).
+	constexpr float kPrevious = 0.5f;
 	std::vector<mdl::runtime::BasicTensor<Float>> gradsHost;
 	std::vector<DLTensor*> grads;
 	for (const auto& info : Model::forward_backward_outputs) {
 		std::vector<int64_t> shape(info.shape.begin(), info.shape.begin() + info.ndim);
 		auto& g = gradsHost.emplace_back(shape);
-		std::fill(g.values().begin(), g.values().end(), Float(0.0f));
+		std::fill(g.values().begin(), g.values().end(), Float(kPrevious));
 		grads.push_back(onDevice(g));
 	}
 	auto ctx = Model::forward_ctx_alloc(batch, seq, device);
@@ -105,7 +106,7 @@ int main() {
 		deviceTensors[deviceTensors.size() - grads.size() + p].CopyTo(host.dl());
 		double maxErr = 0, maxRef = 0;
 		for (size_t i = 0; i < host.size(); ++i) {
-			maxErr = std::max(maxErr, double(std::abs(float(host.data()[i]) - it->second->data()[i])));
+			maxErr = std::max(maxErr, double(std::abs(float(host.data()[i]) - kPrevious - it->second->data()[i])));
 			maxRef = std::max(maxRef, double(std::abs(it->second->data()[i])));
 		}
 		const double rel = maxErr / std::max(maxRef, 1e-2 * globalMax);

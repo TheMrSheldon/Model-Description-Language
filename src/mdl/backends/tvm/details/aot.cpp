@@ -189,8 +189,13 @@ namespace mdl::backend::tvm {
 			build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
 				if (packing != nullptr && packing->context)
 					beginContext(packing->dims);
+				std::vector<std::pair<::tvm::Var, size_t>> aliasParams; // (parameter, output)
 				for (size_t p = 0; p < func->params.size(); ++p) {
 					const auto& param = func->params[p];
+					if (packing != nullptr && p < packing->aliases.size() && packing->aliases[p] >= 0) {
+						aliasParams.emplace_back(param, static_cast<size_t>(packing->aliases[p]));
+						continue; // (bound to the output's buffer below)
+					}
 					const auto* info = tensorInfo(relax::GetType(param));
 					if (info == nullptr || !info->GetShape().defined())
 						unsupported("parameter " + std::string(param->name) + " (not a tensor of known shape)");
@@ -233,6 +238,12 @@ namespace mdl::backend::tvm {
 					}
 					if (var != nullptr)
 						outputOf.emplace(var, outputs.back());
+				}
+
+				for (const auto& [param, output] : aliasParams) {
+					if (output >= outputs.size())
+						unsupported("parameter " + std::string(param->name) + " (aliases no output)");
+					values[param.get()] = Value::tensor(outputs[output]);
 				}
 
 				if (packing != nullptr && packing->context)

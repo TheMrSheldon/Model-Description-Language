@@ -606,6 +606,21 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 	}
 	for (const auto& w : fn.weights)
 		bind(w, makeRelaxParam(w.name, mdl::getDataType(*w.node), ctx), false);
+	// An accumulated output (e.g. a gradient added to the caller's buffer) is `previous + result` in the graph, with the
+	// previous value a parameter that aliases the output's buffer (see EntrySignature::aliases): the add then fuses
+	// into the kernel that computes the result (e.g. the addend of a matrix product), which updates the buffer in place.
+	std::vector<std::optional<::tvm::Var>> previous(fn.outputs.size());
+	packing.aliases.assign(bbParams.size(), -1);
+	for (size_t i = 0; i < fn.outputs.size(); ++i) {
+		if (!fn.outputs[i].accumulate || fn.outputs[i].packed)
+			continue;
+		previous[i] = makeRelaxParam(
+				"previous" + std::to_string(i), mdl::getDataType(fn.decl->outputs[i].get()), ctx
+		);
+		bbParams.push_back(*previous[i]);
+		packing.params.push_back(false);
+		packing.aliases.push_back(static_cast<int>(i));
+	}
 
 	bb->BeginScope(bbParams);
 	bb->BeginDataflowBlock();
@@ -618,8 +633,10 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 		if (!result.as<::tvm::VarNode>())
 			result = bb->Emit(result, "out");
 		const bool packed = fn.outputs[i].packed;
+		if (previous[i])
+			result = bb->Emit(mdl::backend::tvm::callRelaxOp("relax.op.add", *previous[i], result), "accumulated");
 		packing.outputs.push_back(packed);
-		packing.accumulate.push_back(fn.outputs[i].accumulate);
+		packing.accumulate.push_back(fn.outputs[i].accumulate && !previous[i]);
 		if (packed) {
 			// Laid out by the backend: the (possibly imprecise) declared type is not part of the ABI.
 			const auto* sinfo = ::tvm::relax::GetTypeAs<::tvm::relax::TensorTypeNode>(result);

@@ -1,5 +1,5 @@
 // The gradient of std.var (tests/statistics/model.dlm, `--grad sample`) w.r.t. the weight w against central finite
-// differences of L = sum(sample(x) * dy).
+// differences of L = sum(sample(x) * dy). The gradient buffer starts non-zero: gradients are added to it.
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -23,7 +23,8 @@ int main() {
 	*weights.find("w") = w;
 	auto ctx = Model::sample_ctx_alloc(A, B);
 	Tensor y({A, B}), dw({N});
-	std::fill(dw.values().begin(), dw.values().end(), 0.0f); // (accumulated)
+	constexpr float kPrevious = 0.75f; // (gradients are added to the buffer: checks the update in place)
+	std::fill(dw.values().begin(), dw.values().end(), kPrevious);
 	Model::sample(x, weights, y, ctx);
 	Model::sample_backward(dy, weights, dw, ctx);
 
@@ -45,7 +46,7 @@ int main() {
 		const double minus = loss();
 		w.data()[i] = original;
 		const double numeric = (plus - minus) / (2 * eps);
-		maxErr = std::max(maxErr, std::abs(numeric - dw.data()[i]) / std::max(1.0, std::abs(numeric)));
+		maxErr = std::max(maxErr, std::abs(numeric - (dw.data()[i] - kPrevious)) / std::max(1.0, std::abs(numeric)));
 	}
 	std::printf("max relative error vs finite differences: %.3g\n", maxErr);
 	const bool ok = maxErr < 1e-2;
