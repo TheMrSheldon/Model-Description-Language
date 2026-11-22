@@ -41,6 +41,30 @@ namespace mdl::backend::tvm {
 		 * are reinterpretations: a bfloat16 value built from constants (e.g. a vectorized zero, `broadcast(reinterpret(
 		 * bfloat16, bits))`) becomes `reinterpret(bfloat16, <its uint16 bits>)`.
 		 */
+		/**
+		 * @brief TIR's common subexpression elimination for the kernels only: the AOT entries (host code that calls the
+		 * kernels) gain nothing from it, and the pass misplaces its variables around their let bindings (the offsets of
+		 * the workspace arena, see aot.cpp).
+		 */
+		Pass kernelSubexprElim() {
+			return ::tvm::transform::CreateModulePass(
+					[](IRModule mod, ::tvm::transform::PassContext ctx) {
+						IRModule kernels = mod;
+						kernels.CopyOnWrite();
+						for (const auto& [gv, func] : mod->functions)
+							if (const auto* f = func.as<::tvm::tirx::PrimFuncNode>(); f && f->HasNonzeroAttr(kAOTEntryAttr))
+								kernels->Remove(gv);
+						kernels = registeredPass("tirx.transform.CommonSubexprElim")(kernels);
+						IRModule result = mod; // (with its attributes, e.g. the system library prefix)
+						result.CopyOnWrite();
+						for (const auto& [gv, func] : kernels->functions)
+							result->Update(gv, func);
+						return result;
+					},
+					0, "mdl.KernelSubexprElim", {}
+			);
+		}
+
 		Pass wrapBF16Stores() {
 			namespace tirx = ::tvm::tirx;
 			using ::tvm::PrimType;
@@ -360,7 +384,7 @@ namespace mdl::backend::tvm {
 				registeredPass("tirx.transform.StmtSimplify"),
 				registeredPass("tirx.transform.RemoveNoOp"),
 				registeredPass("s_tir.transform.RewriteUnsafeSelect"),
-				registeredPass("tirx.transform.CommonSubexprElim"),
+				kernelSubexprElim(),
 				registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
 				registeredPass("tirx.transform.VerifyMemory"),
 				registeredPass("tirx.transform.AnnotateEntryFunc"),

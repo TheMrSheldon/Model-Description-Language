@@ -1,6 +1,7 @@
 #include "./aot.hpp"
 #include "./tvm_compat.hpp"
 
+#include <tvm/sym/analyzer.h>
 #include <tvm/te/operation.h>
 #include <tvm/ir/function.h>
 #include <tvm/relax/expr.h>
@@ -258,6 +259,10 @@ namespace mdl::backend::tvm {
 						 {tirx::attr::kNoAlias, true},
 						 {kAOTEntryAttr, true}}
 				);
+				{
+					auto prologue = arenaPrologue();
+					stmts.insert(stmts.begin(), prologue.begin(), prologue.end());
+				}
 				auto body = tirx::PrimFunc(
 						params,
 						stmts.empty() ? tirx::Stmt(tirx::Evaluate(IntImm(DataType::Int(32), 0)))
@@ -353,6 +358,11 @@ namespace mdl::backend::tvm {
 			std::vector<tirx::BufferVar> outputs;
 			std::vector<bool> accumulated;
 			std::vector<tirx::Stmt> stmts;
+			static constexpr int64_t kArenaAlign = 64;
+			::tvm::PrimVar arenaSize{"workspace_bytes", DataType::Int(64)};
+			tirx::BufferVar arena;									  ///< the intermediate buffers (see allocate)
+			PrimExpr arenaBytes = IntImm(DataType::Int(64), 0); ///< its size so far
+			std::vector<std::pair<::tvm::PrimVar, PrimExpr>> arenaOffsets; ///< of the buffers (in their elements)
 			std::unordered_map<const ::tvm::VarNode*, Value> values;
 			std::unordered_map<const ::tvm::VarNode*, Expr> bindingOf;
 			std::unordered_map<const ::tvm::VarNode*, tirx::BufferVar> outputOf;
@@ -552,12 +562,42 @@ namespace mdl::backend::tvm {
 				return buffer;
 			}
 
+			/**
+			 * @brief A buffer in the function's workspace arena: all intermediate buffers of a call are views at 64-byte
+			 * aligned offsets of one workspace allocation (see arenaPrologue), so that a call allocates once. (With an
+			 * allocation per buffer, TVM's workspace pool frees and allocates device memory on every call when the
+			 * sizes do not fit its pages, and every cudaFree synchronizes the device.)
+			 */
 			tirx::BufferVar allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
-				// Workspace scope: allocated with TVMBackendAllocWorkspace even if small. (Small "global" allocations
-				// become stack allocations, which are not aligned as the kernels assume.)
-				auto buffer = tirx::decl_buffer(std::move(shape), dtype, freshName(name), "global.workspace");
-				stmts.push_back(tirx::AllocBuffer(buffer));
-				return buffer;
+				const auto i64 = DataType::Int(64);
+				if (!arena.defined())
+					arena = tirx::decl_buffer({arenaSize}, DataType::UInt(8), "workspace", "global.workspace");
+				PrimExpr elements = IntImm(i64, 1);
+				for (const auto& d : shape)
+					elements = elements * ::tvm::prim::cast(i64, d);
+				const PrimExpr bytes = elements * IntImm(i64, bytesOf(dtype));
+				// (The offset as a variable bound before the function's statements: the views do not repeat the sums.)
+				::tvm::PrimVar offset{freshName(name + "_offset"), i64};
+				arenaOffsets.emplace_back(offset, ::tvm::floordiv(arenaBytes, IntImm(i64, bytesOf(dtype))));
+				arenaBytes = arenaBytes + ::tvm::floordiv(bytes + IntImm(i64, kArenaAlign - 1), IntImm(i64, kArenaAlign)) *
+												  IntImm(i64, kArenaAlign);
+				return view(arena, std::move(shape), dtype, offset);
+			}
+
+			/**
+			 * @brief The arena's size and allocation (workspace scope: TVMBackendAllocWorkspace, aligned as the kernels
+			 * assume), before the function's statements; none if it allocates nothing.
+			 */
+			std::vector<tirx::Stmt> arenaPrologue() const {
+				if (!arena.defined())
+					return {};
+				std::vector<tirx::Stmt> prologue;
+				::tvm::sym::Analyzer analyzer;
+				for (const auto& [var, value] : arenaOffsets)
+					prologue.push_back(tirx::Bind(var, analyzer->Simplify(value)));
+				prologue.push_back(tirx::Bind(arenaSize, analyzer->Simplify(arenaBytes)));
+				prologue.push_back(tirx::AllocBuffer(arena));
+				return prologue;
 			}
 
 			/** @brief The number of elements of @p buffer. */
@@ -788,7 +828,9 @@ namespace mdl::backend::tvm {
 							::tvm::prim::cast(DataType::Int(64), evaluate(call->args[1]).prim),
 							IntImm(DataType::Int(64), bytesOf(dtype))
 					);
-					values[var] = Value::tensor(view(storage.buffer, shapeArg(call->args[2]), dtype, offset));
+					values[var] = Value::tensor(
+							view(storage.buffer, shapeArg(call->args[2]), dtype, storage.buffer->elem_offset + offset)
+					);
 				} else if (call->op.same_as(reshape)) {
 					Value x = evaluate(call->args[0]);
 					if (x.kind != Value::Kind::Tensor)
