@@ -333,19 +333,23 @@ namespace mdl::backend::tvm {
 			/** LOG **/ [](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.log", ts[0]); },
 			/** TANH **/ [](auto& /*bb*/, auto ts) { return callRelaxOp("relax.op.tanh", ts[0]); },
 
-			// ── VAR = E[x²] − E[x]² ─────────────────────────────────────────────────
+			// ── VAR = sum((x − mean(x))²) / (N − dof) over the last axis (two passes: numerically stable) ──
 			/** VAR — uses sum/N instead of relax.op.mean to avoid symbolic intermediate buffer **/
 			[](auto& bb, auto ts) -> ::tvm::relax::Expr {
 				const auto& x = ts[0];
-				auto n_const = lastDimDivisor(x);
-
-				auto x2 = emitAs(bb, callRelaxOp("relax.op.multiply", x, x), "sq");
-				auto sx = emitAs(bb, reduceLastAxis("relax.op.sum", x, /*keepdims=*/false), "sum");
-				auto sx2 = emitAs(bb, reduceLastAxis("relax.op.sum", x2, /*keepdims=*/false), "sum_sq");
-				auto ex = emitAs(bb, callRelaxOp("relax.op.divide", sx, n_const), "mean");
-				auto ex2 = emitAs(bb, callRelaxOp("relax.op.divide", sx2, n_const), "mean_sq");
-				auto ex_sq = emitAs(bb, callRelaxOp("relax.op.multiply", ex, ex), "mean2");
-				return callRelaxOp("relax.op.subtract", ex2, ex_sq);
+				auto n = lastDimDivisor(x);
+				auto sx = emitAs(bb, reduceLastAxis("relax.op.sum", x, /*keepdims=*/true), "sum");
+				auto mean = emitAs(bb, callRelaxOp("relax.op.divide", sx, n), "mean");
+				auto centered = emitAs(bb, callRelaxOp("relax.op.subtract", x, mean), "centered");
+				auto squares = emitAs(bb, callRelaxOp("relax.op.multiply", centered, centered), "sq");
+				auto ss = emitAs(bb, reduceLastAxis("relax.op.sum", squares, /*keepdims=*/false), "sum_sq");
+				// (The degrees of freedom: a compile-time constant.)
+				const auto dof = ts.size() > 1 && ts[1].defined() ? scalarConstant(ts[1]) : std::optional<double>{};
+				if (!dof)
+					throw std::runtime_error("var: the degrees of freedom must be a compile-time constant");
+				auto divisor =
+						emitAs(bb, callRelaxOp("relax.op.subtract", n, makeFloatConst(static_cast<float>(*dof), dtypeOf(x))), "dof");
+				return callRelaxOp("relax.op.divide", ss, divisor);
 			},
 
 			// ── einops ──────────────────────────────────────────────────────────────

@@ -255,6 +255,16 @@ namespace mdl::autodiff {
 				const Node& ones = b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x});
 				return b.div(spread, keep(b.op(FIDs::SUM, {ones})));
 			}
+			case FIDs::VAR: { // var = sum((x - mean(x))^2) / (N - dof): dx = g * 2 (x - mean(x)) / (N - dof)
+				const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
+				auto keep = [&](const Node& v) -> const Node& {
+					return b.op(FIDs::RESHAPE, {v, group, graph.addConstNode(Atomic{1})});
+				};
+				const Node* n = lastDimSize(graph, getDataType(x));
+				const Node& count = n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
+				const Node& centered = b.sub(x, keep(b.op(FIDs::MEAN, {x})));
+				return b.div(b.mul(b.mul(keep(g), centered), b.constant(2.0)), b.sub(count, *other));
+			}
 			case FIDs::EXP:
 				return b.mul(g, node);
 			case FIDs::LOG:
@@ -338,6 +348,8 @@ namespace mdl::autodiff {
 				return arg == 0;
 			case FIDs::EQUAL_MASK:
 				return false; // piecewise constant
+			case FIDs::VAR:
+				return arg == 0; // not the degrees of freedom
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
 			case FIDs::ATTENTION:

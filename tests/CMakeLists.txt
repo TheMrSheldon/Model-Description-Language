@@ -58,6 +58,7 @@ set_tests_properties(mdl_kernels_list PROPERTIES PASS_REGULAR_EXPRESSION "cubin,
 add_test(NAME mdl_kernels_list_problems COMMAND mdl-kernels --kernels-dir "${_kernels}/broken" list)
 set_tests_properties(mdl_kernels_list_problems PROPERTIES WILL_FAIL TRUE)
 add_subdirectory(kernels/e2e)
+add_subdirectory(statistics)
 if(MDL_ENABLE_CUDA)
 	add_subdirectory(cuda)
 endif()

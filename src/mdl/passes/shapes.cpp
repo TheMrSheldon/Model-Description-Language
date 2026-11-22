@@ -274,7 +274,8 @@ namespace mdl::shapes {
 				case FIDs::MAX:
 				case FIDs::MIN:
 				case FIDs::SUM:
-				case FIDs::MEAN: {
+				case FIDs::MEAN:
+				case FIDs::VAR: {
 					Shape s = arg(0);
 					if (s.empty())
 						fail("reduction of a scalar");
@@ -282,9 +283,6 @@ namespace mdl::shapes {
 						s.pop_back();
 					return s;
 				}
-				case FIDs::VAR:
-					arg(0); // (the shapes of the whole function are inferred)
-					return {};
 
 				case FIDs::RESHAPE:
 					return reshape(args, arg(0));
