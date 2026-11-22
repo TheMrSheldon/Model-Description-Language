@@ -69,6 +69,7 @@ namespace mdl::backend::tvm {
 			Operand q, k, v, o, dy; ///< (o, dy: backward only)
 			Expr lse, probs;		///< (backward only)
 			Expr bias;				///< added to the scores (broadcast), or PrimValue(0) for none
+			Expr lengths;			///< if the bias is a suffix mask: its lengths, or PrimValue(0)
 			double scale = 1.0;
 			std::vector<Perm> outPerms;
 			bool withLse = true; ///< (forward only)
@@ -83,6 +84,7 @@ namespace mdl::backend::tvm {
 					outPerms = {permOf(a[7])};
 					withLse = intValue(a[8]) != 0;
 					bias = a[9];
+					lengths = a[10];
 				} else {
 					q = {a[0], permOf(a[8])};
 					k = {a[1], permOf(a[9])};
@@ -94,6 +96,7 @@ namespace mdl::backend::tvm {
 					scale = *scalarConstant(a[7]);
 					outPerms = {permOf(a[13]), permOf(a[14]), permOf(a[15])};
 					bias = a[16];
+					lengths = a[17];
 				}
 			}
 
@@ -108,13 +111,13 @@ namespace mdl::backend::tvm {
 					return Call(
 							::tvm::Type::Missing(), attentionOp(),
 							{q.x, k.x, v.x, s, permExpr(q.perm), permExpr(k.perm), permExpr(v.perm), permExpr(outPerms[0]),
-							 intArg(withLse ? 1 : 0), bias}
+							 intArg(withLse ? 1 : 0), bias, lengths}
 					);
 				return Call(
 						::tvm::Type::Missing(), attentionGradOp(),
 						{q.x, k.x, v.x, o.x, lse, probs, dy.x, s, permExpr(q.perm), permExpr(k.perm), permExpr(v.perm),
 						 permExpr(o.perm), permExpr(dy.perm), permExpr(outPerms[0]), permExpr(outPerms[1]),
-						 permExpr(outPerms[2]), bias}
+						 permExpr(outPerms[2]), bias, lengths}
 				);
 			}
 
@@ -282,6 +285,7 @@ namespace mdl::backend::tvm {
 					args.probs = VisitExpr(args.probs);
 				}
 				args.bias = VisitExpr(args.bias);
+				args.lengths = VisitExpr(args.lengths);
 				if (const auto it = outputFolds.find(current); it != outputFolds.end())
 					for (const auto& [index, axes] : it->second)
 						args.outPerms[index] = compose(axes, args.outPerms[index]);
@@ -372,29 +376,30 @@ namespace mdl::backend::tvm {
 
 	// ── operators ─────────────────────────────────────────────────────────────
 
-	Expr makeAttention(Expr q, Expr k, Expr v, double scale, std::optional<Expr> bias) {
+	Expr makeAttention(Expr q, Expr k, Expr v, double scale, std::optional<Expr> bias, std::optional<Expr> lengths) {
 		const Expr none = permExpr({});
 		return Call(
 				::tvm::Type::Missing(), attentionOp(),
 				{std::move(q), std::move(k), std::move(v), ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none, none,
-				 none, none, intArg(1), bias ? *bias : intArg(0)}
+				 none, none, intArg(1), bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
 		);
 	}
 
 	Expr makeAttentionGrad(
-			Expr q, Expr k, Expr v, Expr out, Expr lse, Expr probs, Expr dy, double scale, std::optional<Expr> bias
+			Expr q, Expr k, Expr v, Expr out, Expr lse, Expr probs, Expr dy, double scale, std::optional<Expr> bias,
+			std::optional<Expr> lengths
 	) {
 		const Expr none = permExpr({});
 		return Call(
 				::tvm::Type::Missing(), attentionGradOp(),
 				{std::move(q), std::move(k), std::move(v), std::move(out), std::move(lse), std::move(probs), std::move(dy),
 				 ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none, none, none, none, none, none, none, none,
-				 bias ? *bias : intArg(0)}
+				 bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
 		);
 	}
 
 	TVM_REGISTER_OP("mdl.attention")
-			.set_num_inputs(10)
+			.set_num_inputs(11)
 			.add_argument("q", "Tensor", "Q = permute(q, perm_q): [..., Sq, D].")
 			.add_argument("k", "Tensor", "K = permute(k, perm_k): [..., Skv, D].")
 			.add_argument("v", "Tensor", "V = permute(v, perm_v): [..., Skv, Dv].")
@@ -405,11 +410,16 @@ namespace mdl::backend::tvm {
 			.add_argument("perm_out", "ShapeExpr", "The permutation of the result (empty: none).")
 			.add_argument("with_lse", "PrimValue", "Whether the row statistics are used.")
 			.add_argument("bias", "Tensor | PrimValue", "Added to the scores [..., Sq, Skv] (broadcast), or PrimValue(0).")
+			.add_argument(
+					"lengths", "Tensor | PrimValue",
+					"If the bias is the mask of a suffix mask (of the queries' and keys' positions): its lengths [batch], "
+					"else PrimValue(0)."
+			)
 			.set_attr<::tvm::relax::FInferType>("FInferType", inferAttention)
 			.set_attr<bool>("FPurity", true);
 
 	TVM_REGISTER_OP("mdl.attention_grad")
-			.set_num_inputs(17)
+			.set_num_inputs(18)
 			.add_argument("q", "Tensor", "As for mdl.attention.")
 			.add_argument("k", "Tensor", "As for mdl.attention.")
 			.add_argument("v", "Tensor", "As for mdl.attention.")
@@ -427,6 +437,7 @@ namespace mdl::backend::tvm {
 			.add_argument("perm_dk", "ShapeExpr", "The permutation of the result dk (empty: none).")
 			.add_argument("perm_dv", "ShapeExpr", "The permutation of the result dv (empty: none).")
 			.add_argument("bias", "Tensor | PrimValue", "As for mdl.attention.")
+			.add_argument("lengths", "Tensor | PrimValue", "As for mdl.attention.")
 			.set_attr<::tvm::relax::FInferType>("FInferType", inferAttention)
 			.set_attr<bool>("FPurity", true);
 

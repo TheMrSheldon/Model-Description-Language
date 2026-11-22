@@ -29,6 +29,7 @@ patterns:
       - { capture: perm_out }
       - { capture: with_lse }
       - { capture: bias }
+      - { capture: lengths }
   attention-grad:   # mdl.attention_grad: the gradients w.r.t. Q, K, and V
     op: mdl.attention_grad
     args:
@@ -49,6 +50,7 @@ patterns:
       - { capture: perm_dk }
       - { capture: perm_dv }
       - { capture: bias }
+      - { capture: lengths }
 
 implementations:
   # The tensors as strided views in their logical layout (the permutations of the operators applied to their shapes and
@@ -74,15 +76,18 @@ implementations:
         - { type: "int64[]", value: "permute($v.shape, $perm_v.values)" }
         - { type: "int64[]", value: "permute(strides($v.shape), $perm_v.values)" }
         - { type: "int64[]", value: "unpermute(strides($out0.shape), $perm_out.values)" }
-        - { type: pointer, access: read, value: $bias.data }     # (NULL without a bias)
+        # With the lengths of a suffix mask, the bias (the mask) is not read: padding mode skips the masked suffix.
+        - { type: pointer, access: read, value: "null if $lengths.is_tensor else $bias.data" }
         - { type: "int64[]", value: "$bias.shape if $bias.is_tensor else []" }
         - { type: "int64[]", value: "strides($bias.shape) if $bias.is_tensor else []" }
+        - { type: pointer, access: read, value: $lengths.data }  # (NULL without)
         - { type: int32, value: $with_lse.value }
         - { type: float32, value: $scale.real }
     applicability:
       dtype: { q: bfloat16 }
       where: &attention-where
         - "not $bias.is_tensor or ($bias.ndim == $q.ndim and $bias.dtype == $q.dtype)"
+        - "not $lengths.is_tensor or ($q.ndim in [3, 4] and $lengths.dtype == int32)"
         - "permute($q.shape, $perm_q.values)[:-2] == permute($k.shape, $perm_k.values)[:-2]"
         - "permute($q.shape, $perm_q.values)[:-2] == permute($v.shape, $perm_v.values)[:-2]"
         # cuDNN reads and writes the head dimension contiguously.
@@ -123,14 +128,16 @@ implementations:
         - { type: "int64[]", value: "unpermute(strides($out0.shape), $perm_dq.values)" }
         - { type: "int64[]", value: "unpermute(strides($out1.shape), $perm_dk.values)" }
         - { type: "int64[]", value: "unpermute(strides($out2.shape), $perm_dv.values)" }
-        - { type: pointer, access: read, value: $bias.data }
+        - { type: pointer, access: read, value: "null if $lengths.is_tensor else $bias.data" }
         - { type: "int64[]", value: "$bias.shape if $bias.is_tensor else []" }
         - { type: "int64[]", value: "strides($bias.shape) if $bias.is_tensor else []" }
+        - { type: pointer, access: read, value: $lengths.data }
         - { type: float32, value: $scale.real }
     applicability:
       dtype: { q: bfloat16, o: bfloat16, dy: bfloat16 }
       where: &attention-grad-where
         - "not $bias.is_tensor or ($bias.ndim == $q.ndim and $bias.dtype == $q.dtype)"
+        - "not $lengths.is_tensor or ($q.ndim in [3, 4] and $lengths.dtype == int32)"
         - "permute($q.shape, $perm_q.values)[:-2] == permute($k.shape, $perm_k.values)[:-2]"
         - "permute($q.shape, $perm_q.values)[:-2] == permute($v.shape, $perm_v.values)[:-2]"
         - "permute(strides($q.shape), $perm_q.values)[-1] == 1"

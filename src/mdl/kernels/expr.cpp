@@ -312,6 +312,8 @@ namespace mdl::kernels::expr {
 					next();
 					if (std::ranges::find(kDtypes, t.text) != kDtypes.end())
 						return make({.kind = Node::Kind::dtypeName, .type = Type::dtype, .name = t.text});
+					if (t.text == "null")
+						return make({.kind = Node::Kind::null, .type = Type::pointer});
 					if (t.text == "prod" || t.text == "len" || t.text == "strides") {
 						expect("(");
 						auto arg = orExpr();
@@ -441,6 +443,8 @@ namespace mdl::kernels::expr {
 		case Node::Kind::slice:
 			return str(*node.args[0]) + "[" + (node.hasFrom ? std::to_string(node.from) : "") + ":" +
 				   (node.hasTo ? std::to_string(node.to) : "") + "]";
+		case Node::Kind::null:
+			return "null";
 		case Node::Kind::conditional:
 			return "(" + str(*node.args[1]) + " if " + str(*node.args[0]) + " else " + str(*node.args[2]) + ")";
 		case Node::Kind::call: {

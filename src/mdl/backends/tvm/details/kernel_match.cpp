@@ -906,12 +906,21 @@ namespace mdl::backend::tvm {
 				for (const auto& arg : impl.arguments) {
 					auto parsed = expr::parse(arg.value, names).value(); // checked when the package was loaded
 					if (arg.type == "pointer") {
-						const auto& name = parsed->name;
+						// The capture it points to: `$x.data`, `null`, or a choice between them (a constant condition).
+						const expr::Node* target = parsed.get();
+						while (target->kind == expr::Node::Kind::conditional) {
+							const auto c = ::tvm::sym::Analyzer()->Simplify(eval.eval(*target->args[0]).scalar);
+							const auto* imm = c.as<::tvm::IntImmNode>();
+							if (imm == nullptr)
+								throw std::runtime_error("mdl kernels: a pointer chosen by a condition that is not constant");
+							target = target->args[intValue(imm) != 0 ? 1 : 2].get();
+						}
+						const std::string name = target->kind == expr::Node::Kind::access ? target->name : std::string();
 						if (auto out = outs.find(name); out != outs.end()) {
 							args.push_back(out->second);
 							continue;
 						}
-						if (tensorInfo(captures.at(name)) == nullptr) { // (e.g. an absent bias)
+						if (name.empty() || tensorInfo(captures.at(name)) == nullptr) { // (null, e.g. an absent bias)
 							args.push_back(Call(
 									::tvm::PointerType::VoidPointerTy(), tirx::builtin::reinterpret(),
 									{::tvm::IntImm(::tvm::PrimType::UInt(64), 0)}

@@ -229,7 +229,8 @@ namespace mdl::backend::tvm {
 				scores = emitAs(bb, callRelaxOp("relax.op.add", scores, *bias), "biased");
 			return callRelaxOp("relax.op.nn.softmax", scores, -1);
 		}
-		auto call = emitAs(bb, makeAttention(ts[0], ts[1], ts[2], scale, bias), "attention");
+		const auto lengths = ts.size() > 5 ? std::optional<::tvm::relax::Expr>{ts[5]} : std::nullopt;
+		auto call = emitAs(bb, makeAttention(ts[0], ts[1], ts[2], scale, bias, lengths), "attention");
 		return ::tvm::relax::TupleGetItem(call, i);
 	}
 
@@ -571,7 +572,10 @@ namespace mdl::backend::tvm {
 				if (!which || *which < 0 || *which > 2)
 					throw std::runtime_error("attention gradient: expected the operand 0, 1, or 2");
 				const auto bias = ts.size() > 9 ? std::optional<::tvm::relax::Expr>{ts[9]} : std::nullopt;
-				auto grad = makeAttentionGrad(ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]), bias);
+				const auto lengths = ts.size() > 10 ? std::optional<::tvm::relax::Expr>{ts[10]} : std::nullopt;
+				auto grad = makeAttentionGrad(
+						ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]), bias, lengths
+				);
 				return ::tvm::relax::TupleGetItem(emitAs(bb, grad, "attention_grad"), static_cast<int>(*which));
 			},
 			/** SUFFIX_MASK — the backend operator mdl.suffix_mask **/

@@ -320,10 +320,8 @@ namespace mdl::autodiff {
 				if (arg == 4)
 					throw NoGradientRule{inv.id}; // \todo the gradient of the bias (the scores' gradient, summed)
 				std::vector<Computegraph::NodeRef> operands(inv.arguments.begin(), inv.arguments.begin() + 4);
-				const Node* bias = inv.arguments.size() > 4 ? &inv.arguments[4].get() : nullptr;
-				auto withBias = [&](std::vector<Computegraph::NodeRef> args) {
-					if (bias != nullptr)
-						args.push_back(std::cref(*bias));
+				auto withBias = [&](std::vector<Computegraph::NodeRef> args) { // (and the lengths of a suffix mask)
+					args.insert(args.end(), inv.arguments.begin() + 4, inv.arguments.end());
 					return args;
 				};
 				std::vector<Computegraph::NodeRef> args = operands;
@@ -362,7 +360,7 @@ namespace mdl::autodiff {
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
 			case FIDs::ATTENTION:
-				return arg != 3; // not the scale (a constant); the bias: an error if it needs a gradient (see rule)
+				return arg != 3 && arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
 			case FIDs::ATTENTION_LSE:
 			case FIDs::ATTENTION_PROBS:
 			case FIDs::ATTENTION_GRAD:

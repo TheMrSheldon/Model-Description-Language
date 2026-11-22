@@ -4,7 +4,8 @@
 // With MDL_BENCH_DEVICE (a DLDeviceType, e.g. kDLCUDA), the model is compiled for that device (mdlc --target): the
 // tensors are copied there once, and every step is synchronized with the device before it is timed.
 // With MDL_BENCH_MASKED, the encoder is a masked function (`--mask forward`) and the last quarter of every sequence is
-// padding (as in batches of sequences of different lengths).
+// padding (as in batches of sequences of different lengths); with MDL_BENCH_SUFFIX as well, as a suffix mask
+// (`--mask forward=suffix`: the sequences' lengths).
 // Prints one line: `<name> median <ms> min <ms> (<iterations>)`, after the warm-up runs.
 #include "model.hpp"
 
@@ -105,7 +106,14 @@ int main(int argc, char* argv[]) {
 	for (int64_t b = 0; b < batch; ++b)
 		for (int64_t s = seq - seq / 4; s < seq; ++s)
 			hmask.data()[b * seq + s] = 0;
+#ifdef MDL_BENCH_SUFFIX
+	mdl::runtime::IntTensor hlengths({batch}); // (a suffix mask: the same padding as lengths)
+	for (int64_t b = 0; b < batch; ++b)
+		hlengths.data()[b] = static_cast<int32_t>(seq - seq / 4);
+	DLTensor* mask = onDevice(hlengths);
+#else
 	DLTensor* mask = onDevice(hmask);
+#endif
 #define MDL_BENCH_INPUTS x, mask
 #else
 #define MDL_BENCH_INPUTS x

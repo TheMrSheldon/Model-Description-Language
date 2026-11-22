@@ -87,6 +87,30 @@ namespace mdl::attention {
 			return false;
 		}
 
+		/**
+		 * @brief The lengths of a suffix mask if @p mask is the conjunction of two dimensions' masks of the same suffix
+		 * mask (`where(a, b, a)` with a and b reshapes of SUFFIX_MASK(lengths, ...): e.g. the masks of the queries' and
+		 * the keys' positions of self-attention), else nullptr.
+		 */
+		const Node* suffixLengths(const Node& mask) {
+			auto lengthsOf = [](const Node* n) -> const Node* {
+				while (const auto* inv = std::get_if<InvocationNode>(n)) {
+					if (inv->id == FIDs::SUFFIX_MASK)
+						return &inv->arguments[0].get();
+					if (inv->id != FIDs::RESHAPE && inv->id != FIDs::EXPAND && inv->id != FIDs::BROADCAST_LIKE)
+						return nullptr;
+					n = &inv->arguments[0].get();
+				}
+				return nullptr;
+			};
+			const auto* both = invocation(mask, FIDs::WHERE);
+			if (both == nullptr || &both->arguments[0].get() != &both->arguments[2].get())
+				return nullptr;
+			const Node* a = lengthsOf(&both->arguments[0].get());
+			const Node* b = lengthsOf(&both->arguments[1].get());
+			return a != nullptr && a == b ? a : nullptr;
+		}
+
 		/** @brief The scores of attention: `s / c`, `s * c`, `c * s`, or `s` with s = q @ k^T (the scale c: a scalar). */
 		struct Scaled {
 			const Node* scores;
@@ -125,18 +149,24 @@ namespace mdl::attention {
 			// wherever they count: the bias rounds every other sum to the most negative value).
 			auto scaled = scaledScores(graph, *x);
 			const Node* bias = nullptr;
+			const Node* lengths = nullptr; // (of the mask, if a suffix mask)
 			if (const auto* add = scaled ? nullptr : invocation(*x, FIDs::TENSOR_ADD)) {
 				for (size_t i = 0; i < 2 && !scaled; ++i) {
 					const Node* data = &add->arguments[i].get();
 					const Node& b = add->arguments[1 - i].get();
+					const Node* mask = nullptr;
 					if (const auto* w = invocation(*data, FIDs::WHERE);
-						w != nullptr && isConstant(w->arguments[2].get(), 0.0) && isMaskBias(b, w->arguments[0].get()))
+						w != nullptr && isConstant(w->arguments[2].get(), 0.0) && isMaskBias(b, w->arguments[0].get())) {
 						data = &w->arguments[1].get();
+						mask = &w->arguments[0].get();
+					}
 					if (tensor(b) == nullptr)
 						continue;
 					scaled = scaledScores(graph, *data);
-					if (scaled)
+					if (scaled) {
 						bias = &b;
+						lengths = mask != nullptr ? suffixLengths(*mask) : nullptr;
+					}
 				}
 			}
 			if (!scaled)
@@ -171,6 +201,8 @@ namespace mdl::attention {
 			std::vector<Computegraph::NodeRef> args{q, *k, v, *scale};
 			if (bias != nullptr)
 				args.push_back(std::cref(*bias));
+			if (lengths != nullptr) // (the bias is this suffix mask: kernels may skip the masked suffix instead)
+				args.push_back(std::cref(*lengths));
 			return &graph.addInvocationNode(FIDs::ATTENTION, std::move(args));
 		}
 	} // namespace

@@ -23,7 +23,7 @@ namespace {
 
 	constexpr int kMaxDevices = 64;
 	/** @brief The tensors' ids in the graphs. */
-	enum Uid : int64_t { kQ = 1, kK, kV, kO, kStats, kdO, kdQ, kdK, kdV, kBias };
+	enum Uid : int64_t { kQ = 1, kK, kV, kO, kStats, kdO, kdQ, kdK, kdV, kBias, kSeqLen };
 
 	int currentDevice() {
 		int device = 0;
@@ -55,7 +55,16 @@ namespace {
 	enum class Kind { forward, forwardWithStats, backward };
 	/** @brief A bias of the scores: its dims and strides [b0, b1, Sq, Skv] (1: broadcast), empty for none. */
 	using BiasLayout = std::vector<int64_t>;
-	using Key = std::tuple<int, Kind, int, Dims, Strides, BiasLayout, float>;
+	/**
+	 * @brief Padding mode (instead of a bias): the number of valid positions of the queries and keys per element of the
+	 * first batch dimension (int32 [b0]), and the strides of the statistics' batch dimensions.
+	 */
+	struct Padding {
+		bool enabled = false;
+		std::array<int64_t, 2> statsStrides{};
+		auto operator<=>(const Padding&) const = default;
+	};
+	using Key = std::tuple<int, Kind, int, Dims, Strides, BiasLayout, Padding, float>;
 
 	/** @brief Builds the graph's execution plan (false if cuDNN does not support the configuration). */
 	bool build(fe::graph::Graph& graph, Context& ctx) {
@@ -68,10 +77,10 @@ namespace {
 	std::shared_ptr<fe::graph::Graph>
 	graphFor(
 			Context& ctx, Kind kind, fe::DataType_t type, const Dims& dims, const Strides& strides, const BiasLayout& bias,
-			float scale
+			const Padding& padding, float scale
 	) {
 		thread_local std::map<Key, std::shared_ptr<fe::graph::Graph>> graphs;
-		const Key key{currentDevice(), kind, static_cast<int>(type), dims, strides, bias, scale};
+		const Key key{currentDevice(), kind, static_cast<int>(type), dims, strides, bias, padding, scale};
 		if (auto it = graphs.find(key); it != graphs.end())
 			return it->second;
 		const auto [b0, b1, Sq, Skv, D, Dv] = dims;
@@ -88,10 +97,22 @@ namespace {
 		auto input = [&](const char* name, int64_t uid, std::vector<int64_t> dim) {
 			return strided(graph->tensor(fe::graph::Tensor_attributes().set_name(name)), uid, std::move(dim));
 		};
-		// The statistics: [b0, b1, Sq, 1] float32, contiguous.
+		// The statistics: [b0, b1, Sq, 1] float32, contiguous (with padding: the given batch strides).
+		const auto statsStrides = padding.enabled ? padding.statsStrides : std::array<int64_t, 2>{b1 * Sq, Sq};
 		auto statsLayout = [&](fe::graph::Tensor_attributes& t) {
-			t.set_uid(kStats).set_dim({b0, b1, Sq, 1}).set_stride({b1 * Sq, Sq, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+			t.set_uid(kStats)
+					.set_dim({b0, b1, Sq, 1})
+					.set_stride({statsStrides[0], statsStrides[1], 1, 1})
+					.set_data_type(fe::DataType_t::FLOAT);
 		};
+		std::shared_ptr<fe::graph::Tensor_attributes> lengths;
+		if (padding.enabled)
+			lengths = graph->tensor(fe::graph::Tensor_attributes()
+											.set_name("lengths")
+											.set_uid(kSeqLen)
+											.set_dim({b0, 1, 1, 1})
+											.set_stride({1, 1, 1, 1})
+											.set_data_type(fe::DataType_t::INT32));
 		auto Q = input("Q", kQ, {b0, b1, Sq, D});
 		auto K = input("K", kK, {b0, b1, Skv, D});
 		auto V = input("V", kV, {b0, b1, Skv, Dv});
@@ -106,6 +127,8 @@ namespace {
 			auto options = fe::graph::SDPA_attributes().set_name("attention").set_attn_scale(scale);
 			if (B)
 				options.set_bias(B);
+			if (lengths)
+				options.set_padding_mask(true).set_seq_len_q(lengths).set_seq_len_kv(lengths);
 			options.set_is_inference(kind == Kind::forward);
 			auto [O, stats] = graph->sdpa(Q, K, V, options);
 			strided(O, kO, {b0, b1, Sq, Dv})->set_output(true);
@@ -121,6 +144,8 @@ namespace {
 			auto options = fe::graph::SDPA_backward_attributes().set_name("attention_backward").set_attn_scale(scale);
 			if (B)
 				options.set_bias(B);
+			if (lengths)
+				options.set_padding_mask(true).set_seq_len_q(lengths).set_seq_len_kv(lengths);
 			auto [dQ, dK, dV] = graph->sdpa_backward(Q, K, V, O, dO, stats, options);
 			strided(dQ, kdQ, {b0, b1, Sq, D})->set_output(true);
 			strided(dK, kdK, {b0, b1, Skv, D})->set_output(true);
@@ -136,7 +161,7 @@ namespace {
 	}
 
 	int run(Kind kind, fe::DataType_t type, const Dims& dims, const Strides& strides, const BiasLayout& bias,
-			float scale, std::unordered_map<int64_t, void*> pack) {
+			const Padding& padding, float scale, std::unordered_map<int64_t, void*> pack) {
 		const auto [b0, b1, Sq, Skv, D, Dv] = dims;
 		if (b0 * b1 * Sq * Skv * D * Dv == 0)
 			return 0; // (\todo zero-filled gradients for empty sequences)
@@ -146,7 +171,7 @@ namespace {
 		const auto stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, currentDevice()));
 		if (cudnnSetStream(ctx->handle, stream) != CUDNN_STATUS_SUCCESS)
 			return 2;
-		auto graph = graphFor(*ctx, kind, type, dims, strides, bias, scale);
+		auto graph = graphFor(*ctx, kind, type, dims, strides, bias, padding, scale);
 		if (!graph)
 			return 3;
 		int64_t bytes = 0;
@@ -192,7 +217,7 @@ namespace {
 		std::vector<int64_t> shape, strides;
 
 		Bias(const void* data, int64_t rank, const int64_t* shape, const int64_t* strides) : data(data) {
-			if (data == nullptr)
+			if (shape == nullptr || strides == nullptr) // (without a bias; its shape alone: e.g. with lengths)
 				return;
 			this->shape.assign(shape, shape + rank);
 			this->strides.assign(strides, strides + rank);
@@ -201,6 +226,19 @@ namespace {
 					this->strides[i] = 0;
 		}
 		mdl::kernels::View view(int64_t rank) const { return {rank, shape.data(), strides.data()}; }
+
+		/**
+		 * @brief The batch dimension of [b0, b1] that the lengths of a suffix mask index (the bias's batch dimension that
+		 * is not broadcast), or -1.
+		 */
+		int lengthsAxis(int64_t rank) const {
+			if (shape.empty() || (rank != 3 && rank != 4))
+				return -1;
+			if (rank == 3)
+				return 1; // (the only batch dimension, after an outer one of size 1)
+			const bool first = shape[0] != 1, second = shape[1] != 1;
+			return first == second ? -1 : (first ? 0 : 1);
+		}
 
 		/** @brief The layout for cuDNN of the slice [b0, b1, Sq, Skv] with the strides @p s of the view. */
 		BiasLayout layout(int64_t rank, const std::vector<int64_t>& s) const {
@@ -215,8 +253,11 @@ namespace {
 			fe::DataType_t type, size_t size, void* out, float* lse, const void* Q, const void* K, const void* V,
 			int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,
 			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,
-			const Bias& bias, int32_t with_lse, float scale
+			const Bias& bias, const int32_t* lengths, int32_t with_lse, float scale
 	) {
+		const int axis = lengths != nullptr ? bias.lengthsAxis(rank) : -1;
+		if (lengths != nullptr && axis < 0)
+			return 7; // (the manifest admits only ranks and biases whose lengths' dimension is known)
 		const auto o_shape = outShape(rank, q_shape, v_shape);
 		const int64_t Sq = q_shape[rank - 2], Skv = k_shape[rank - 2], D = q_shape[rank - 1], Dv = v_shape[rank - 1];
 		std::vector<mdl::kernels::View> views{
@@ -238,12 +279,27 @@ namespace {
 					if (with_lse)
 						pack.emplace(kStats, lse + slice * b0 * b1 * Sq);
 					++slice;
+					std::vector<std::vector<int64_t>> st(s.begin(), s.begin() + 4);
+					int64_t c0 = b0, c1 = b1;
+					Padding padding;
+					if (lengths != nullptr) {
+						// Padding mode: the lengths index cuDNN's first batch dimension (swapped if needed).
+						padding = {true, {b1 * Sq, Sq}};
+						pack.emplace(kSeqLen, mut(lengths));
+						if (axis == 1) {
+							std::swap(c0, c1);
+							for (auto& t : st)
+								std::swap(t[0], t[1]);
+							std::swap(padding.statsStrides[0], padding.statsStrides[1]);
+						}
+					}
 					Strides strides;
-					for (size_t t = 0; t < 4; ++t)
-						strides.insert(strides.end(), s[t].begin(), s[t].end());
+					for (const auto& t : st)
+						strides.insert(strides.end(), t.begin(), t.end());
 					return run(
-							with_lse ? Kind::forwardWithStats : Kind::forward, type, {b0, b1, Sq, Skv, D, Dv}, strides,
-							bias.layout(rank, bias.data != nullptr ? s[4] : s[0]), scale, std::move(pack)
+							with_lse ? Kind::forwardWithStats : Kind::forward, type, {c0, c1, Sq, Skv, D, Dv}, strides,
+							lengths != nullptr ? BiasLayout{} : bias.layout(rank, bias.data != nullptr ? s[4] : s[0]),
+							padding, scale, std::move(pack)
 					);
 				}
 		);
@@ -254,8 +310,11 @@ namespace {
 			const void* O, const void* dO, const float* lse, int64_t rank, const int64_t* q_shape,
 			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,
 			const int64_t* v_strides, const int64_t* o_strides, const int64_t* do_strides, const int64_t* dq_strides,
-			const int64_t* dk_strides, const int64_t* dv_strides, const Bias& bias, float scale
+			const int64_t* dk_strides, const int64_t* dv_strides, const Bias& bias, const int32_t* lengths, float scale
 	) {
+		const int axis = lengths != nullptr ? bias.lengthsAxis(rank) : -1;
+		if (lengths != nullptr && axis < 0)
+			return 7;
 		const auto o_shape = outShape(rank, q_shape, v_shape);
 		const int64_t Sq = q_shape[rank - 2], Skv = k_shape[rank - 2], D = q_shape[rank - 1], Dv = v_shape[rank - 1];
 		std::vector<mdl::kernels::View> views{
@@ -269,9 +328,21 @@ namespace {
 		return mdl::kernels::forEachBatch2(
 				views,
 				[&](int64_t b0, int64_t b1, const std::vector<std::vector<int64_t>>& s, const std::vector<int64_t>& o) {
+					std::vector<std::vector<int64_t>> st(s.begin(), s.begin() + 8);
+					int64_t c0 = b0, c1 = b1;
+					Padding padding;
+					if (lengths != nullptr) {
+						padding = {true, {b1 * Sq, Sq}};
+						if (axis == 1) {
+							std::swap(c0, c1);
+							for (auto& t : st)
+								std::swap(t[0], t[1]);
+							std::swap(padding.statsStrides[0], padding.statsStrides[1]);
+						}
+					}
 					Strides strides;
-					for (size_t t = 0; t < 8; ++t)
-						strides.insert(strides.end(), s[t].begin(), s[t].end());
+					for (const auto& t : st)
+						strides.insert(strides.end(), t.begin(), t.end());
 					const float* stats = lse + slice * b0 * b1 * Sq;
 					++slice;
 					std::unordered_map<int64_t, void*> pack{
@@ -281,9 +352,12 @@ namespace {
 					};
 					if (bias.data != nullptr)
 						pack.emplace(kBias, at(mut(bias.data), o[8], size));
+					if (lengths != nullptr)
+						pack.emplace(kSeqLen, mut(lengths));
 					return run(
-							Kind::backward, type, {b0, b1, Sq, Skv, D, Dv}, strides,
-							bias.layout(rank, bias.data != nullptr ? s[8] : s[0]), scale, std::move(pack)
+							Kind::backward, type, {c0, c1, Sq, Skv, D, Dv}, strides,
+							lengths != nullptr ? BiasLayout{} : bias.layout(rank, bias.data != nullptr ? s[8] : s[0]),
+							padding, scale, std::move(pack)
 					);
 				}
 		);
@@ -296,11 +370,11 @@ namespace {
 			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t rank, const int64_t* q_shape,  \
 			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,        \
 			const int64_t* v_strides, const int64_t* o_strides, const type* bias, const int64_t* bias_shape,           \
-			const int64_t* bias_strides, int32_t with_lse, float scale                                                 \
+			const int64_t* bias_strides, const int32_t* lengths, int32_t with_lse, float scale                         \
 	) {                                                                                                                \
 		return forward(                                                                                                \
 				cudnnType, sizeof(type), out, lse, Q, K, V, rank, q_shape, q_strides, k_shape, k_strides, v_shape,     \
-				v_strides, o_strides, Bias(bias, rank, bias_shape, bias_strides), with_lse, scale                      \
+				v_strides, o_strides, Bias(bias, rank, bias_shape, bias_strides), lengths, with_lse, scale             \
 		);                                                                                                             \
 	}                                                                                                                  \
 	extern "C" int mdl_attention_bwd_##suffix(                                                                         \
@@ -309,12 +383,12 @@ namespace {
 			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,      \
 			const int64_t* do_strides, const int64_t* dq_strides, const int64_t* dk_strides,                           \
 			const int64_t* dv_strides, const type* bias, const int64_t* bias_shape, const int64_t* bias_strides,       \
-			float scale                                                                                                \
+			const int32_t* lengths, float scale                                                                        \
 	) {                                                                                                                \
 		return backward(                                                                                               \
 				cudnnType, sizeof(type), dq, dk, dv, Q, K, V, O, dO, lse, rank, q_shape, q_strides, k_shape,           \
 				k_strides, v_shape, v_strides, o_strides, do_strides, dq_strides, dk_strides, dv_strides,              \
-				Bias(bias, rank, bias_shape, bias_strides), scale                                                      \
+				Bias(bias, rank, bias_shape, bias_strides), lengths, scale                                             \
 		);                                                                                                             \
 	}
 MDL_ATTENTION_DEFINE(bf16, uint16_t, fe::DataType_t::BFLOAT16)

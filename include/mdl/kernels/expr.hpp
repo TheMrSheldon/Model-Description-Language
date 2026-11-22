@@ -47,6 +47,7 @@ namespace mdl::kernels::expr {
 			 */
 			call,
 			conditional, ///< args[1] if args[0] else args[2] (only the chosen branch is evaluated if args[0] is constant)
+			null,		 ///< the null pointer (e.g. `null if $x.is_tensor else $y.data`)
 		};
 		Kind kind;
 		Type type;
