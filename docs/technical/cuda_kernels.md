@@ -21,6 +21,7 @@ current stream through the Python binding. Temporary buffers are offsets in one 
 | Attention fusion | `src/mdl/passes/attention.cpp` | softmax(QKᵀ·s + bias)·V → `ATTENTION*` builtins (target-independent) |
 | Kernel selection | `details/kernel_match.cpp`, `tvm.cpp` | Relax ops → package calls, in rounds; context pruning afterwards |
 | Legalization | `details/legalize.cpp`, `Target::overrideLegalizations` | remaining ops → TIR; the CUDA target overrides `mdl.scatter_add_rows` |
+| Sibling fusion | `details/fuse_siblings.cpp` | independent elementwise kernels with the same result shape that read a common input → one kernel with several results (target-independent) |
 | Flattening | `details/flatten_injective.cpp` | injective kernels → one flat loop (target-independent) |
 | Scheduling | `targets/cuda.cpp` `CUDATarget::schedule` | schedule rules, first match wins (below) |
 | Lowering/emit | `CUDATarget::blockLowering/beforeSplit/emit` | TVM's default GPU TIR passes; CUDA C → NVRTC cubin → one `.o` |
@@ -95,6 +96,9 @@ reshape copies, broadcasts of trailing dimensions) into one loop over the result
 
 - Operands with the result's layout are read at `n`.
 - Trailing broadcasts are read at `n % P`.
+
+Blocks with several stores (merged sibling kernels) are flattened as well, as long as every store writes at the
+iterators.
 
 Without this pass, splitting a fused loop over `[batch, seq, 3072]` with symbolic sizes costs several 64-bit
 divisions per element. Kernels with reductions, transposes, gathers or strided buffers are left unchanged.
