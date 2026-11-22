@@ -1,5 +1,6 @@
 #include "./cuda.hpp"
 
+#include "./gpu/column_reduction.hpp"
 #include "./gpu/row_reduction.hpp"
 #include "./gpu/scatter_add_rows.hpp"
 #include "./llvm.hpp"
@@ -82,8 +83,9 @@ namespace mdl::backend::tvm {
 			kernels->Update(gv, func);
 		namespace gpu = mdl::tvm_ported::dlight::gpu;
 		const auto apply = mdl::tvm_ported::dlight::ApplyDefaultSchedule({
-				// (RowReduction: ours, for rows of symbolic or moderate length, before DLight's reductions.)
+				// (RowReduction, ColumnReduction: ours, before DLight's reductions.)
 				std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
+				std::make_shared<mdl::backend::tvm::gpu::ColumnReduction>(),
 				std::make_shared<gpu::Reduction>(), std::make_shared<gpu::GeneralReduction>(),
 				std::make_shared<gpu::Transpose>(), std::make_shared<gpu::Fallback>()
 		});

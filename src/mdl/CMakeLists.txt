@@ -96,7 +96,8 @@ if(MDL_ENABLE_CUDA)
 	# translated to C++, kept separate in src/tvm_ported (see its README.md).
 	target_link_libraries(mdl PRIVATE mdl_tvm_ported)
 	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp backends/tvm/targets/gpu/row_reduction.cpp
-		backends/tvm/targets/gpu/scatter_add_rows.cpp)
+		backends/tvm/targets/gpu/scatter_add_rows.cpp
+		backends/tvm/targets/gpu/column_reduction.cpp)
 	# The CUDA target uses TVM internals (the CUDA module of the code generation; see targets/cuda.cpp).
 	set_source_files_properties(backends/tvm/targets/cuda.cpp PROPERTIES INCLUDE_DIRECTORIES "${tvm_SOURCE_DIR}/src")
 	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}")
