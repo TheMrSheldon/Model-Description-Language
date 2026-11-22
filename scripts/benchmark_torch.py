@@ -4,9 +4,11 @@ layers, hidden size 768, 12 heads, FFN size 3072; tiny: model_grad.yml), inferen
 backward with respect to the weights and the input), float32 and bfloat16, batch 8 x sequence 128 (tiny: 8 x 32), 3
 warm-up and 20 timed runs; prints the medians in the format of bench.cpp.
 
-Usage: scripts/benchmark_torch.py [--device cuda|cpu] [--compile] [--attention eager|sdpa] [--sizes base tiny]
+Usage: scripts/benchmark_torch.py [--device cuda|cpu] [--compile] [--attention eager|sdpa] [--sizes base tiny] [--mask]
   --attention: transformers' attention implementation: eager (matmul, softmax, matmul; the default, as MDL's model) or
   sdpa (torch's scaled_dot_product_attention: fused attention kernels).
+  --mask: padded sequences (the last quarter of every sequence is padding), as an attention mask (bench.cpp's
+  MDL_BENCH_MASKED).
 Needs torch and transformers.
 """
 
@@ -48,6 +50,7 @@ def main():
     parser.add_argument("--sizes", nargs="+", default=["base", "tiny"])
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--seq", type=int, default=None, help="sequence length (default: 128, tiny: 32)")
+    parser.add_argument("--mask", action="store_true", help="pad the last quarter of every sequence (attention mask)")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=20)
     args = parser.parse_args()
@@ -67,21 +70,27 @@ def main():
                 encoder.train(mode == "train")
                 run = torch.compile(encoder) if args.compile else encoder
                 x = torch.randn(args.batch, seq, cfg["hidden_size"], device=args.device, dtype=dtype) * 0.02
+                mask = None
+                if args.mask:  # additive [batch, 1, 1, seq]: 0 at valid positions, the most negative value at padding
+                    valid = torch.ones(args.batch, seq, device=args.device, dtype=dtype)
+                    valid[:, seq - seq // 4:] = 0
+                    mask = ((1.0 - valid) * torch.finfo(dtype).min)[:, None, None, :]
                 if mode == "infer":
                     def step():
                         with torch.no_grad():
-                            run(x)
+                            run(x, attention_mask=mask)
                 else:
                     x.requires_grad_(True)
                     dy = torch.randn_like(x) * 0.02
 
                     def step():
-                        y = run(x).last_hidden_state
+                        y = run(x, attention_mask=mask).last_hidden_state
                         y.backward(dy)
 
-                suffix = ("_compile" if args.compile else "") + ("_sdpa" if args.attention == "sdpa" else "")
-                bench(f"torch_{size}_{mode}_{precision}_{args.device}{suffix}", step, args.device, args.warmup,
-                      args.iters)
+                suffix = ("_compile" if args.compile else "") + ("_sdpa" if args.attention == "sdpa" else "") + \
+                         ("_masked" if args.mask else "")
+                name = f"torch_{size}_{mode}_{precision}_{args.device}_b{args.batch}s{seq}{suffix}"
+                bench(name, step, args.device, args.warmup, args.iters)
 
 
 if __name__ == "__main__":

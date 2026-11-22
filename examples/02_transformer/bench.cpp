@@ -3,6 +3,8 @@
 // `forward_backward`). With MDL_BENCH_FLOAT (bfloat16 or float16), the model is compiled with `--float bf16|f16`.
 // With MDL_BENCH_DEVICE (a DLDeviceType, e.g. kDLCUDA), the model is compiled for that device (mdlc --target): the
 // tensors are copied there once, and every step is synchronized with the device before it is timed.
+// With MDL_BENCH_MASKED, the encoder is a masked function (`--mask forward`) and the last quarter of every sequence is
+// padding (as in batches of sequences of different lengths).
 // Prints one line: `<name> median <ms> min <ms> (<iterations>)`, after the warm-up runs.
 #include "model.hpp"
 
@@ -98,6 +100,16 @@ int main(int argc, char* argv[]) {
 	Tensor hx(shapeOf(Model::forward_inputs[0], batch, seq)), hy(shapeOf(Model::forward_outputs[0], batch, seq));
 	randomize(hx);
 	DLTensor *x = onDevice(hx), *y = onDevice(hy);
+#ifdef MDL_BENCH_MASKED
+	mdl::runtime::MaskTensor hmask({batch, seq}, uint8_t{1});
+	for (int64_t b = 0; b < batch; ++b)
+		for (int64_t s = seq - seq / 4; s < seq; ++s)
+			hmask.data()[b * seq + s] = 0;
+	DLTensor* mask = onDevice(hmask);
+#define MDL_BENCH_INPUTS x, mask
+#else
+#define MDL_BENCH_INPUTS x
+#endif
 
 #ifdef MDL_BENCH_TRAIN
 	constexpr size_t numGrads = Model::forward_backward_outputs.size();
@@ -116,11 +128,11 @@ int main(int argc, char* argv[]) {
 	auto ctx = Model::forward_ctx_alloc(batch, seq);
 #endif
 	auto step = [&] {
-		Model::forward(x, weights, y, ctx);
+		Model::forward(MDL_BENCH_INPUTS, weights, y, ctx);
 		std::apply([&](auto*... g) { Model::forward_backward(dy, weights, g..., ctx); }, gradPtrs);
 	};
 #else
-	auto step = [&] { Model::forward(x, weights, y); };
+	auto step = [&] { Model::forward(MDL_BENCH_INPUTS, weights, y); };
 #endif
 
 	for (int i = 0; i < warmup; ++i)
