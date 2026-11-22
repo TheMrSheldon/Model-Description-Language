@@ -4,6 +4,7 @@
 #include "../../../logging.hpp"
 #include "./aot.hpp"
 #include "./flatten_injective.hpp"
+#include "./fuse_rows.hpp"
 #include "./fuse_siblings.hpp"
 #include "./attention.hpp"
 #include "./kernel_match.hpp"
@@ -318,6 +319,8 @@ namespace mdl::backend::tvm {
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
 						// Python in TVM 0.24 (constants were folded before the patterns).
 						RT::FuseOps(),
+						// Reductions over the same rows and their epilogue: one group (FuseOps: one reduction each).
+						fuseRows(),
 						RT::FuseTIR(),
 						// The fallbacks of runtime guards, now fused: back into their branches.
 						inlineGuardFallbacks(),
