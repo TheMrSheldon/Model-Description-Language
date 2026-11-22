@@ -873,9 +873,11 @@ namespace mdl::autodiff {
 		// elementwise result is at least as large as its arguments), and the forward pass does not compute values just to
 		// save them (which would also keep backends from replacing the forward computation by a fused kernel). The
 		// backward pass recomputes the elementwise computation, where it fuses with the operations that use it.
-		// Only values that the forward pass would not store anyway are moved: those it does not compute, and those whose
-		// forward uses are all elementwise arithmetic (fused away), unlike e.g. `tanh(h)` that a matrix product takes
-		// (also through reshapes and permutations, which materialize their argument as well).
+		// Only values that the forward pass would not store anyway are moved to their source (moving adds the source as
+		// a saved value): those it does not compute, and those whose forward uses are all elementwise arithmetic (fused
+		// away), unlike e.g. `tanh(h)` that a matrix product takes (also through reshapes and permutations, which
+		// materialize their argument as well). Such a value may still be recomputed instead of saved by the next step
+		// (if it is elementwise in values that are saved anyway).
 		std::unordered_set<const Node*> stored;
 		for (size_t i = 0; i < numOutputs; ++i)
 			stored.insert(&vjp.outputs[i].get());
@@ -984,6 +986,10 @@ namespace mdl::autodiff {
 			residuals = std::move(moved);
 		}
 
+		// Residuals that are elementwise in other residuals (and weights and constants) are not saved: the backward pass
+		// recomputes them from those, which costs no memory, also if the forward pass materializes them (e.g. `gelu(h)`
+		// for a matrix product when `h` is saved for the derivative). The recomputation and the other uses of its inputs
+		// become one kernel in the backends (sibling fusion: `gelu(h)` and `gelu_backward(h, dy)` read `h` once).
 		std::unordered_set<const Node*> saved(residuals.begin(), residuals.end());
 		std::function<bool(const Node&, const Node*)> recomputable = [&](const Node& node, const Node* self) {
 			if (&node != self && saved.contains(&node))
