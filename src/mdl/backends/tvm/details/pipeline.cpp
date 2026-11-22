@@ -4,6 +4,7 @@
 #include "../../../logging.hpp"
 #include "./aot.hpp"
 #include "./flatten_injective.hpp"
+#include "./fuse_siblings.hpp"
 #include "./attention.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
@@ -320,6 +321,9 @@ namespace mdl::backend::tvm {
 						RT::FuseTIR(),
 						// The fallbacks of runtime guards, now fused: back into their branches.
 						inlineGuardFallbacks(),
+						// Independent elementwise kernels reading the same inputs: one kernel (FuseOps fuses only
+						// producers into consumers).
+						fuseSiblings(),
 						RT::DeadCodeElimination({}),
 				},
 				target

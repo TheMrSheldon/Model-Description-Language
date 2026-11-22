@@ -93,13 +93,21 @@ namespace mdl::backend::tvm {
 			if (!rootBlock->alloc_buffers.empty() || block->iter_vars.size() < 2)
 				return std::nullopt; // (a single loop is already flat)
 
-			// The result: written at the iterators, in order.
-			const auto* store = block->body.as<tirx::BufferStoreNode>();
-			if (store == nullptr || !compact(store->buffer) || store->indices.size() != block->iter_vars.size())
-				return std::nullopt;
-			for (size_t i = 0; i < store->indices.size(); ++i)
-				if (!store->indices[i].same_as(block->iter_vars[i]->var))
+			// The results (several: merged sibling kernels, fuseSiblings): each written at the iterators, in order.
+			std::vector<const tirx::BufferStoreNode*> stores;
+			if (const auto* seq = block->body.as<tirx::SeqStmtNode>()) {
+				for (const auto& s : seq->seq)
+					stores.push_back(s.as<tirx::BufferStoreNode>());
+			} else {
+				stores.push_back(block->body.as<tirx::BufferStoreNode>());
+			}
+			for (const auto* store : stores) {
+				if (store == nullptr || !compact(store->buffer) || store->indices.size() != block->iter_vars.size())
 					return std::nullopt;
+				for (size_t i = 0; i < store->indices.size(); ++i)
+					if (!store->indices[i].same_as(block->iter_vars[i]->var))
+						return std::nullopt;
+			}
 			ffi::Array<PrimExpr> extents;
 			PrimExpr total = ::tvm::IntImm(DataType::Int(64), 1);
 			for (const auto& iv : block->iter_vars) {
@@ -157,7 +165,9 @@ namespace mdl::backend::tvm {
 			};
 
 			bool ok = true;
-			ffi::Array<::tvm::TensorRegion> reads;
+			ffi::Array<::tvm::TensorRegion> reads, writes;
+			ffi::Array<tirx::Stmt> flatStores;
+			for (const auto* store : stores) {
 			PrimExpr value = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
 									 store->value,
 									 [&](const ::tvm::TensorLoad& load) -> ffi::UnchangedOr<ffi::Any> {
@@ -197,15 +207,19 @@ namespace mdl::backend::tvm {
 									 .cast<PrimExpr>();
 			if (!ok || usesIterators(value))
 				return std::nullopt;
-
-			// for n in range(total): flat[n] = value
+			// flat[n] = value
 			const auto out = viewOf(store->buffer, total);
+			writes.push_back(tirx::BufferRegionFromPoint(out, {n}));
+			flatStores.push_back(tirx::BufferStore(out, value, {n}));
+			}
+
+			// for n in range(total): the stores
 			const PrimVar& vn = n;
 			const ffi::Array<::tvm::TensorRegion>& blockReads = reads;
 			const s_tir::SBlock flat(
 					{tirx::IterVar(::tvm::Range::FromMinExtent(::tvm::IntImm(DataType::Int(64), 0), total), vn, tirx::kDataPar)},
-					blockReads, {tirx::BufferRegionFromPoint(out, {vn})}, block->name_hint,
-					tirx::BufferStore(out, value, {vn})
+					blockReads, writes, block->name_hint,
+					flatStores.size() == 1 ? flatStores[0] : tirx::Stmt(tirx::SeqStmt(flatStores))
 			);
 			PrimVar loop("i", DataType::Int(64));
 			std::vector<tirx::Stmt> body;

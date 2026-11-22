@@ -66,6 +66,7 @@ add_library(mdl
 	backends/tvm/details/schedule.cpp
 	backends/tvm/details/pipeline.cpp
 	backends/tvm/details/flatten_injective.cpp
+	backends/tvm/details/fuse_siblings.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp
