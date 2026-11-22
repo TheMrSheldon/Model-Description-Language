@@ -635,6 +635,33 @@ namespace mdl::backend::tvm {
 			)
 			.set_attr<bool>("FPurity", true);
 
+	Expr makeSuffixMask(Expr lengths, Expr like) {
+		static const auto& op = ::tvm::Op::Get("mdl.suffix_mask");
+		return Call(::tvm::Type::Missing(), op, {std::move(lengths), std::move(like)});
+	}
+
+	namespace {
+		/** @brief The shape of mdl.suffix_mask: the lengths' dimensions and the next dimension of the reference. */
+		Array<PrimExpr> suffixMaskShape(const Call& call) {
+			const auto lengths = shapeOf(call->args[0]), like = shapeOf(call->args[1]);
+			if (like.size() <= lengths.size())
+				throw std::runtime_error("mdl.suffix_mask: the reference has no dimension after the lengths' dimensions");
+			return Array<PrimExpr>(like.begin(), like.begin() + static_cast<std::ptrdiff_t>(lengths.size() + 1));
+		}
+	} // namespace
+
+	TVM_REGISTER_OP("mdl.suffix_mask")
+			.set_num_inputs(2)
+			.add_argument("lengths", "Tensor", "The number of valid elements [batch...] (integer).")
+			.add_argument("like", "Tensor", "A tensor [batch..., S, ...] (its dimension S: the positions; not read).")
+			.set_attr<::tvm::relax::FInferType>(
+					"FInferType",
+					[](const Call& call, const BlockBuilder&) -> ::tvm::Type {
+						return TensorType(ShapeExpr(suffixMaskShape(call)), ::tvm::PrimType::Bool());
+					}
+			)
+			.set_attr<bool>("FPurity", true);
+
 	Expr makeGeluBackward(Expr x, Expr dy) {
 		static const auto& op = ::tvm::Op::Get("mdl.gelu_backward");
 		return Call(::tvm::Type::Missing(), op, {std::move(x), std::move(dy)});
@@ -894,6 +921,20 @@ namespace mdl::backend::tvm {
 					TECall te{bb, "dequant"};
 					auto w = dequantCompute(te, call->args[0], quant);
 					return te.finish(w);
+				}));
+		map.Set("mdl.suffix_mask", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
+					// out[b..., s] = s < lengths[b...] (the reference only gives the number of positions)
+					TECall te{bb, "suffix_mask"};
+					auto lengths = te.tensor(call->args[0], "lengths");
+					const auto i64 = ::tvm::PrimType::Int(64);
+					return te.finish(te::compute(
+							suffixMaskShape(call),
+							[&](const Array<::tvm::PrimVar>& i) {
+								Array<PrimExpr> b(i.begin(), i.end() - 1);
+								return ::tvm::prim::cast(i64, i[i.size() - 1]) < ::tvm::prim::cast(i64, lengths(b));
+							},
+							"T_suffix_mask", topi::kElementWise
+					));
 				}));
 		map.Set("mdl.gelu_backward", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					const auto &x = call->args[0], &dy = call->args[1];

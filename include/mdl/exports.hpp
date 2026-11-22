@@ -124,9 +124,11 @@ namespace mdl {
 	};
 
 	/**
-	 * @param masked member functions that become masked functions (see mdl::masking::apply): they take an additional
-	 * input `mask: bool[...]` (true: valid), and masked elements in the last dimension of `...` (e.g. padding) do not
-	 * influence the valid results. Masking is applied before differentiation.
+	 * @param masked member functions that become masked functions (see mdl::masking::apply): `name` or `name=element`
+	 * take an additional input `mask: bool[...]` (true: valid), `name=suffix` an input `lengths: int[...]` over the
+	 * dimensions of `...` but the last (the number of valid elements in the last one; the others are a masked suffix,
+	 * e.g. padding). Masked elements in the last dimension of `...` do not influence the valid results. Masking is
+	 * applied before differentiation.
 	 * @param exportOnly the functions to export (`--export`: `forward` or `Module.forward`); empty: all. Only `public`
 	 * member functions are exported; naming another function, or differentiating one that is not exported, is an
 	 * error.

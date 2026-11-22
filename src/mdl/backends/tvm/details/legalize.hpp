@@ -73,6 +73,12 @@ namespace mdl::backend::tvm {
 			::tvm::ffi::Array<::tvm::relax::Expr> inputs, const ::tvm::relax::TensorType& out
 	);
 
+	/**
+	 * @brief Creates a call of the backend operator `mdl.suffix_mask`: bool [batch..., S], true at the positions
+	 * s < lengths[batch...] (lengths: [batch...] integer; S: the next dimension of @p like, which is not read).
+	 */
+	::tvm::relax::Expr makeSuffixMask(::tvm::relax::Expr lengths, ::tvm::relax::Expr like);
+
 	/** @brief Creates a call of the backend operator `mdl.gelu_backward`: dy * GELU'(x) (exact GELU). */
 	::tvm::relax::Expr makeGeluBackward(::tvm::relax::Expr x, ::tvm::relax::Expr dy);
 

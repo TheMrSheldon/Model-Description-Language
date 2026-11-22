@@ -4,7 +4,8 @@
 // the largest reference value of the weight (at least 1% of the largest of all). With MDL_GRAD_FLOAT (bfloat16 or
 // float16), the model is compiled with `--float bf16|f16` (attention then uses fused kernels, e.g. cuDNN's, forward and
 // backward). With MDL_GRAD_MASKED, the model is compiled with `--mask forward` and the reference has padded sequences
-// of different lengths (its cotangent is zero at the padding).
+// of different lengths (its cotangent is zero at the padding); with MDL_GRAD_SUFFIX as well, as a suffix mask
+// (`--mask forward=suffix`: the sequences' lengths).
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -78,7 +79,19 @@ int main() {
 	auto ctx = Model::forward_ctx_alloc(batch, seq, device);
 #ifdef MDL_GRAD_MASKED
 	auto masks = mdl::runtime::loadSafetensorsAs<uint8_t>(path);
+#ifdef MDL_GRAD_SUFFIX
+	// A suffix mask (`--mask forward=suffix`): the number of valid positions per sequence.
+	const auto& hostMask = masks.at("input.mask");
+	mdl::runtime::IntTensor lengths({hostMask.shape()[0]});
+	for (int64_t b = 0; b < hostMask.shape()[0]; ++b) {
+		lengths.data()[b] = 0;
+		for (int64_t p = 0; p < hostMask.shape()[1]; ++p)
+			lengths.data()[b] += hostMask.data()[b * hostMask.shape()[1] + p] != 0;
+	}
+	const DLTensor* mask = onDevice(lengths);
+#else
 	const DLTensor* mask = onDevice(masks.at("input.mask"));
+#endif
 	Model::forward(ids, types, positions, mask, weights, out, ctx);
 #else
 	Model::forward(ids, types, positions, weights, out, ctx);

@@ -10,7 +10,15 @@
 
 namespace mdl::masking {
 
-	/** @brief A masked function and its mask input. */
+	/**
+	 * @brief How a masked function takes its mask: element masks (any element may be masked) as `mask: bool[...]`,
+	 * suffix masks (the valid elements first, e.g. padded sequences) as `lengths: int[...]` over the dimensions of `...`
+	 * but the last (the number of valid elements in the last one). The semantics are the same; a suffix mask's structure
+	 * is known to the compiler (see builtins::FunctionIDs::SUFFIX_MASK), e.g. for kernels that skip the masked suffix.
+	 */
+	enum class MaskKind { element, suffix };
+
+	/** @brief A masked function and its mask input (`mask`, or `lengths` for a suffix mask). */
 	struct Masked {
 		FunctionDecl function;
 		const Node* mask;
@@ -43,11 +51,15 @@ namespace mdl::masking {
 	 * zeroed there) and the values there are finite, so masked positions contribute exact zeros to the gradients.
 	 *
 	 * @param shapes the inferred shapes of @p func (see mdl::shapes::infer).
-	 * @return the masked function (same name; the mask is its last parameter `mask`) and its mask input, or an error
+	 * @param kind how the mask is given (see MaskKind): an element mask `mask: bool[...]`, or a suffix mask
+	 * `lengths: int[...]` (the leading dimensions of `...`; its boolean mask: SUFFIX_MASK of the lengths and the first
+	 * parameter of `...`).
+	 * @return the masked function (same name; the mask is its last parameter) and its mask input, or an error
 	 * (e.g. if a masked dimension cannot be aligned with the mask).
 	 */
-	std::expected<Masked, std::string>
-	apply(Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes);
+	std::expected<Masked, std::string> apply(
+			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes, MaskKind kind = MaskKind::element
+	);
 
 } // namespace mdl::masking
 

@@ -89,6 +89,12 @@ namespace mdl::builtins {
 		 * (the backend saves only what the selected computation reads).
 		 */
 		ATTENTION_GRAD,
+		/** Masks **/
+		/**
+		 * (lengths int[batch...], like [batch..., S, ...]): bool [batch..., S], true at the positions s < lengths[batch...]
+		 * (a suffix mask: the valid elements first, the masked ones after; e.g. padded sequences of different lengths)
+		 */
+		SUFFIX_MASK,
 
 		COUNT
 	};

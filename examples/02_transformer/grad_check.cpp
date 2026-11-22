@@ -2,7 +2,8 @@
 // buffer) + forward_backward against central finite differences of L = sum(forward(x) * dy). The saved attention
 // probabilities grow with seq^2, so this also checks the context layout.
 // With MDL_GRAD_MASKED, the encoder is a masked function (`--mask forward`) and the sequences are padded: the gradients
-// are those of the masked function, and they do not depend on the padding, not even if it contains NaN.
+// are those of the masked function, and they do not depend on the padding, not even if it contains NaN. With
+// MDL_GRAD_SUFFIX as well, the model is compiled with a suffix mask (`--mask forward=suffix`, the sequences' lengths).
 #include "model.hpp"
 
 #include <mdl/runtime.hpp>
@@ -70,7 +71,15 @@ int main() {
 	mdl::runtime::MaskTensor mask({batch, seq}, uint8_t{1});
 	for (int64_t s = seq - 2; s < seq; ++s)
 		mask.data()[seq + s] = 0;
+#ifdef MDL_GRAD_SUFFIX
+	// A suffix mask (`--mask forward=suffix`): the same as lengths.
+	mdl::runtime::IntTensor lengths({batch});
+	lengths.data()[0] = static_cast<int32_t>(seq);
+	lengths.data()[1] = static_cast<int32_t>(seq - 2);
+	auto forward = [&](const Tensor& input, Tensor& out, Model::Context& c) { Model::forward(input, lengths, weights, out, c); };
+#else
 	auto forward = [&](const Tensor& input, Tensor& out, Model::Context& c) { Model::forward(input, mask, weights, out, c); };
+#endif
 #else
 	auto forward = [&](const Tensor& input, Tensor& out, Model::Context& c) { Model::forward(input, weights, out, c); };
 #endif

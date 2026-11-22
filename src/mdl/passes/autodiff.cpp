@@ -355,6 +355,7 @@ namespace mdl::autodiff {
 			case FIDs::PERMUTE_INVERSE:
 				return arg == 0;
 			case FIDs::EQUAL_MASK:
+			case FIDs::SUFFIX_MASK:
 				return false; // piecewise constant
 			case FIDs::VAR:
 				return arg == 0; // not the degrees of freedom

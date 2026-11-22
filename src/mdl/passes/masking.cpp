@@ -392,12 +392,53 @@ namespace mdl::masking {
 		};
 	} // namespace
 
+	namespace {
+		/** @brief The boolean mask of a suffix mask: SUFFIX_MASK of the lengths and the first parameter of `...`. */
+		const Node& suffixMask(Computegraph& graph, const FunctionDecl& func, const Node& lengths) {
+			const InputNode* like = nullptr;
+			for (const auto& [name, p] : func.parameters) {
+				const auto* t = std::get_if<TensorType>(&p.get().type);
+				if (t != nullptr && !t->shape.empty() && std::holds_alternative<Elipsis>(t->shape.front())) {
+					like = &p.get();
+					break;
+				}
+			}
+			// Its graph node (the parameters refer to the InputNode alternative of the node).
+			std::unordered_set<const Node*> seen;
+			std::vector<const Node*> stack;
+			for (const auto& output : func.outputs)
+				stack.push_back(&output.get());
+			while (like != nullptr && !stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!seen.insert(n).second)
+					continue;
+				if (std::get_if<InputNode>(n) == like)
+					return graph.addInvocationNode(builtins::FunctionIDs::SUFFIX_MASK, {lengths, *n});
+				if (const auto* inv = std::get_if<InvocationNode>(n))
+					for (const auto& a : inv->arguments)
+						stack.push_back(&a.get());
+			}
+			throw MaskError{"a suffix mask needs a parameter whose shape starts with `...` (and that the function uses)"};
+		}
+	} // namespace
+
 	std::expected<Masked, std::string>
-	apply(Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes) {
+	apply(Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes, MaskKind kind) {
 		FunctionDecl result = func;
-		const Node* mask = &graph.addInputNode(TensorType{PrimitiveType::boolean, {Elipsis{}}}, "mask");
-		result.parameters.emplace_back("mask", std::cref(std::get<InputNode>(*mask)));
+		const Node* input = nullptr;
+		const Node* mask = nullptr;
+		if (kind == MaskKind::element) {
+			input = mask = &graph.addInputNode(TensorType{PrimitiveType::boolean, {Elipsis{}}}, "mask");
+			result.parameters.emplace_back("mask", std::cref(std::get<InputNode>(*input)));
+		} else {
+			// The number of valid elements per row (the boolean mask over `...`: see suffixMask).
+			input = &graph.addInputNode(TensorType{PrimitiveType::integer, {Elipsis{}}}, "lengths");
+			result.parameters.emplace_back("lengths", std::cref(std::get<InputNode>(*input)));
+		}
 		try {
+			if (mask == nullptr)
+				mask = &suffixMask(graph, func, *input);
 			Masker masker{graph, shapes, *mask};
 			{
 				// The graph nodes of the inputs (the parameters refer to the InputNode alternative of the node).
@@ -428,7 +469,7 @@ namespace mdl::masking {
 		} catch (const MaskError& e) {
 			return std::unexpected(func.name + ": " + e.message);
 		}
-		return Masked{std::move(result), mask};
+		return Masked{std::move(result), input};
 	}
 
 } // namespace mdl::masking

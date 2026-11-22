@@ -2,7 +2,9 @@
 // BertModel: the weights, inputs, and reference output come from a safetensors file written by
 // export_bert_reference.py (default: data/bert_tiny.safetensors next to this file). With MDL_BERT_MASKED, the model is
 // compiled with `--mask forward` and the file contains padded sequences and their mask: only the valid positions are
-// compared (they must not depend on the padding), and the masked positions of the output must be zero.
+// compared (they must not depend on the padding), and the masked positions of the output must be zero. With
+// MDL_BERT_SUFFIX as well, the model is compiled with suffix masks (`--mask forward=suffix`): the lengths of the
+// sequences instead of the mask.
 // With MDL_BERT_FLOAT (bfloat16 or float16), the model is compiled with `--float bf16|f16`: the float32 reference
 // weights are converted when loading, and the outputs are compared with the tolerance MDL_BERT_TOLERANCE (relative to
 // the largest output). With MDL_BERT_DEVICE (a DLDeviceType, e.g. kDLCUDA), the model is compiled for that device
@@ -90,7 +92,18 @@ int main(int argc, char** argv) {
 #ifdef MDL_BERT_MASKED
 	auto masks = mdl::runtime::loadSafetensorsAs<uint8_t>(path);
 	auto& hostMask = masks.at("input.mask");
+#ifdef MDL_BERT_SUFFIX
+	// A suffix mask (`--mask f=suffix`): the number of valid positions per sequence (the file's masks are prefixes).
+	mdl::runtime::IntTensor lengths({hostMask.shape()[0]});
+	for (int64_t b = 0; b < hostMask.shape()[0]; ++b) {
+		lengths.data()[b] = 0;
+		for (int64_t s = 0; s < hostMask.shape()[1]; ++s)
+			lengths.data()[b] += hostMask.data()[b * hostMask.shape()[1] + s] != 0;
+	}
+	const DLTensor* mask = onDevice(lengths);
+#else
 	const DLTensor* mask = onDevice(hostMask);
+#endif
 	intoHost(output, [&](DLTensor* out) { Model::forward(ids, types, positions, mask, weights, out); });
 	auto valid = [&](size_t i) { return hostMask.data()[i / hidden] != 0; };
 #else

@@ -574,6 +574,8 @@ namespace mdl::backend::tvm {
 				auto grad = makeAttentionGrad(ts[0], ts[1], ts[2], ts[4], ts[5], ts[6], ts[7], attentionScale(ts[3]), bias);
 				return ::tvm::relax::TupleGetItem(emitAs(bb, grad, "attention_grad"), static_cast<int>(*which));
 			},
+			/** SUFFIX_MASK — the backend operator mdl.suffix_mask **/
+			[](auto& /*bb*/, auto ts) -> ::tvm::relax::Expr { return makeSuffixMask(ts[0], ts[1]); },
 	});
 
 	// Every builtin needs a translation (the table is positional).

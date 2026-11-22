@@ -32,7 +32,8 @@ endif()
 # sequences with a mask; float16 GEMMs use tensor cores (bert_check.cpp with MDL_BERT_DEVICE).
 set(_bert_dir ${_examples}/02_transformer)
 foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "f16;float16;5e-3;" "masked;;1e-4;--mask;forward;--mask;pooled"
-		"masked_bf16;bfloat16;2e-2;--mask;forward;--mask;pooled")
+		"masked_bf16;bfloat16;2e-2;--mask;forward;--mask;pooled"
+		"masked_suffix_bf16;bfloat16;2e-2;--mask;forward=suffix;--mask;pooled=suffix")
 	list(GET variant 0 name)
 	list(GET variant 1 type)
 	list(GET variant 2 tolerance)
@@ -59,13 +60,17 @@ foreach(variant IN ITEMS "f32;;1e-4;" "bf16;bfloat16;2e-2;" "f16;float16;5e-3;" 
 	if(name MATCHES "masked")
 		target_compile_definitions(cuda_bert_${name} PRIVATE MDL_BERT_MASKED)
 	endif()
+	if(name MATCHES "suffix")
+		target_compile_definitions(cuda_bert_${name} PRIVATE MDL_BERT_SUFFIX)
+	endif()
 	add_test(NAME cuda_bert_${name} COMMAND cuda_bert_${name})
 endforeach()
 
 # Training BERT on the GPU: the gradients of `--grad forward` (residuals in a context buffer on the GPU) against Hugging
 # Face's autograd (bert_grad.cpp; reference: export_bert_reference.py --grad). In bfloat16 and float16, attention and
 # its gradient use fused kernels (the cuDNN package), in float32 the unfused operations.
-foreach(variant IN ITEMS "f32;;1e-3" "bf16;bfloat16;5e-2" "f16;float16;2e-2" "masked_f32;;1e-3" "masked_bf16;bfloat16;5e-2")
+foreach(variant IN ITEMS "f32;;1e-3" "bf16;bfloat16;5e-2" "f16;float16;2e-2" "masked_f32;;1e-3" "masked_bf16;bfloat16;5e-2"
+		"masked_suffix_bf16;bfloat16;5e-2")
 	list(GET variant 0 name)
 	list(GET variant 1 type)
 	list(GET variant 2 tolerance)
@@ -76,7 +81,10 @@ foreach(variant IN ITEMS "f32;;1e-3" "bf16;bfloat16;5e-2" "f16;float16;2e-2" "ma
 	elseif(type STREQUAL "float16")
 		list(APPEND options --float f16)
 	endif()
-	if(name MATCHES "masked") # (padded sequences of different lengths: masked attention)
+	if(name MATCHES "suffix") # (the same as a suffix mask: the sequences' lengths)
+		list(APPEND options --mask forward=suffix)
+		set(reference ${_bert_dir}/data/bert_tiny_grad_padded.safetensors)
+	elseif(name MATCHES "masked") # (padded sequences of different lengths: masked attention)
 		list(APPEND options --mask forward)
 		set(reference ${_bert_dir}/data/bert_tiny_grad_padded.safetensors)
 	endif()
@@ -88,6 +96,9 @@ foreach(variant IN ITEMS "f32;;1e-3" "bf16;bfloat16;5e-2" "f16;float16;2e-2" "ma
 		MDL_GRAD_TOLERANCE=${tolerance})
 	if(name MATCHES "masked")
 		target_compile_definitions(cuda_bert_grad_${name} PRIVATE MDL_GRAD_MASKED)
+	endif()
+	if(name MATCHES "suffix")
+		target_compile_definitions(cuda_bert_grad_${name} PRIVATE MDL_GRAD_SUFFIX)
 	endif()
 	if(type)
 		target_compile_definitions(cuda_bert_grad_${name} PRIVATE MDL_GRAD_FLOAT=${type})

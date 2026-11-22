@@ -393,6 +393,24 @@ namespace mdl::shapes {
 				}
 				case FIDs::ATTENTION_GRAD:
 					return arg(static_cast<size_t>(integer(args.at(8).get())));
+				case FIDs::SUFFIX_MASK: { // lengths [batch...], like [batch..., S, ...] -> [batch..., S]
+					const Shape& lengths = arg(0);
+					const Shape& like = arg(1);
+					if (std::any_of(lengths.begin(), lengths.end(), [](const Dim& d) { return d.group; }) ||
+						std::any_of(like.begin(), like.end(), [](const Dim& d) { return d.group; })) {
+						if (!symbolic)
+							fail("suffix mask of unknown rank");
+						return Shape{Dim::ellipsis()};
+					}
+					if (like.size() <= lengths.size())
+						fail("suffix mask: the reference has no dimension after the lengths' dimensions");
+					Shape s(like.begin(), like.begin() + static_cast<std::ptrdiff_t>(lengths.size() + 1));
+					if (!symbolic && Shape(s.begin(), s.end() - 1) != lengths)
+						mismatched(std::format(
+								"suffix mask: the lengths {} are not the leading dimensions of {}", str(lengths), str(like)
+						));
+					return s;
+				}
 				case FIDs::STACK: {
 					if (args.empty())
 						fail("stack of no tensors");
@@ -642,6 +660,8 @@ namespace mdl::shapes {
 				return of(2).value_or(PrimitiveType::float32);
 			case FIDs::ATTENTION_LSE: // (row statistics in full precision)
 				return PrimitiveType::float32;
+			case FIDs::SUFFIX_MASK:
+				return PrimitiveType::boolean;
 			case FIDs::DEQUANT: // the type of the scales
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::UNSELECT_LIKE:

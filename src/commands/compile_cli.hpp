@@ -497,9 +497,11 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	);
 	app.add_option(
 			"--mask", args.maskFunctions,
-			"Make this member function masked: it takes an additional input mask: bool[...] (true: valid), and masked "
-			"positions in the last dimension of `...` (e.g. the padding of shorter sequences) do not influence the "
-			"valid results; outputs are zero at masked positions. Repeatable."
+			"Make this member function masked (NAME or NAME=element|suffix): masked positions in the last dimension of "
+			"`...` (e.g. the padding of shorter sequences) do not influence the valid results; outputs are zero at "
+			"masked positions. An element mask (the default) is an additional input mask: bool[...] (true: valid); a "
+			"suffix mask an input lengths: int[...] over the dimensions of `...` but the last (the number of valid "
+			"positions, the rest is masked), whose structure kernels can use. Repeatable."
 	);
 	app.add_option(
 			"--checkpoint", args.checkpoint,

@@ -52,6 +52,21 @@ target_compile_definitions(02_transformer_grad_masked PRIVATE MDL_GRAD_MASKED)
 target_link_libraries(02_transformer_grad_masked PRIVATE transformer_model_grad_masked)
 add_test(NAME example_02_transformer_grad_masked COMMAND 02_transformer_grad_masked)
 
+# The same with suffix masks (`--mask f=suffix`: the sequences' lengths instead of a mask).
+mdl_add_model(bert_model_suffix SOURCE model.dlm CONFIG model_bert_tiny.yml
+	OPTIONS --ellipsis-rank 2 --mask forward=suffix --mask pooled=suffix)
+add_executable(02_transformer_bert_suffix bert_check.cpp)
+target_link_libraries(02_transformer_bert_suffix PRIVATE bert_model_suffix)
+target_compile_definitions(02_transformer_bert_suffix PRIVATE MDL_BERT_MASKED MDL_BERT_SUFFIX
+	MDL_BERT_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/bert_tiny_padded.safetensors")
+add_test(NAME example_02_transformer_bert_suffix COMMAND 02_transformer_bert_suffix)
+mdl_add_model(transformer_model_grad_suffix SOURCE model.dlm CONFIG model_grad.yml
+	OPTIONS --ellipsis-rank 2 --mask forward=suffix --grad forward)
+add_executable(02_transformer_grad_suffix grad_check.cpp)
+target_compile_definitions(02_transformer_grad_suffix PRIVATE MDL_GRAD_MASKED MDL_GRAD_SUFFIX)
+target_link_libraries(02_transformer_grad_suffix PRIVATE transformer_model_grad_suffix)
+add_test(NAME example_02_transformer_grad_suffix COMMAND 02_transformer_grad_suffix)
+
 # Sequence classification (BERT + pooler + classifier) on padded sequences against Hugging Face's
 # BertForSequenceClassification.
 mdl_add_model(bert_cls_model SOURCE model.dlm CONFIG model_cls_tiny.yml BUILD inference)

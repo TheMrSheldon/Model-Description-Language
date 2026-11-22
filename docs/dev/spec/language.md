@@ -413,6 +413,12 @@ x). A compiled function with masked parameters (or `mdlc --mask f`) takes an add
 compiler inserts the masking where masked elements would mix with valid ones (reductions, softmax, contractions), and
 the outputs are zero at masked positions.
 
+How the mask is passed is chosen when compiling, not in the model: an **element mask** (`mdlc --mask f`, or
+`--mask f=element`) is the input `mask: bool[...]`, so any element can be masked; a **suffix mask** (`--mask f=suffix`)
+is the input `lengths: int[...]` over the dimensions of `...` but the last, the number of valid elements in the last
+one (the rest is masked), e.g. padded sequences of different lengths. Both mean the same for the model; a suffix mask's
+structure is known to the compiler, so kernels can skip the masked suffix.
+
 # Types
 ## Atomic types
 - `uint`, `int`, `bool`
