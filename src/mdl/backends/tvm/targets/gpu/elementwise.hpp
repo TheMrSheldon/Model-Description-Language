@@ -2,7 +2,7 @@
 
 /**
  * @file elementwise.hpp
- * @brief A GPU schedule rule for elementwise kernels over flat buffers: vector loads and stores.
+ * @brief A GPU schedule rule for elementwise kernels and copies along the innermost dimension: vector loads and stores.
  */
 
 #include <tvm_ported/s_tir/dlight/gpu/base.hpp>
@@ -10,11 +10,12 @@
 namespace mdl::backend::tvm::gpu {
 
 	/**
-	 * @brief An elementwise kernel whose buffers are all accessed at the same flat index (e.g. GELU, a residual addition,
-	 * a conversion; after the backend's flattening of injective kernels, see flatten_injective.hpp): kBytes per thread
-	 * (e.g. 4 bfloat16 values), loaded and stored as vectors, if the number of elements is a multiple (provably, also
-	 * for symbolic sizes). Otherwise, or with operands at other indices (broadcasts), DLight's rules schedule it. Our
-	 * rule, not a port of TVM's; applied before DLight's Fallback.
+	 * @brief An elementwise kernel (also a copy that permutes the outer dimensions, or broadcasts along them) whose
+	 * buffers all have the innermost iterator as their innermost index, e.g. GELU, a residual addition, a conversion,
+	 * `x[m, n] + b[n]`, or the transposition of the heads of attention ([heads, batch, seq, dim] to [batch, seq, heads,
+	 * dim]): kBytes per thread (e.g. 4 bfloat16 values) as vectors of adjacent elements of the innermost dimension, if
+	 * its size is a multiple (provably, also for symbolic sizes). Otherwise DLight's rules schedule it. Our rule, not a
+	 * port of TVM's; applied before DLight's Transpose and Fallback.
 	 */
 	class Elementwise final : public mdl::tvm_ported::dlight::gpu::GPUScheduleRule {
 	public:

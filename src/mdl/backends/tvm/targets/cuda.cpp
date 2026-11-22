@@ -88,7 +88,7 @@ namespace mdl::backend::tvm {
 				std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
 				std::make_shared<mdl::backend::tvm::gpu::ColumnReduction>(),
 				std::make_shared<gpu::Reduction>(), std::make_shared<gpu::GeneralReduction>(),
-				std::make_shared<gpu::Transpose>(), std::make_shared<mdl::backend::tvm::gpu::Elementwise>(),
+				std::make_shared<mdl::backend::tvm::gpu::Elementwise>(), std::make_shared<gpu::Transpose>(),
 				std::make_shared<gpu::Fallback>()
 		});
 		try {
