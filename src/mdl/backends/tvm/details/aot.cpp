@@ -227,11 +227,21 @@ namespace mdl::backend::tvm {
 					);
 					if (accumulated.back())
 						continue; // computed into a temporary and then added to the output buffer
-					// Follow aliases (`output = alloc`) to the allocation that can write into the output directly.
+					// Follow aliases (`output = alloc`, also through the elements of a kernel's tuple of results: `t =
+					// (alloc0, alloc1)`, `output = t[1]`) to the allocation that can write into the output directly.
 					const auto* var = returned[i].as<::tvm::VarNode>();
 					while (var != nullptr) {
 						auto it = bindingOf.find(var);
-						const auto* alias = it == bindingOf.end() ? nullptr : it->second.as<::tvm::VarNode>();
+						if (it == bindingOf.end())
+							break;
+						const ::tvm::VarNode* alias = it->second.as<::tvm::VarNode>();
+						if (const auto* get = it->second.as<::tvm::TupleGetItemNode>()) {
+							const auto* tupleVar = get->tuple.as<::tvm::VarNode>();
+							auto t = tupleVar ? bindingOf.find(tupleVar) : bindingOf.end();
+							const auto* tuple = t == bindingOf.end() ? nullptr : t->second.as<relax::TupleNode>();
+							if (tuple != nullptr && get->index < static_cast<int>(tuple->fields.size()))
+								alias = tuple->fields[get->index].as<::tvm::VarNode>();
+						}
 						if (alias == nullptr)
 							break;
 						var = alias;
