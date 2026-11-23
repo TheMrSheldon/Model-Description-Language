@@ -129,7 +129,7 @@ TEST_CASE("sources can come from a reader (unsaved editor buffers)", "[parser][d
 	{
 		std::ofstream{dir / "helpers.dlm"} << "this is not valid";
 	}
-	auto result = analyzeSource("import helpers;\nfloat[...] f(x: float[...]) => twice(x);", options);
+	auto result = analyzeSource("from helpers import twice;\nfloat[...] f(x: float[...]) => twice(x);", options);
 	std::filesystem::remove_all(dir);
 	CHECK(result.ok);
 }
@@ -398,9 +398,10 @@ module N[] { m: M[6] float[4, 2] g(x: float[6]) => m.f(x); })");
 	std::vector<std::string> messages;
 	for (const auto& d : result.diagnostics)
 		messages.push_back(d.message);
-	CHECK(messages == std::vector<std::string>{
-							  "einops error: The group (a b) has size 8, but the dimension has size 6",
-							  "M[6] has an error: einops error: The group (a b) has size 8, but the dimension has size 6 "
-							  "(<test>:1:51)",
-					  });
+	CHECK(messages ==
+		  std::vector<std::string>{
+				  "einops error: The group (a b) has size 8, but the dimension has size 6",
+				  "M[6] has an error: einops error: The group (a b) has size 8, but the dimension has size 6 "
+				  "(<test>:1:51)",
+		  });
 }

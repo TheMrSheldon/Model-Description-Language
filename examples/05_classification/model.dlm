@@ -1,4 +1,5 @@
-import std;
+from std.nn import Embedding, Linear;
+from std.losses import cross_entropy;
 
 /**
  * @brief A bag-of-words text classifier: embeds the tokens, averages them over the sequence, and classifies.
@@ -9,11 +10,11 @@ module Classifier[vocab: uint, dim: uint, classes: uint, seq: uint] {
     hidden: Linear[dim, dim]
     out: Linear[dim, classes]
 
-    float[..., classes] forward(ids: int[..., seq]) {
+    public float[..., classes] forward(ids: int[..., seq]) {
         auto tokens = embed(ids);                        // [..., seq, dim]
         auto pooled = mean(tokens[... s d -> ... d s]);  // [..., dim]
         return out(tanh(hidden(pooled)));
     }
 
-    float loss(ids: int[..., seq], labels: int[...]) => cross_entropy(forward(ids), labels);
+    public float loss(ids: int[..., seq], labels: int[...]) => cross_entropy(forward(ids), labels);
 }

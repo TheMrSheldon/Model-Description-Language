@@ -1,4 +1,5 @@
-import std;
+from std.nn import Embedding, LayerNorm, Linear;
+from std.losses import cross_entropy;
 
 struct TransformerConf {
     dims: struct {
@@ -23,7 +24,7 @@ module TransformerEncoder[conf: TransformerConf] {
     weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
     ffnNorm: LayerNorm[conf.dims.model]
 
-    float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key],
+    public float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key],
             key: float[..., conf.numAttnHeads * conf.dims.key],
             value: float[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
@@ -34,12 +35,12 @@ module TransformerEncoder[conf: TransformerConf] {
         return tmp[h ... d -> ... (h d)];
     }
 
-    float[..., conf.dims.model] mha(query: float[..., conf.numAttnHeads * conf.dims.key],
+    public float[..., conf.dims.model] mha(query: float[..., conf.numAttnHeads * conf.dims.key],
             key: float[..., conf.numAttnHeads * conf.dims.key],
             value: float[..., conf.numAttnHeads * conf.dims.value]) =>
         weightOut(sdpa(query, key, value));
 
-    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
+    public float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
         auto attn = mhaNorm(mha(weightQuery(x), weightKey(x), weightValue(x)) + x);
         auto intermed = gelu(weightIntermed(attn));
         return ffnNorm(weightIntermedOut(intermed) + attn);
@@ -52,7 +53,7 @@ module TransformerEncoder[conf: TransformerConf] {
 module BertEncoder[conf: TransformerConf] {
     layers: [TransformerEncoder[conf] for _ in 0..conf.numEncoders]
 
-    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
+    public float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
         auto h = x;
         for (i in 0..conf.numEncoders) {
             h = layers[i](h);
@@ -61,7 +62,7 @@ module BertEncoder[conf: TransformerConf] {
     }
 
     /** @brief The output of every layer (e.g. for features from intermediate layers): [layers, ..., model]. */
-    float[conf.numEncoders, ..., conf.dims.model] hiddenStates(x: float[..., conf.dims.model]) {
+    public float[conf.numEncoders, ..., conf.dims.model] hiddenStates(x: float[..., conf.dims.model]) {
         float[conf.numEncoders, ..., conf.dims.model] hs;
         auto h = x;
         for (i in 0..conf.numEncoders) {
@@ -88,7 +89,7 @@ module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
     tokenType: Embedding[emb.types, conf.dims.model]
     norm: LayerNorm[conf.dims.model]
 
-    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+    public float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
         norm(word(ids) + position(positions) + tokenType(types));
 }
 
@@ -99,7 +100,7 @@ module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
 module BertPooler[conf: TransformerConf] {
     dense: Linear[conf.dims.model, conf.dims.model]
 
-    float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(h[..., 0, :]));
+    public float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(h[..., 0, :]));
 }
 
 /**
@@ -112,10 +113,10 @@ module Bert[conf: TransformerConf, emb: EmbeddingConf] {
     encoder: BertEncoder[conf]
     pooler: BertPooler[conf]
 
-    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+    public float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
         encoder(embeddings(ids, types, positions));
 
-    float[..., conf.dims.model] pooled(ids: int[...], types: int[...], positions: int[...]) =>
+    public float[..., conf.dims.model] pooled(ids: int[...], types: int[...], positions: int[...]) =>
         pooler(forward(ids, types, positions));
 }
 
@@ -127,13 +128,13 @@ module BertForSequenceClassification[conf: TransformerConf, emb: EmbeddingConf, 
     bert: Bert[conf, emb]
     classifier: Linear[conf.dims.model, classes]
 
-    float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
+    public float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
         classifier(bert.pooled(ids, types, positions));
 
     /**
      * The training objective: the mean cross-entropy of the logits and the class labels (one per sequence; compile
      * with `--ellipsis-rank labels=1` so that labels are [batch] while the ids are [batch, seq]).
      */
-    float loss(ids: int[...], types: int[...], positions: int[...], labels: int[...]) =>
+    public float loss(ids: int[...], types: int[...], positions: int[...], labels: int[...]) =>
         cross_entropy(logits(ids, types, positions), labels);
 }

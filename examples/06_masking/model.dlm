@@ -1,5 +1,3 @@
-import std;
-
 /** Average over the last dimension (generic: a masked argument averages the valid elements only). */
 float[...] average(x: float[...]) => mean(x);
 
@@ -15,11 +13,11 @@ float[...] average(x: masked float[...]) => mean(x.data) / mean(x.mask);
  * `meanAll` and `sumAll` reduce all valid elements to a scalar.
  */
 module Pool[dim: uint] {
-    float[dim] withOverload(x: masked float[..., dim]) => average(x[... d -> d ...]);
-    float[dim] generic(x: masked float[..., dim]) => mean(x[... d -> d ...]);
+    public float[dim] withOverload(x: masked float[..., dim]) => average(x[... d -> d ...]);
+    public float[dim] generic(x: masked float[..., dim]) => mean(x[... d -> d ...]);
     /** The mean and sum of all valid elements (the flattened tensor: its masked rows are ignored). */
-    float meanAll(x: masked float[..., dim]) => mean_flat(x);
-    float sumAll(x: masked float[..., dim]) => sum_flat(x);
+    public float meanAll(x: masked float[..., dim]) => mean_flat(x);
+    public float sumAll(x: masked float[..., dim]) => sum_flat(x);
     /** The same mean with the dimensions flattened in another order. */
-    float meanReordered(x: masked float[..., dim]) => mean(x[... d -> (d ...)]);
+    public float meanReordered(x: masked float[..., dim]) => mean(x[... d -> (d ...)]);
 }

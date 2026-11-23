@@ -71,7 +71,9 @@ TEST_CASE("long lines are wrapped", "[format]") {
 	narrow.columnLimit = 50;
 	CHECK(formatted("float[...] f(x: float[...], y: float[...]) => x + y + x * y;", narrow) ==
 		  "float[...] f(x: float[...], y: float[...]) =>\n    x + y + x * y;\n");
-	CHECK(formatted("float[...] f(first: float[...], second: float[...], third: float[...]) { return first; }", narrow) ==
+	CHECK(formatted(
+				  "float[...] f(first: float[...], second: float[...], third: float[...]) { return first; }", narrow
+		  ) ==
 		  "float[...] f(first: float[...],\n        second: float[...], third: float[...]) {\n    return first;\n}\n");
 }
 
@@ -112,7 +114,9 @@ TEST_CASE("every source file of the repository formats idempotently with the sam
 TEST_CASE("style files are read and found", "[format]") {
 	const auto dir = fs::temp_directory_path() / ("mdl-format-test-" + std::to_string(std::random_device{}()));
 	fs::create_directories(dir / "sub");
-	{ std::ofstream{dir / ".mdl-format"} << "# style\nIndentWidth: 2\nColumnLimit: 80  # narrow\n"; }
+	{
+		std::ofstream{dir / ".mdl-format"} << "# style\nIndentWidth: 2\nColumnLimit: 80  # narrow\n";
+	}
 	auto found = format::findStyleFile(dir / "sub" / "model.dlm");
 	REQUIRE(found);
 	CHECK(fs::equivalent(*found, dir / ".mdl-format"));
@@ -121,7 +125,9 @@ TEST_CASE("style files are read and found", "[format]") {
 	CHECK(style->indentWidth == 2);
 	CHECK(style->columnLimit == 80);
 	CHECK(style->maxEmptyLines == 1);
-	{ std::ofstream{dir / "bad"} << "IndentWidht: 2\n"; }
+	{
+		std::ofstream{dir / "bad"} << "IndentWidht: 2\n";
+	}
 	auto bad = format::loadStyle(dir / "bad");
 	REQUIRE_FALSE(bad);
 	CHECK(bad.error().find("unknown key IndentWidht") != std::string::npos);
@@ -156,14 +162,16 @@ TEST_CASE("the style's naming rules are checked for each kind of definition", "[
 	options.naming.hyperparameter = format::Naming::snakeCase;
 	options.naming.variable = format::Naming::camelCase;
 	options.naming.function = format::Naming::camelCase;
-	auto result = format::format(R"(module my_block[hiddenSize: uint] {
+	auto result = format::format(
+			R"(module my_block[hiddenSize: uint] {
     float[..., hiddenSize] forward(x: float[..., hiddenSize]) {
         auto out_value = x;
         return out_value;
     }
 }
 )",
-								 options);
+			options
+	);
 	REQUIRE(result.ok);
 	std::vector<std::string> messages, hints;
 	for (const auto& d : result.diagnostics) {
@@ -183,27 +191,34 @@ TEST_CASE("the style's naming rules are checked for each kind of definition", "[
 TEST_CASE("comments are reflowed at the column limit if enabled", "[format]") {
 	format::FormatOptions options;
 	options.columnLimit = 34;
-	const std::string source = "// one two three four five six seven eight\n/**\n * alpha beta gamma delta epsilon zeta\n */\n"
-							   "float[...] f(x: float[...]) => x;\n";
+	const std::string source =
+			"// one two three four five six seven eight\n/**\n * alpha beta gamma delta epsilon zeta\n */\n"
+			"float[...] f(x: float[...]) => x;\n";
 	CHECK(formatted(source, options) == source); // off by default
 	options.reflowComments = true;
 	const auto text = formatted(source, options);
-	CHECK(text == "// one two three four five six\n// seven eight\n/**\n * alpha beta gamma delta epsilon\n * zeta\n */\n"
-				  "float[...] f(x: float[...]) => x;\n");
+	CHECK(text ==
+		  "// one two three four five six\n// seven eight\n/**\n * alpha beta gamma delta epsilon\n * zeta\n */\n"
+		  "float[...] f(x: float[...]) => x;\n");
 	CHECK(formatted(text, options) == text);
 }
 
 TEST_CASE("style files set the reflow and naming options", "[format][naming]") {
 	const auto dir = fs::temp_directory_path() / ("mdl-format-naming-" + std::to_string(std::random_device{}()));
 	fs::create_directories(dir);
-	{ std::ofstream{dir / ".mdl-format"} << "ReflowComments: true\nModuleNaming: PascalCase\nVariableNaming: snake_case\n"; }
+	{
+		std::ofstream{dir / ".mdl-format"}
+				<< "ReflowComments: true\nModuleNaming: PascalCase\nVariableNaming: snake_case\n";
+	}
 	auto style = format::loadStyle(dir / ".mdl-format");
 	REQUIRE(style);
 	CHECK(style->reflowComments);
 	CHECK(style->naming.module == format::Naming::pascalCase);
 	CHECK(style->naming.variable == format::Naming::snakeCase);
 	CHECK(style->naming.function == format::Naming::any);
-	{ std::ofstream{dir / "bad"} << "ModuleNaming: kebab-case\n"; }
+	{
+		std::ofstream{dir / "bad"} << "ModuleNaming: kebab-case\n";
+	}
 	CHECK_FALSE(format::loadStyle(dir / "bad"));
 	fs::remove_all(dir);
 }
@@ -215,4 +230,12 @@ TEST_CASE("invalid UTF-8 is reported and left unchanged", "[format]") {
 	REQUIRE(result.diagnostics.size() == 1);
 	CHECK(result.diagnostics[0].message == "Invalid UTF-8 (byte 0xE9): source files must be UTF-8");
 	CHECK(result.diagnostics[0].range.begin == SourcePosition{1, 6});
+}
+
+TEST_CASE("the formatter spaces imports and visibility", "[format]") {
+	CHECK(formatted("from  .lib import a ,b as  c;\nfrom ..  import  d;\npublic  from ...x.y import *;\nimport  .w  as "
+					"v;\n") ==
+		  "from .lib import a, b as c;\nfrom .. import d;\npublic from ...x.y import *;\nimport .w as v;\n");
+	CHECK(formatted("private float[...] f(x: float[...]) => x;\nmodule M[] {\n  public W: float[4]\n}\n") ==
+		  "private float[...] f(x: float[...]) => x;\nmodule M[] {\n    public W: float[4]\n}\n");
 }

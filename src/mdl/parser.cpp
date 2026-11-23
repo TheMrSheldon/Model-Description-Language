@@ -58,6 +58,53 @@ namespace mdl {
 		PrettyErrorListener* errors; ///< Error listener of the defining file
 	};
 
+	/**
+	 * @brief The namespaces of one translated file: its own definitions (`local`) and what its imports bind
+	 * (`imports`, the parent of `local`; its parent is the prelude, or the builtins for the files of `std`).
+	 */
+	struct FileScope {
+		std::filesystem::path path;		  ///< canonical path (for a source without file: its name)
+		std::filesystem::path packageDir; ///< identifies the package (see docs/language-spec.md, Visibility)
+		bool isStd = false;				  ///< a file of the standard library (no implicit prelude)
+		Namespace imports;
+		Namespace local;
+	};
+
+	/**
+	 * @brief The value of a name bound by `import a.b;`: the namespace of a file, or of a directory without index
+	 * file (its files and subdirectories as namespaces).
+	 */
+	struct NamespaceRef {
+		const FileScope* file = nullptr;
+		std::filesystem::path dir; ///< for a directory
+		std::filesystem::path packageDir;
+		bool isStd = false;
+	};
+
+	/**
+	 * @brief The stack of namespaces in which names are looked up. A frame refers to a namespace that lives elsewhere
+	 * (a file's, an instance's) or owns a temporary one (a function body, a loop).
+	 */
+	class NamespaceStack {
+	public:
+		void push(Namespace ns) {
+			auto owned = std::make_unique<Namespace>(std::move(ns));
+			Namespace* raw = owned.get();
+			frames.push_back({raw, std::move(owned)});
+		}
+		void pushRef(Namespace& ns) { frames.push_back({&ns, nullptr}); }
+		void pop() { frames.pop_back(); }
+		Namespace& top() { return *frames.back().ns; }
+		Namespace& bottom() { return *frames.front().ns; }
+
+	private:
+		struct Frame {
+			Namespace* ns;
+			std::unique_ptr<Namespace> owned;
+		};
+		std::vector<Frame> frames;
+	};
+
 	struct parser::FrontendState {
 		/** @brief Receives every diagnostic (also of later instantiations); destroyed last (the listeners refer to it). */
 		DiagnosticSink sink;
@@ -327,6 +374,23 @@ namespace mdl {
 			);
 		}
 
+		/**
+		 * @brief Reports a definition of the file that hides an explicitly imported name (`-Wshadow`); prelude names are
+		 * hidden silently.
+		 */
+		void reportImportShadowing(antlr4::Token* name) {
+			if (options.shadow == parser::DiagnosticLevel::ignored || errorlistener == nullptr ||
+				currentScope == nullptr || &currentNamespace() != &currentScope->local ||
+				!currentScope->imports.definesLocally(name->getText()))
+				return;
+			const bool error = options.shadow == parser::DiagnosticLevel::error;
+			errorlistener->semanticError(
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+					tokenContext(name), name->getLine(), name->getCharPositionInLine(),
+					std::format("{} shadows the imported {}", name->getText(), name->getText()), "", "shadow"
+			);
+		}
+
 		/** @brief Records a use of @p name (bound in the current namespace) with the value @p value. */
 		void referenceHere(antlr4::Token* name, const std::optional<Object>& value) {
 			if (index() == nullptr || name == nullptr)
@@ -401,13 +465,22 @@ namespace mdl {
 			return ctx;
 		}
 
-		/** @brief The signature of a function as written (without its body). */
+		/** @brief @p text without a leading `public`/`private` (for signatures shown in tools). */
+		static std::string withoutVisibility(std::string text, mdlParser::VisibilityContext* visibility) {
+			if (visibility != nullptr && text.starts_with(visibility->getText())) {
+				text.erase(0, visibility->getText().size());
+				text.erase(0, text.find_first_not_of(" \t\r\n"));
+			}
+			return text;
+		}
+
+		/** @brief The signature of a function as written (without its body and visibility). */
 		std::string signature(mdlParser::FuncdefContext* ctx) {
 			antlr4::Token* close = nullptr;
 			for (auto* child : ctx->children)
 				if (auto* t = dynamic_cast<antlr4::tree::TerminalNode*>(child); t && t->getText() == ")")
 					close = t->getSymbol();
-			return sourceText(ctx, close);
+			return withoutVisibility(sourceText(ctx, close), ctx->visibility());
 		}
 		/** @brief Directory of the file that is currently translated (first search path for its imports). */
 		std::filesystem::path currentDir;
@@ -418,7 +491,18 @@ namespace mdl {
 		size_t numErrors = 0;
 
 		std::stack<mdl::Computegraph*> graphstack;
-		std::stack<mdl::Namespace> nsstack;
+		NamespaceStack nsstack;
+		/** @brief The scopes of the translated files (stable addresses), by canonical path. */
+		std::deque<FileScope> fileScopes;
+		std::map<std::filesystem::path, FileScope*> scopeOfFile;
+		/** @brief The scope of the file that is currently translated, and of the compiled (main) file. */
+		FileScope* currentScope = nullptr;
+		FileScope* mainScope = nullptr;
+		/** @brief The compiled file's directory: an import root, and the directory of its package. */
+		std::filesystem::path mainDir;
+		/** @brief The names of std.prelude (the parent of the files' import namespaces, below the builtins). */
+		Namespace prelude;
+		bool preludeLoaded = false;
 		/** @brief The namespaces of module instances (kept so that their functions can be specialized later). */
 		std::deque<mdl::Namespace> instanceScopes;
 		/** @brief While specializing a function: which parameters take masked tensors (see specialize()). */
@@ -533,95 +617,474 @@ namespace mdl {
 			return true;
 		}
 
+		// ── Imports (see docs/language-spec.md, Imports and visibility) ───────────────────────────────────────────
+
+		static bool isSource(const std::filesystem::path& p) {
+			return std::filesystem::is_regular_file(p) && (p.extension() == ".dlm" || p.extension() == ".mdl");
+		}
+
+		/** @brief The source file `path.dlm` (or `.mdl`), if it exists. */
+		static std::optional<std::filesystem::path> sourceFile(const std::filesystem::path& path) {
+			for (const char* ext : {".dlm", ".mdl"}) {
+				auto file = path;
+				file += ext;
+				if (isSource(file))
+					return file;
+			}
+			return std::nullopt;
+		}
+
+		static std::filesystem::path canonical(const std::filesystem::path& p) {
+			std::error_code ec;
+			auto c = std::filesystem::weakly_canonical(p, ec);
+			return ec ? p : c;
+		}
+
+		std::vector<std::filesystem::path> stdlibDirs() const {
+			return options.stdlibDirs.empty() ? parser::defaultStdlibDirs() : options.stdlibDirs;
+		}
+
+		/** @brief The package directory that identifies the package `std` (any of the standard library directories). */
+		static std::filesystem::path stdPackage() { return "<std>"; }
+
+		/** @brief Whether @p p is @p dir or inside it. */
+		static bool isWithin(const std::filesystem::path& p, const std::filesystem::path& dir) {
+			auto rel = canonical(p).lexically_relative(canonical(dir));
+			return !rel.empty() && *rel.begin() != "..";
+		}
+
+		/** @brief What an import path refers to: a file or a directory, with its package. */
+		struct ImportTarget {
+			std::filesystem::path path;
+			bool directory = false;
+			std::filesystem::path packageDir;
+			bool isStd = false;
+		};
+
 		/**
-		 * @brief Searches the file or directory that `import a.b;` refers to.
-		 * @details Searched are the directory of the importing file and the import directories. Imports of the
-		 * standard library (`std` or `std.x`) are additionally resolved in the standard library directories, which
-		 * contain the files of the `std` package itself.
+		 * @brief Resolves an import path. A relative path (leading dots) starts at the importing file's directory; an
+		 * absolute one is searched in the compiled file's directory, the import directories, and (`std`) the standard
+		 * library. @p dotted receives the path as written.
 		 */
-		std::vector<std::filesystem::path> resolveImport(const std::filesystem::path& relative) const {
-			std::vector<std::pair<std::filesystem::path, std::filesystem::path>> candidates; // (dir, relative path)
-			candidates.emplace_back(currentDir, relative);
-			for (const auto& dir : options.importDirs)
-				candidates.emplace_back(dir, relative);
+		std::optional<ImportTarget> resolveImportPath(mdlParser::Import_pathContext* ctx, std::string& dotted) {
+			size_t dots = 0;
+			for (auto* d : ctx->dots)
+				dots += d->getText().size();
+			std::filesystem::path relative;
+			for (auto* part : ctx->path) {
+				relative /= part->getText();
+				dotted += (dotted.empty() ? "" : ".") + part->getText();
+			}
+			dotted = std::string(dots, '.') + dotted;
+			auto found = [&](const std::filesystem::path& base, const std::filesystem::path& rel
+						 ) -> std::optional<std::pair<std::filesystem::path, bool>> {
+				if (!rel.empty())
+					if (auto file = sourceFile(base / rel))
+						return std::pair{*file, false};
+				auto dir = rel.empty() ? base : base / rel;
+				if (std::filesystem::is_directory(dir))
+					return std::pair{dir, true};
+				return std::nullopt;
+			};
+			if (dots > 0) {
+				auto base = currentDir;
+				for (size_t i = 1; i < dots; ++i)
+					base = base.parent_path();
+				auto hit = found(base, relative);
+				if (!hit)
+					return std::nullopt;
+				// Within the importing file's package: the same package; otherwise a package of its own.
+				const bool within = currentScope != nullptr &&
+									(currentScope->isStd || isWithin(hit->first, currentScope->packageDir));
+				return ImportTarget{
+						.path = hit->first,
+						.directory = hit->second,
+						.packageDir = within ? currentScope->packageDir : packageOfLoose(hit->first, hit->second),
+						.isStd = within && currentScope->isStd
+				};
+			}
 			if (!relative.empty() && *relative.begin() == "std") {
 				std::filesystem::path rest;
 				for (auto it = std::next(relative.begin()); it != relative.end(); ++it)
 					rest /= *it;
-				for (const auto& dir : options.stdlibDirs.empty() ? parser::defaultStdlibDirs() : options.stdlibDirs)
-					candidates.emplace_back(dir, rest);
+				for (const auto& dir : stdlibDirs())
+					if (auto hit = found(dir, rest))
+						return ImportTarget{hit->first, hit->second, stdPackage(), true};
 			}
-			auto isSource = [](const std::filesystem::path& p) {
-				return std::filesystem::is_regular_file(p) && (p.extension() == ".dlm" || p.extension() == ".mdl");
-			};
-			for (const auto& [dir, rel] : candidates) {
-				if (!rel.empty()) {
-					for (const char* ext : {".dlm", ".mdl"}) {
-						auto file = dir / rel;
-						file += ext;
-						if (isSource(file))
-							return {file};
+			std::vector<std::filesystem::path> roots{mainDir};
+			roots.insert(roots.end(), options.importDirs.begin(), options.importDirs.end());
+			for (const auto& root : roots) {
+				auto hit = found(root, relative);
+				if (!hit)
+					continue;
+				// The compiled program's directory is one package; below another root, a top-level directory is a
+				// package (a file directly in the root is one of its own).
+				std::filesystem::path package = root == mainDir ? mainDir : root / *relative.begin();
+				if (root != mainDir && std::distance(relative.begin(), relative.end()) == 1 && !hit->second)
+					package = hit->first;
+				return ImportTarget{hit->first, hit->second, package, false};
+			}
+			return std::nullopt;
+		}
+
+		/** @brief The package of a file outside the importer's package (reached by `..`): its directory. */
+		static std::filesystem::path packageOfLoose(const std::filesystem::path& path, bool directory) {
+			return directory ? path : path.parent_path();
+		}
+
+		/** @brief The visibility written before a definition or import (package if none). */
+		static Visibility visibilityOf(mdlParser::VisibilityContext* ctx) {
+			if (ctx == nullptr)
+				return Visibility::Package;
+			return ctx->getText() == "public" ? Visibility::Public : Visibility::Private;
+		}
+
+		static const char* str(Visibility v) {
+			return v == Visibility::Private ? "private" : v == Visibility::Package ? "package-visible" : "public";
+		}
+
+		/** @brief Whether a name of @p scope with visibility @p v is visible in the file @p requester. */
+		static bool visibleFrom(Visibility v, const FileScope& scope, const FileScope* requester) {
+			switch (v) {
+			case Visibility::Private:
+				return requester == &scope;
+			case Visibility::Package:
+				return requester != nullptr && requester->packageDir == scope.packageDir;
+			case Visibility::Public:
+				return true;
+			}
+			return false;
+		}
+
+		/** @brief A name of a file's namespace (a definition or an import), as seen from another file. */
+		struct ScopeName {
+			const std::any* object = nullptr; ///< an object (Object or NamespaceRef)
+			const DataType* type = nullptr;	  ///< a module or struct
+			std::string origin;
+			std::optional<size_t> symbol;
+		};
+
+		/**
+		 * @brief The name @p name of @p scope if the file @p requester may use it: a definition of the file, or a name
+		 * it re-exports (`public` imports). @p why receives the reason if the name exists but is not visible.
+		 */
+		std::optional<ScopeName>
+		nameIn(const FileScope& scope, const std::string& name, const FileScope* requester,
+			   std::string* why = nullptr) const {
+			for (const Namespace* ns : {&scope.local, &scope.imports}) {
+				const auto* object = ns->localObject(name);
+				const auto* type = ns->localType(name);
+				if (object == nullptr && type == nullptr)
+					continue;
+				const auto* entry = ns->entry(name);
+				const Visibility v = entry != nullptr		? entry->visibility
+									 : ns == &scope.imports ? Visibility::Private
+															: Visibility::Package;
+				if (!visibleFrom(v, scope, requester)) {
+					if (why != nullptr)
+						*why = std::format("{} is {} in {}", name, str(v), scope.path.filename().string());
+					continue;
+				}
+				return ScopeName{
+						.object = object,
+						.type = type,
+						.origin = entry != nullptr && !entry->origin.empty() ? entry->origin
+																			 : scope.path.string() + "#" + name,
+						.symbol = ns->localSymbol(name)
+				};
+			}
+			return std::nullopt;
+		}
+
+		/** @brief The names of @p scope that @p requester may use (for `from x import *`). */
+		std::vector<std::string> namesIn(const FileScope& scope, const FileScope* requester) const {
+			std::vector<std::string> names;
+			for (const Namespace* ns : {&scope.local, &scope.imports})
+				for (const auto& name : ns->localNames())
+					if (nameIn(scope, name, requester) && std::ranges::find(names, name) == names.end())
+						names.push_back(name);
+			return names;
+		}
+
+		/** @brief The files that re-export @p name publicly (for the hint when it is not visible). */
+		std::vector<std::string> reexportersOf(const std::string& origin, const std::string& name) const {
+			std::vector<std::string> files;
+			for (const auto& scope : fileScopes)
+				if (const auto* entry = scope.imports.entry(name);
+					entry && entry->visibility == Visibility::Public && entry->origin == origin)
+					files.push_back(scope.path.filename().string());
+			return files;
+		}
+
+		/** @brief The namespace of an import target (translating the file, or the directory's index file). */
+		std::optional<NamespaceRef> namespaceOfTarget(const ImportTarget& target) {
+			if (!target.directory) {
+				const FileScope* file = translateFile(target.path, false, target.packageDir, target.isStd);
+				return file != nullptr ? std::optional<NamespaceRef>{NamespaceRef{.file = file}} : std::nullopt;
+			}
+			if (auto index = sourceFile(target.path / target.path.filename())) {
+				const FileScope* file = translateFile(*index, false, target.packageDir, target.isStd);
+				return file != nullptr ? std::optional<NamespaceRef>{NamespaceRef{.file = file}} : std::nullopt;
+			}
+			return NamespaceRef{.dir = target.path, .packageDir = target.packageDir, .isStd = target.isStd};
+		}
+
+		/** @brief A member of a namespace: a name of a file, or a file or subdirectory of a directory. */
+		struct Member {
+			std::optional<NamespaceRef> ns;
+			std::optional<ScopeName> name;
+			std::string error;
+		};
+
+		Member memberOf(const NamespaceRef& ref, const std::string& name) {
+			if (ref.file != nullptr) {
+				std::string why;
+				if (auto n = nameIn(*ref.file, name, currentScope, &why)) {
+					if (n->object != nullptr)
+						if (const auto* nested = std::any_cast<NamespaceRef>(n->object))
+							return Member{.ns = *nested};
+					return Member{.name = *n};
+				}
+				if (why.empty())
+					return Member{.error = std::format("{} has no {}", ref.file->path.filename().string(), name)};
+				if (auto files = reexportersOf(ref.file->path.string() + "#" + name, name); !files.empty())
+					why += std::format(" (it is re-exported by {})", files.front());
+				return Member{.error = why};
+			}
+			ImportTarget target{.packageDir = ref.packageDir, .isStd = ref.isStd};
+			if (auto file = sourceFile(ref.dir / name))
+				target.path = *file;
+			else if (std::filesystem::is_directory(ref.dir / name))
+				target = {ref.dir / name, true, ref.packageDir, ref.isStd};
+			else
+				return Member{.error = std::format("the directory {} has no {}", ref.dir.filename().string(), name)};
+			if (auto ns = namespaceOfTarget(target))
+				return Member{.ns = *ns};
+			return Member{.error = std::format("cannot import {}", name)};
+		}
+
+		void importError(antlr4::Token* tok, const std::string& message) {
+			errorlistener->semanticError(
+					PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(), message
+			);
+		}
+
+		/**
+		 * @brief Binds @p name in the current file's imports. An explicit import of a name that is already imported
+		 * from another definition is an error; a `*` import (@p explicitImport false) keeps the earlier name.
+		 */
+		void bindImport(
+				const std::string& name, const std::any* object, const DataType* type, const std::string& origin,
+				Visibility visibility, std::optional<size_t> symbol, antlr4::Token* tok, bool explicitImport
+		) {
+			auto& imports = currentScope->imports;
+			if (imports.localObject(name) != nullptr || imports.localType(name) != nullptr) {
+				const auto* entry = imports.entry(name);
+				if (entry != nullptr && entry->origin == origin) {
+					if (visibility == Visibility::Public)
+						imports.setEntry(name, {visibility, origin});
+					return;
+				}
+				if (explicitImport)
+					importError(tok, std::format("{} is already imported (from another definition)", name));
+				return;
+			}
+			if (object != nullptr)
+				imports.putAny(name, *object);
+			if (type != nullptr)
+				imports.putType(name, DataType{*type});
+			imports.setEntry(name, {visibility, origin});
+			if (symbol)
+				imports.setSymbol(name, *symbol);
+		}
+
+		virtual std::any visitImportModule(mdlParser::ImportModuleContext* ctx) override {
+			std::string dotted;
+			auto target = resolveImportPath(ctx->import_path(), dotted);
+			if (!target) {
+				importError(ctx->start, std::format("Cannot find {}", dotted));
+				return {};
+			}
+			auto ns = namespaceOfTarget(*target);
+			if (!ns)
+				return {};
+			const auto& path = ctx->import_path()->path;
+			if (path.empty() && ctx->alias == nullptr) {
+				importError(ctx->start, "`import .` needs a name: `import . as name;` or `from . import x;`");
+				return {};
+			}
+			const std::string name = ctx->alias != nullptr ? ctx->alias->getText() : path.back()->getText();
+			const std::any value = *ns;
+			bindImport(
+					name, &value, nullptr, "namespace:" + (ns->file ? ns->file->path : ns->dir).string(),
+					visibilityOf(ctx->visibility()), std::nullopt, ctx->start, true
+			);
+			if (index() != nullptr)
+				indexImport(
+						ctx->import_path(), ctx->visibility() != nullptr && ctx->visibility()->getText() == "public"
+				);
+			return {};
+		}
+
+		virtual std::any visitImportNames(mdlParser::ImportNamesContext* ctx) override {
+			std::string dotted;
+			auto target = resolveImportPath(ctx->import_path(), dotted);
+			if (!target) {
+				importError(ctx->start, std::format("Cannot find {}", dotted));
+				return {};
+			}
+			auto ns = namespaceOfTarget(*target);
+			if (!ns)
+				return {};
+			if (index() != nullptr)
+				indexImport(
+						ctx->import_path(), ctx->visibility() != nullptr && ctx->visibility()->getText() == "public"
+				);
+			const Visibility visibility = visibilityOf(ctx->visibility());
+			auto bindMember = [&](const std::string& name, const std::string& as, antlr4::Token* tok,
+								  bool explicitImport) {
+				Member m = memberOf(*ns, name);
+				if (m.ns) {
+					const std::any value = *m.ns;
+					bindImport(
+							as, &value, nullptr, "namespace:" + (m.ns->file ? m.ns->file->path : m.ns->dir).string(),
+							visibility, std::nullopt, tok, explicitImport
+					);
+				} else if (m.name) {
+					bindImport(
+							as, m.name->object, m.name->type, m.name->origin, visibility, m.name->symbol, tok,
+							explicitImport
+					);
+				} else if (explicitImport) {
+					importError(tok, std::format("Cannot import {} from {}: {}", name, dotted, m.error));
+					// (Uses of the name are not reported again: it stands for an error.)
+					if (!currentScope->imports.definesLocally(as)) {
+						currentScope->imports.put<Object>(as, Object{&graph().addErrorNode()});
+						currentScope->imports.setEntry(as, {Visibility::Private, "error:" + as});
 					}
 				}
-				auto path = rel.empty() ? dir : dir / rel;
-				if (std::filesystem::is_directory(path)) {
-					std::vector<std::filesystem::path> files;
-					for (const auto& entry : std::filesystem::directory_iterator(path))
-						if (isSource(entry.path()))
-							files.push_back(entry.path());
-					std::sort(files.begin(), files.end());
-					if (!files.empty())
-						return files;
+			};
+			if (ctx->star != nullptr) {
+				std::vector<std::string> names;
+				if (ns->file != nullptr) {
+					names = namesIn(*ns->file, currentScope);
+				} else {
+					for (const auto& entry : std::filesystem::directory_iterator(ns->dir))
+						if (isSource(entry.path()) || entry.is_directory())
+							names.push_back(entry.path().stem().string());
+					std::ranges::sort(names);
 				}
+				for (const auto& name : names)
+					bindMember(name, name, ctx->star, false);
+				return {};
+			}
+			for (auto* n : ctx->names) {
+				const std::string name = n->name->getText();
+				bindMember(name, n->alias != nullptr ? n->alias->getText() : name, n->name, true);
+				if (index() != nullptr && currentScope->imports.localSymbol(n->alias ? n->alias->getText() : name))
+					index()->reference(analysis::Reference{
+							.file = currentFile(),
+							.range = rangeOf(n->name),
+							.symbol = currentScope->imports.localSymbol(n->alias ? n->alias->getText() : name),
+					});
 			}
 			return {};
 		}
 
-		void importDefinitions(mdlParser::Import_stmtContext* ctx) {
-			std::filesystem::path relative;
-			std::string dotted;
-			for (auto* part : ctx->path) {
-				relative /= part->getText();
-				dotted += (dotted.empty() ? "" : ".") + part->getText();
-			}
-			auto files = resolveImport(relative);
-			if (files.empty()) {
-				auto* tok = ctx->start;
-				errorlistener->semanticError(
-						PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
-						std::format(
-								"Cannot find {} (searched for {}.dlm or a directory {})", dotted, relative.string(),
-								relative.string()
-						)
-				);
+		/** @brief Loads std.prelude (once) and binds its public names in the prelude namespace. */
+		void ensurePrelude() {
+			if (preludeLoaded)
+				return;
+			preludeLoaded = true;
+			for (const auto& dir : stdlibDirs()) {
+				auto file = sourceFile(dir / "prelude");
+				if (!file)
+					continue;
+				const FileScope* scope = translateFile(*file, false, stdPackage(), true);
+				if (scope == nullptr)
+					return;
+				for (const auto& name : namesIn(*scope, nullptr)) {
+					auto n = nameIn(*scope, name, nullptr);
+					if (n->object != nullptr)
+						prelude.putAny(name, *n->object);
+					if (n->type != nullptr)
+						prelude.putType(name, DataType{*n->type});
+					if (n->symbol)
+						prelude.setSymbol(name, *n->symbol);
+				}
 				return;
 			}
-			for (const auto& file : files)
-				translateFile(file, /*main=*/false);
-			if (index() != nullptr)
-				indexImport(ctx);
 		}
 
 		/** @brief Records every part of an import path with the file(s) it stands for (for hover and go to definition). */
-		void indexImport(mdlParser::Import_stmtContext* ctx) {
+		void indexImport(mdlParser::Import_pathContext* ctx, bool reexported) {
 			auto read = [](const std::filesystem::path& file) {
 				std::ifstream in{file, std::ios::binary};
 				return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 			};
-			std::filesystem::path relative;
+			// Resolve each prefix of the path (`std`, `std.nn`) like the whole path.
 			std::string dotted;
-			for (auto* part : ctx->path) {
-				relative /= part->getText();
-				dotted += (dotted.empty() ? "" : ".") + part->getText();
-				auto files = resolveImport(relative);
+			for (size_t k = 0; k < ctx->path.size(); ++k) {
+				auto* part = ctx->path[k];
+				std::filesystem::path relative;
+				size_t dots = 0;
+				for (auto* d : ctx->dots)
+					dots += d->getText().size();
+				for (size_t i = 0; i <= k; ++i)
+					relative /= ctx->path[i]->getText();
+				dotted += (k == 0 ? std::string(dots, '.') : ".") + part->getText();
+				std::vector<std::filesystem::path> files;
+				std::filesystem::path base = currentDir;
+				for (size_t i = 1; i < dots; ++i)
+					base = base.parent_path();
+				std::vector<std::filesystem::path> roots;
+				if (dots > 0)
+					roots = {base};
+				else {
+					roots = {mainDir};
+					roots.insert(roots.end(), options.importDirs.begin(), options.importDirs.end());
+					if (*relative.begin() == "std") {
+						std::filesystem::path rest;
+						for (auto it = std::next(relative.begin()); it != relative.end(); ++it)
+							rest /= *it;
+						for (const auto& dir : stdlibDirs()) {
+							if (rest.empty()) {
+								if (std::filesystem::is_directory(dir))
+									for (const auto& entry : std::filesystem::directory_iterator(dir))
+										if (isSource(entry.path()))
+											files.push_back(entry.path());
+							} else if (auto file = sourceFile(dir / rest))
+								files.push_back(*file);
+							else if (std::filesystem::is_directory(dir / rest))
+								for (const auto& entry : std::filesystem::directory_iterator(dir / rest))
+									if (isSource(entry.path()))
+										files.push_back(entry.path());
+							if (!files.empty())
+								break;
+						}
+					}
+				}
+				if (files.empty())
+					for (const auto& root : roots) {
+						if (auto file = sourceFile(root / relative)) {
+							files.push_back(*file);
+							break;
+						}
+						if (std::filesystem::is_directory(root / relative)) {
+							for (const auto& entry : std::filesystem::directory_iterator(root / relative))
+								if (isSource(entry.path()))
+									files.push_back(entry.path());
+							break;
+						}
+					}
+				std::ranges::sort(files);
 				if (files.empty())
 					continue;
 				analysis::ImportPath path{.file = currentFile(), .range = rangeOf(part), .name = dotted};
+				path.reexported = reexported;
 				const bool package = files.size() > 1 || std::filesystem::path{files.front()}.stem() != part->getText();
 				for (const auto& file : files) {
-					std::error_code ec;
-					auto absolute = std::filesystem::weakly_canonical(file, ec);
-					path.targets.push_back((ec ? file : absolute).string());
+					path.targets.push_back(canonical(file).string());
 					auto doc = analysis::fileDocumentation(
 							options.readFile && options.readFile(file) ? *options.readFile(file) : read(file)
 					);
@@ -646,6 +1109,7 @@ namespace mdl {
 				: state(state), options(std::move(options)) {
 			pushGraph(&state.graph);
 			nsstack.push(mdl::Namespace::baseNamespace());
+			prelude = nsstack.bottom().createSubnamespace();
 		}
 
 		size_t getNumErrors() const { return numErrors; }
@@ -655,7 +1119,7 @@ namespace mdl {
 		/** @brief Instantiates the module named @p name (see CompilationUnit::instantiate). */
 		std::expected<std::reference_wrapper<const ModuleType>, std::string>
 		instantiateByName(const std::string& name, const std::map<std::string, Object>& values) {
-			auto type = nsstack.top().getType(name);
+			auto type = (mainScope != nullptr ? mainScope->local : nsstack.top()).getType(name);
 			const auto* mod = type ? std::get_if<ModuleType>(&type.value().get()) : nullptr;
 			if (mod == nullptr || mod->templ == nullptr)
 				return std::unexpected(std::format("{} is not a module", name));
@@ -671,8 +1135,38 @@ namespace mdl {
 		 * @brief Translates the program read from @p stream into the compilation unit.
 		 * @param main whether the definitions are added to CompilationUnit::definitions (false for imported files).
 		 */
-		void
-		translate(std::istream& stream, const std::string& sourcename, const std::filesystem::path& dir, bool main) {
+		/**
+		 * @brief The scope of a file (created on first use). The compiled file's directory is its package (and an
+		 * import root).
+		 */
+		FileScope&
+		scopeFor(const std::filesystem::path& path, const std::filesystem::path& packageDir, bool isStd, bool main) {
+			if (auto it = scopeOfFile.find(path); it != scopeOfFile.end())
+				return *it->second;
+			if (!isStd)
+				ensurePrelude();
+			auto& scope = fileScopes.emplace_back();
+			scope.path = path;
+			scope.packageDir = packageDir;
+			scope.isStd = isStd;
+			scope.imports = (isStd ? nsstack.bottom() : prelude).createSubnamespace();
+			scope.local = scope.imports.createSubnamespace();
+			scopeOfFile.emplace(path, &scope);
+			if (main)
+				mainScope = &scope;
+			return scope;
+		}
+
+		void translate(
+				std::istream& stream, const std::string& sourcename, const std::filesystem::path& dir, bool main,
+				FileScope* scope = nullptr
+		) {
+			if (main && mainDir.empty())
+				mainDir = dir;
+			if (scope == nullptr)
+				scope = &scopeFor(sourcename, dir, false, main);
+			nsstack.pushRef(scope->local);
+			auto* outerScope = std::exchange(currentScope, scope);
 			// The parse tree stays alive (owned by the frontend state) so that module templates defined in this file
 			// can be expanded later.
 			auto& file = *state.files.emplace_back(std::make_unique<ParsedFile>());
@@ -709,6 +1203,8 @@ namespace mdl {
 			errorlistener = outerErrors;
 			currentDir = std::move(outerDir);
 			recordDefinitions = outerRecord;
+			currentScope = outerScope;
+			nsstack.pop();
 
 			if (state.printing)
 				printDiagnosticSummary(std::cerr, file.errors->getNumErrors(), file.errors->getNumWarnings());
@@ -746,12 +1242,28 @@ namespace mdl {
 			}
 		}
 
-		void translateFile(const std::filesystem::path& file, bool main) {
-			std::error_code ec;
-			auto canonical = std::filesystem::weakly_canonical(file, ec);
-			if (!translatedFiles.insert(ec ? file : canonical).second)
-				return; // Already imported (or currently being imported).
-			sources.push_back(ec ? file : canonical);
+		/**
+		 * @brief Translates @p file once (its scope on later calls, also while it is being translated: a cycle sees
+		 * the names defined so far). The compiled file (@p main) is its own package's root.
+		 */
+		FileScope* translateFile(
+				const std::filesystem::path& file, bool main, std::filesystem::path packageDir = {}, bool isStd = false
+		) {
+			const auto path = canonical(file);
+			if (main) {
+				mainDir = path.parent_path();
+				packageDir = mainDir;
+				// A file of the standard library is in the package `std` (without the prelude, which imports it).
+				for (const auto& dir : stdlibDirs())
+					if (isWithin(path, dir)) {
+						packageDir = stdPackage();
+						isStd = true;
+					}
+			}
+			if (!translatedFiles.insert(path).second)
+				return scopeOfFile.contains(path) ? scopeOfFile.at(path) : nullptr;
+			auto& scope = scopeFor(path, packageDir.empty() ? path.parent_path() : packageDir, isStd, main);
+			sources.push_back(path);
 			// The contents: from the options' reader (e.g. an editor's unsaved buffer), else from the file.
 			std::optional<std::string> text = options.readFile ? options.readFile(file) : std::nullopt;
 			std::ifstream fileStream;
@@ -764,15 +1276,21 @@ namespace mdl {
 			if (!stream) {
 				state.sink(Diagnostic{.file = file.string(), .message = "cannot read " + file.string()});
 				++numErrors;
-				return;
+				return nullptr;
 			}
-			translate(stream, std::filesystem::absolute(file).string(), file.parent_path(), main);
+			translate(stream, std::filesystem::absolute(file).string(), file.parent_path(), main, &scope);
+			return &scope;
 		}
 
 		virtual std::any visitProgram(mdlParser::ProgramContext* ctx) override {
-			// Imports are processed first so that their definitions are visible to the whole file.
+			// Imports are processed first so that their names are visible to the whole file: explicit names before
+			// `*` imports (which do not override them).
 			for (auto* import : ctx->import_stmt())
-				importDefinitions(import);
+				if (auto* names = dynamic_cast<mdlParser::ImportNamesContext*>(import); !names || !names->star)
+					import->accept(this);
+			for (auto* import : ctx->import_stmt())
+				if (auto* names = dynamic_cast<mdlParser::ImportNamesContext*>(import); names && names->star)
+					import->accept(this);
 			auto record = [&](std::string name, CompilationUnit::Member member) {
 				if (recordDefinitions)
 					definitions.try_emplace(std::move(name), std::move(member));
@@ -798,6 +1316,22 @@ namespace mdl {
 			}
 			for (const auto& m : generic)
 				analyzeGeneric(m);
+			// The visibility of the file's definitions (an overload set: the widest of its functions).
+			auto entry = [&](antlr4::tree::TerminalNode* ident, mdlParser::VisibilityContext* v) {
+				if (ident == nullptr || currentScope == nullptr)
+					return;
+				const std::string name = ident->getText();
+				Visibility visibility = visibilityOf(v);
+				if (const auto* e = currentScope->local.entry(name))
+					visibility = std::max(visibility, e->visibility);
+				currentScope->local.setEntry(name, {visibility, currentScope->path.string() + "#" + name});
+			};
+			for (auto* def : ctx->struct_def())
+				entry(def->IDENT(), def->visibility());
+			for (auto* def : ctx->funcdef())
+				entry(def->IDENT(), def->visibility());
+			for (auto* def : ctx->module_def())
+				entry(def->IDENT(), def->visibility());
 			return {};
 		}
 
@@ -893,6 +1427,7 @@ namespace mdl {
 			auto name = ctx->IDENT()->getText();
 			updateTypeWithVarDecl(s, name, ctx->vardecl());
 			if (!checkRedefinition(ctx->IDENT())) {
+				reportImportShadowing(ctx->IDENT()->getSymbol());
 				currentNamespace().putType(name, DataType{s});
 				defineHere(
 						ctx->IDENT()->getSymbol(), analysis::SymbolKind::structure, "struct " + name, ctx, fileScope()
@@ -925,8 +1460,8 @@ namespace mdl {
 					if (auto* t = dynamic_cast<antlr4::tree::TerminalNode*>(child); t && t->getText() == "]" && !close)
 						close = t->getSymbol();
 				if (auto id =
-							define(ctx->IDENT()->getSymbol(), analysis::SymbolKind::module, sourceText(ctx, close), ctx,
-								   fileScope()))
+							define(ctx->IDENT()->getSymbol(), analysis::SymbolKind::module,
+								   withoutVisibility(sourceText(ctx, close), ctx->visibility()), ctx, fileScope()))
 					currentNamespace().setSymbol(name, *id);
 				for (size_t i = 0; i < ctx->param().size() && i < m.typeargs.size(); ++i) {
 					define(ctx->param()[i]->IDENT()->getSymbol(), analysis::SymbolKind::hyperparameter,
@@ -938,8 +1473,10 @@ namespace mdl {
 			if (m.typeargs.empty())
 				if (auto instance = instantiate(m, {}))
 					m = instance.value().get();
-			if (!checkRedefinition(ctx->IDENT()))
+			if (!checkRedefinition(ctx->IDENT())) {
+				reportImportShadowing(ctx->IDENT()->getSymbol());
 				currentNamespace().putType(name, DataType{m});
+			}
 			return std::make_pair(name, m);
 		}
 
@@ -1654,13 +2191,18 @@ namespace mdl {
 			return std::make_pair(ctx->IDENT()->getText(), std::any_cast<mdl::DataType>(ctx->type()->accept(this)));
 		}
 
+		/** @brief The definition of the type that the last qualified type (`nn.Linear`) named. */
+		std::optional<size_t> qualifiedTypeSymbol;
+
 		virtual std::any visitTypeSpec(mdlParser::TypeSpecContext* ctx) override {
+			qualifiedTypeSymbol.reset();
 			auto dtype = std::any_cast<DataType>(unqualifiedTypeSpec(ctx));
 			if (index() != nullptr && ctx->typename_ != nullptr)
 				index()->reference(analysis::Reference{
 						.file = currentFile(),
 						.range = rangeOf(ctx->typename_),
-						.symbol = currentNamespace().symbol(ctx->typename_->getText()),
+						.symbol = ctx->qualifier.empty() ? currentNamespace().symbol(ctx->typename_->getText())
+														 : qualifiedTypeSymbol,
 						.types = {typeString(dtype)},
 						.members = {},
 				});
@@ -1680,9 +2222,43 @@ namespace mdl {
 		std::any unqualifiedTypeSpec(mdlParser::TypeSpecContext* ctx) {
 			// `float` is the configured default float type (see ParseOptions::defaultFloat).
 			const DataType defaultFloat{options.defaultFloat};
-			auto dtype = ctx->typename_->getText() == "float"
-								 ? std::optional<std::reference_wrapper<const DataType>>{std::cref(defaultFloat)}
-								 : currentNamespace().getType(ctx->typename_->getText());
+			std::optional<std::reference_wrapper<const DataType>> dtype;
+			if (!ctx->qualifier.empty()) {
+				// `nn.Linear[...]`: the type of an imported namespace.
+				std::optional<NamespaceRef> ns;
+				const auto* first = currentNamespace().find<NamespaceRef>(ctx->qualifier.front()->getText());
+				if (first == nullptr) {
+					importError(
+							ctx->qualifier.front(),
+							std::format("{} is not a namespace", ctx->qualifier.front()->getText())
+					);
+					return mdl::DataType{mdl::PrimitiveType::error};
+				}
+				ns = *first;
+				indexNamespace(ctx->qualifier.front(), *ns);
+				std::string error;
+				for (size_t i = 1; i < ctx->qualifier.size() && ns; ++i) {
+					Member m = memberOf(*ns, ctx->qualifier[i]->getText());
+					ns = m.ns;
+					error = m.error;
+					if (ns)
+						indexNamespace(ctx->qualifier[i], *ns);
+				}
+				Member m = ns ? memberOf(*ns, ctx->typename_->getText()) : Member{.error = error};
+				if (!m.name || m.name->type == nullptr) {
+					importError(
+							ctx->typename_, !m.error.empty()
+													? m.error
+													: std::format("{} does not name a type", ctx->typename_->getText())
+					);
+					return mdl::DataType{mdl::PrimitiveType::error};
+				}
+				dtype = std::cref(*m.name->type);
+				qualifiedTypeSymbol = m.name->symbol;
+			} else
+				dtype = ctx->typename_->getText() == "float"
+								? std::optional<std::reference_wrapper<const DataType>>{std::cref(defaultFloat)}
+								: currentNamespace().getType(ctx->typename_->getText());
 			if (!dtype.has_value()) {
 				errorlistener->semanticError(
 						PrettyErrorListener::ErrorLevel::Error, ctx->typename_, ctx->typename_->getLine(),
@@ -1939,6 +2515,7 @@ namespace mdl {
 					.outputs = std::move(outputs),
 					.returnTypes = std::move(returnTypes),
 			};
+			decl.visibility = visibilityOf(ctx->visibility());
 			if (decl.returnTypes.size() != decl.outputs.size()) {
 				auto* tok = ctx->IDENT()->getSymbol();
 				errorlistener->semanticError(
@@ -2011,6 +2588,7 @@ namespace mdl {
 						currentNamespace().setSymbol(name, *id);
 			};
 			if (!currentNamespace().definesLocally(name)) {
+				reportImportShadowing(ident->getSymbol());
 				currentNamespace().put<mdl::Object>(name, Object{decl});
 				bind();
 				return;
@@ -2217,6 +2795,15 @@ namespace mdl {
 			if (symbolicMode)
 				checkConditionalMember(ctx->IDENT()->getSymbol());
 			auto value = currentNamespace().get<Object>(ctx->IDENT()->getText());
+			if (!value.has_value() && currentNamespace().find<NamespaceRef>(ctx->IDENT()->getText())) {
+				importError(
+						ctx->IDENT()->getSymbol(), std::format(
+														   "{} is a namespace: use one of its names ({}.name)",
+														   ctx->IDENT()->getText(), ctx->IDENT()->getText()
+												   )
+				);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			}
 			if (!value.has_value()) {
 				auto* sym = ctx->IDENT()->getSymbol();
 				errorlistener->semanticError(
@@ -2235,7 +2822,94 @@ namespace mdl {
 			return ctx->expr()->accept(this);
 		}
 
+		/**
+		 * @brief The namespace that @p e denotes (`nn` bound by `import std.nn;`, `std.nn` of `import std;`), if any.
+		 * @p error receives why a member of a namespace is not available.
+		 */
+		std::optional<NamespaceRef> namespaceOf(mdlParser::ExprContext* e, std::string* error = nullptr) {
+			if (auto* var = dynamic_cast<mdlParser::VarAccessExpressionContext*>(e)) {
+				if (var->IDENT() == nullptr)
+					return std::nullopt;
+				const std::string name = var->IDENT()->getText();
+				// (A local variable of the same name hides the namespace.)
+				if (currentNamespace().get<Object>(name))
+					return std::nullopt;
+				if (const auto* ref = currentNamespace().find<NamespaceRef>(name)) {
+					indexNamespace(var->IDENT()->getSymbol(), *ref);
+					return *ref;
+				}
+				return std::nullopt;
+			}
+			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(e)) {
+				auto base = namespaceOf(access->expr(), error);
+				if (!base || access->IDENT() == nullptr)
+					return std::nullopt;
+				Member m = memberOf(*base, access->IDENT()->getText());
+				if (!m.error.empty() && error != nullptr)
+					*error = m.error;
+				if (m.ns)
+					indexNamespace(access->IDENT()->getSymbol(), *m.ns);
+				return m.ns;
+			}
+			return std::nullopt;
+		}
+
+		/** @brief The names of a namespace that the current file may use (files' names, or a directory's entries). */
+		std::vector<std::string> namesOf(const NamespaceRef& ns) const {
+			if (ns.file != nullptr)
+				return namesIn(*ns.file, currentScope);
+			std::vector<std::string> names;
+			std::error_code ec;
+			for (const auto& entry : std::filesystem::directory_iterator(ns.dir, ec))
+				if (isSource(entry.path()) || entry.is_directory())
+					names.push_back(entry.path().stem().string());
+			std::ranges::sort(names);
+			return names;
+		}
+
+		/** @brief Records a use of a namespace (`nn` in `nn.Linear`) with its names (for completion after `nn.`). */
+		void indexNamespace(antlr4::Token* tok, const NamespaceRef& ns) {
+			if (index() == nullptr || tok == nullptr ||
+				!indexedNamespaces.insert({currentFile(), tok->getTokenIndex()}).second)
+				return;
+			const auto names = namesOf(ns);
+			index()->reference(analysis::Reference{
+					.file = currentFile(),
+					.range = rangeOf(tok),
+					.types = {"namespace"},
+					.members = {names.begin(), names.end()}
+			});
+		}
+		std::set<std::pair<std::string, size_t>> indexedNamespaces;
+
+		/** @brief `ns.name` for a namespace `ns`: the definition (a value), or an error. */
+		std::any namespaceMember(mdlParser::AccessExpressionContext* ctx, const NamespaceRef& ns) {
+			auto* tok = ctx->IDENT()->getSymbol();
+			Member m = memberOf(ns, ctx->IDENT()->getText());
+			const Object* object = m.name && m.name->object ? std::any_cast<Object>(m.name->object) : nullptr;
+			if (object == nullptr) {
+				importError(
+						tok, !m.error.empty() ? m.error
+							 : m.ns			  ? std::format("{} is a namespace, not a value", ctx->IDENT()->getText())
+							 : m.name		  ? std::format("{} is a type, not a value", ctx->IDENT()->getText())
+											  : std::format("{} is not defined", ctx->IDENT()->getText())
+				);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			}
+			if (index() != nullptr)
+				index()->reference(analysis::Reference{
+						.file = currentFile(),
+						.range = rangeOf(tok),
+						.symbol = m.name->symbol,
+						.types = {objectType(*object)}
+				});
+			return *object;
+		}
+
 		virtual std::any visitAccessExpression(mdlParser::AccessExpressionContext* ctx) override {
+			if (ctx->IDENT() != nullptr)
+				if (auto ns = namespaceOf(ctx->expr()))
+					return namespaceMember(ctx, *ns);
 			std::optional<Object> base;
 			auto result = accessExpression(ctx, base);
 			if (index() != nullptr && ctx->IDENT() != nullptr) {
@@ -2316,6 +2990,44 @@ namespace mdl {
 			return Object{std::move(array)};
 		}
 
+		/** @brief The file scope whose namespace is @p ns (where a template was defined); nullptr if none. */
+		const FileScope* scopeOfNamespace(const Namespace* ns) const {
+			for (const auto& scope : fileScopes)
+				if (&scope.local == ns)
+					return &scope;
+			return nullptr;
+		}
+
+		/**
+		 * @brief Why the member @p name of a module instance is not accessible here (`instance.name`), if it is not: a
+		 * private member is only used inside its module, a package-visible one only in the module's package.
+		 */
+		std::optional<std::string> memberVisibilityProblem(const BoundModuleType& bmt, const std::string& name) const {
+			const auto& t = bmt.definition.templ;
+			if (t == nullptr || t->ctx == nullptr)
+				return std::nullopt;
+			mdlParser::VisibilityContext* written = nullptr;
+			bool found = false;
+			for (auto* v : t->ctx->vardecl())
+				if (v->IDENT() && v->IDENT()->getText() == name)
+					written = v->visibility(), found = true;
+			for (auto* f : t->ctx->funcdef())
+				if (f->IDENT() && f->IDENT()->getText() == name)
+					written = f->visibility(), found = true;
+			if (!found)
+				return std::nullopt; // (not a member: reported elsewhere)
+			const Visibility v = visibilityOf(written);
+			if (v == Visibility::Private)
+				return std::format("{} is a private member of {}", name, t->name);
+			const FileScope* defining = scopeOfNamespace(t->scope);
+			if (v == Visibility::Package && defining != nullptr && !visibleFrom(v, *defining, currentScope))
+				return std::format(
+						"{} is a package-visible member of {} (in another package: {})", name, t->name,
+						defining->path.filename().string()
+				);
+			return std::nullopt;
+		}
+
 		std::any accessExpression(mdlParser::AccessExpressionContext* ctx, std::optional<Object>& base) {
 			/** \todo this function needs refactoring; e.g., merge the handling of AggregateInstance, ModuleInstance, TensorType, ... to simple getMember lookups **/
 			auto baseObj = asObject(ctx->expr()->accept(this));
@@ -2350,6 +3062,10 @@ namespace mdl {
 					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
 					return &graph().addErrorNode();
 				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
+					if (auto problem = memberVisibilityProblem(*bmt, memberName)) {
+						importError(memberTok, *problem);
+						return static_cast<const Node*>(&graph().addErrorNode());
+					}
 					/** \todo bind the instance as the first argument **/
 					/** \todo merge with ModuleInstance implementation above **/
 					auto& funcs = bmt->definition.functions;
@@ -2729,7 +3445,8 @@ namespace mdl {
 			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
 			// `instance(...)`. Without this, the function would reference the module's unqualified weights.
 			const Node* receiver = nullptr;
-			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func)) {
+			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func);
+				access != nullptr && !namespaceOf(access->expr())) {
 				auto baseObj = asObject(access->expr()->accept(this), access->expr()->start);
 				if (auto* base = std::get_if<const Node*>(&baseObj)) {
 					if (isErroneous(**base))
@@ -2877,7 +3594,9 @@ namespace mdl {
 							reportPossibleMismatch(ctx->func->start, std::format("{}: {}", callee.name, *possible));
 						}
 				if (outputs) {
-					auto gradient = currentNamespace().get<Object>(callee.name + "_gradient");
+					// (In the callee's file: its gradient need not be visible at the call.)
+					const Namespace& defining = callee.templ != nullptr ? *callee.templ->scope : currentNamespace();
+					auto gradient = defining.get<Object>(callee.name + "_gradient");
 					if (const auto* decl = gradient ? std::get_if<FunctionDecl>(&gradient->get()) : nullptr) {
 						ModuleCall call{
 								.scope = scope,

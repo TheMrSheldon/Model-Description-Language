@@ -8,28 +8,28 @@
  * @brief Sum over the last dimension.
  * @ingroup Statistics
  */
-template<N: uint>
+public template<N: uint>
 float[...] sum(x: float[..., N]) => __builtin_sum(x);
 
 /**
  * @brief Maximum over the last dimension.
  * @ingroup Statistics
  */
-template<N: uint>
+public template<N: uint>
 float[...] max(x: float[..., N]) => __builtin_max(x);
 
 /**
  * @brief Minimum over the last dimension.
  * @ingroup Statistics
  */
-template<N: uint>
+public template<N: uint>
 float[...] min(x: float[..., N]) => __builtin_min(x);
 
 /**
  * @brief Mean over the last dimension.
  * @ingroup Statistics
  */
-template<N: uint>
+public template<N: uint>
 float[...] mean(x: float[..., N]) => __builtin_mean(x);
 
 /**
@@ -37,17 +37,17 @@ float[...] mean(x: float[..., N]) => __builtin_mean(x);
  * @ingroup Statistics
  * \todo `dof` is not yet forwarded (default values are not yet supported).
  */
-float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
+public float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
 
 /**
  * @brief Sum of all elements (a scalar), e.g. for objectives: the sum of the flattened tensor.
  * @ingroup Statistics
  */
-float sum_flat(x: float[...]) => sum(x[... -> (...)]);
+public float sum_flat(x: float[...]) => sum(x[... -> (...)]);
 
 /**
  * @brief Mean of all elements (a scalar), e.g. for objectives: the mean of the flattened tensor (with a mask, of the
  * valid elements).
  * @ingroup Statistics
  */
-float mean_flat(x: float[...]) => mean(x[... -> (...)]);
+public float mean_flat(x: float[...]) => mean(x[... -> (...)]);

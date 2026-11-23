@@ -52,11 +52,14 @@ mdl::analysis::unusedDefinitions(const SemanticIndex& index, const std::string& 
 			if (last == nullptr || last->range.begin < i.range.begin)
 				last = &i;
 		}
-	std::set<std::string> used; // the files of the definitions the document uses
+	std::set<std::string> used; // the files of the definitions the document uses (outside the import statements)
 	for (const auto& r : index.references())
-		if (r.file == file && r.symbol && index.symbols()[*r.symbol].file != file)
+		if (r.file == file && r.symbol && index.symbols()[*r.symbol].file != file &&
+			!statements.contains(r.range.begin.line))
 			used.insert(index.symbols()[*r.symbol].file);
 	for (const auto& [_, import] : statements) {
+		if (import->reexported)
+			continue;
 		std::set<std::string> reachable{import->targets.begin(), import->targets.end()};
 		for (bool grew = true; grew;) {
 			grew = false;

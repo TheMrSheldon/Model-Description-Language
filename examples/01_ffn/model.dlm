@@ -5,5 +5,5 @@ module FFN[indim: uint, outdim: uint] {
     W: float[outdim, indim]
     b: float[outdim]
 
-    float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
+    public float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
 }

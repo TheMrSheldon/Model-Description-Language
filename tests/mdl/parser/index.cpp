@@ -16,7 +16,8 @@ namespace {
 	}
 
 	/** @brief The reference at line @p line (from 1) on the first occurrence of @p name on that line. */
-	const analysis::Reference* at(const parser::AnalysisResult& r, const std::string& code, size_t line, const std::string& name) {
+	const analysis::Reference*
+	at(const parser::AnalysisResult& r, const std::string& code, size_t line, const std::string& name) {
 		std::istringstream in{code};
 		std::string text;
 		for (size_t i = 0; i < line && std::getline(in, text); ++i) {
@@ -27,7 +28,7 @@ namespace {
 	}
 } // namespace
 
-const std::string code = R"(import std;
+const std::string code = R"(from std.nn import Linear;
 /** @brief A residual block. @param d the width */
 module Block[d: uint] {
     lin: Linear[d, d]
@@ -104,8 +105,8 @@ TEST_CASE("the visible names at a position", "[parser][index]") {
 	CHECK(inForward.contains("lin"));
 	CHECK(inForward.contains("d"));
 	CHECK(inForward.contains("Net"));
-	CHECK(inForward.contains("softmax")); // imported
-	CHECK_FALSE(names({6, 8}).contains("h")); // before its declaration
+	CHECK(inForward.contains("softmax"));	   // imported
+	CHECK_FALSE(names({6, 8}).contains("h"));  // before its declaration
 	CHECK_FALSE(names({12, 8}).contains("h")); // in another function
 }
 
@@ -114,7 +115,8 @@ TEST_CASE("doc comments become Markdown, including math in all spellings", "[par
 	CHECK(docCommentToMarkdown("/** @brief Computes \\f$x^2\\f$ and @f$y@f$. */") == "Computes $x^2$ and $y$.");
 	CHECK(docCommentToMarkdown("/** @brief Inline \\f(a\\f) and @f(b@f). */") == "Inline $a$ and $b$.");
 	CHECK(docCommentToMarkdown("/** @brief Display @f[ x = y @f] */") == "Display $$ x = y $$");
-	CHECK(docCommentToMarkdown("/** @brief Env \\f{align}{a &= b\\f} */") == "Env $$\\begin{align}a &= b\\end{align}$$");
+	CHECK(docCommentToMarkdown("/** @brief Env \\f{align}{a &= b\\f} */") == "Env $$\\begin{align}a &= b\\end{align}$$"
+	);
 	CHECK(analysis::docParameter("/** @param[in] x the input @tparam N the size */", "x") == "the input");
 	CHECK(analysis::docParameter("/** @param[in] x the input @tparam N the size */", "N") == "the size");
 }
@@ -147,8 +149,8 @@ float[...] total(y: float[..., N]) => __builtin_sum(y);
 		return result.index->symbols()[*ref->symbol].documentation;
 	};
 	CHECK(doc(5, "width") == "the number of features"); // hyperparameter
-	CHECK(doc(11, "x") == "the input");				   // function parameter
-	CHECK(doc(17, "N") == "the size");				   // template parameter
+	CHECK(doc(11, "x") == "the input");					// function parameter
+	CHECK(doc(17, "N") == "the size");					// template parameter
 	CHECK(doc(18, "y") == "the values");
 }
 

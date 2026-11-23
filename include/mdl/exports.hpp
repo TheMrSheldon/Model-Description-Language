@@ -127,11 +127,15 @@ namespace mdl {
 	 * @param masked member functions that become masked functions (see mdl::masking::apply): they take an additional
 	 * input `mask: bool[...]` (true: valid), and masked elements in the last dimension of `...` (e.g. padding) do not
 	 * influence the valid results. Masking is applied before differentiation.
+	 * @param exportOnly the functions to export (`--export`: `forward` or `Module.forward`); empty: all. Only `public`
+	 * member functions are exported; naming another function, or differentiating one that is not exported, is an
+	 * error.
 	 */
 	std::vector<ExportedFunction> exportedFunctions(
 			const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank = 1,
 			const GradientRequest& gradients = {}, const std::vector<std::string>& masked = {},
-			const std::map<std::string, unsigned>& inputRanks = {}, const std::vector<QuantizationRule>& quantize = {}
+			const std::map<std::string, unsigned>& inputRanks = {}, const std::vector<QuantizationRule>& quantize = {},
+			const std::vector<std::string>& exportOnly = {}
 	);
 
 	/**

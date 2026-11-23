@@ -4,17 +4,36 @@ program
       : (import_stmt | module_def | struct_def | funcdef)* EOF
       ;
 
-// `import a.b;` imports the definitions of `a/b.dlm` or, if `a/b` is a directory, of all files in it.
+// `import a.b;` binds the namespace of `a/b.dlm` (or of the directory `a/b`) as `b`; `from a.b import x, y;` binds
+// names. A leading `.`/`..` makes the path relative to the importing file; `public` re-exports (see language-spec.md).
 import_stmt
-      : 'import' path+=IDENT ('.' path+=IDENT)* ';'
+      : visibility? 'import' import_path ('as' alias=IDENT)? ';'                            # ImportModule
+      | visibility? 'from' import_path 'import' (star='*' | names+=import_name (',' names+=import_name)*) ';' # ImportNames
+      ;
+
+// Relative paths start with dots (`.` this directory, each further dot one directory up); `from . import x` has no
+// path components after the dots.
+import_path
+      : dots+=('.' | '..' | '...')* path+=IDENT ('.' path+=IDENT)*
+      | dots+=('.' | '..' | '...')+
+      ;
+
+import_name
+      : name=IDENT ('as' alias=IDENT)?
+      ;
+
+// `private`: the file (a member: its module or struct); none: the package; `public`: everyone.
+visibility
+      : 'public'
+      | 'private'
       ;
 
 struct_def
-      : 'struct' IDENT '{' vardecl* '}'
+      : visibility? 'struct' IDENT '{' vardecl* '}'
       ;
 
 module_def
-      : 'module' IDENT '[' (param (',' param)*)? ']' '{' (vardecl | funcdef)* '}'
+      : visibility? 'module' IDENT '[' (param (',' param)*)? ']' '{' (vardecl | funcdef)* '}'
       ;
 
 param
@@ -23,7 +42,8 @@ param
 
 type
       // `masked` marks a masked tensor (dense values plus a mask of the valid elements, see the masking pass)
-      : masked='masked'? typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
+      // `qualifier`: an imported namespace, e.g. `nn.Linear[768, 768]`
+      : masked='masked'? (qualifier+=IDENT '.')* typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
       | 'struct' '{' vardecl* '}'                               # AnonType
       // Array of `element` for var = lo, ..., hi-1 (e.g. a stack of modules)
       | '[' element=type 'for' var=(IDENT | '_') 'in' lo=expr '..' hi=expr ']' # ComprehensionType
@@ -45,7 +65,7 @@ constant
       ;
 
 vardecl
-      : annotation* IDENT ':' type
+      : annotation* visibility? IDENT ':' type
       ;
 
 // `@name` or `@name(args...)`, e.g. `@conditional(bias)` before a member
@@ -54,8 +74,8 @@ annotation
       ;
 
 funcdef
-      : templatespec? rettype IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
-      | templatespec? rettype IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
+      : visibility? templatespec? rettype IDENT '(' (param (',' param)*)? ')' '=>' expr ';'
+      | visibility? templatespec? rettype IDENT '(' (param (',' param)*)? ')' '{' statement* '}'
       ;
 
 // A function returns one value or (in parentheses) multiple values.
