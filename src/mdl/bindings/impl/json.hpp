@@ -128,9 +128,9 @@ inline void mdl::bindings::JsonGenerator::generate(
 		for (size_t i = 0; i < first.moduleWeights.size(); ++i) {
 			const auto& path = first.moduleWeights[i];
 			auto sig = weightSigs.find(path);
-			out << (i > 0 ? "," : "") << "\n        {\"path\": " << jsonString(path) << ", \"dtype\": "
-				<< (sig != weightSigs.end() ? jsonDtype(sig->second->dtype) : "null") << ", \"shape\": "
-				<< (sig != weightSigs.end() ? jsonShape(sig->second->shape) : "null")
+			out << (i > 0 ? "," : "") << "\n        {\"path\": " << jsonString(path)
+				<< ", \"dtype\": " << (sig != weightSigs.end() ? jsonDtype(sig->second->dtype) : "null")
+				<< ", \"shape\": " << (sig != weightSigs.end() ? jsonShape(sig->second->shape) : "null")
 				<< ", \"trainable\": " << (trainable.contains(path) ? "true" : "false") << "}";
 		}
 		out << "\n      ],\n      \"functions\": [";
@@ -157,8 +157,8 @@ inline void mdl::bindings::JsonGenerator::generate(
 			out << "],\n          \"context\": ";
 			if (fn.context)
 				out << "{\"name\": " << jsonString(fn.context->name) << ", \"role\": \""
-					<< (fn.context->producer ? "producer" : "consumer") << "\", \"size_symbol\": "
-					<< jsonString("__tvm_ffi_" + fn.context->sizeSymbol)
+					<< (fn.context->producer ? "producer" : "consumer")
+					<< "\", \"size_symbol\": " << jsonString("__tvm_ffi_" + fn.context->sizeSymbol)
 					<< ", \"size_arguments\": " << fn.context->ellipsisRank << "}";
 			else
 				out << "null";

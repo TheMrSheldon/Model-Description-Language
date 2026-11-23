@@ -4,8 +4,8 @@
 #include <tvm/relax/expr.h>
 #include <tvm/relax/struct_info.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/buffer.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
@@ -62,7 +62,8 @@ namespace mdl::backend::tvm {
 			)
 					: mod(mod), symbols(symbols), profile(profile) {}
 
-			tirx::PrimFunc build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
+			tirx::PrimFunc
+			build(const relax::Function& func, const std::string& symbol, const EntrySignature* packing) {
 				if (packing != nullptr && packing->context)
 					beginContext(packing->dims);
 				for (size_t p = 0; p < func->params.size(); ++p) {
@@ -94,7 +95,9 @@ namespace mdl::backend::tvm {
 					const bool packed = packing != nullptr && i < packing->outputs.size() && packing->outputs[i];
 					const std::string name = "output" + std::to_string(i);
 					outputs.push_back(packed ? packedView(*info, name) : addBufferParam(name, *info));
-					accumulated.push_back(packing != nullptr && i < packing->accumulate.size() && packing->accumulate[i]);
+					accumulated.push_back(
+							packing != nullptr && i < packing->accumulate.size() && packing->accumulate[i]
+					);
 					if (accumulated.back())
 						continue; // computed into a temporary and then added to the output buffer
 					// Follow aliases (`output = alloc`) to the allocation that can write into the output directly.
@@ -151,7 +154,8 @@ namespace mdl::backend::tvm {
 			 * @brief The exported entry of a consumer whose dimensions partly come from the context header: it takes the
 			 * arguments of @p inner without those dimensions, reads them from the header, and calls @p inner.
 			 */
-			tirx::PrimFunc wrapForHeaderDims(const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol) {
+			tirx::PrimFunc
+			wrapForHeaderDims(const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol) {
 				// Fresh variables for the outer function (its buffers have the same shapes as the inner ones).
 				::tvm::ffi::Map<tirx::Var, PrimExpr> rename;
 				auto fresh = [&](const tirx::Var& v) -> tirx::Var {
@@ -204,13 +208,16 @@ namespace mdl::backend::tvm {
 						value = ::tvm::cast(dim.dtype(), value);
 					body.push_back(tirx::Bind(fresh(dim), value));
 				}
-				body.push_back(tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs)));
+				body.push_back(tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs)
+				));
 				auto attrs = ::tvm::DictAttrs(
 						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)},
 						 {tirx::attr::kNoAlias, ::tvm::Bool(true)},
 						 {kAOTEntryAttr, ::tvm::Bool(true)}}
 				);
-				return tirx::PrimFunc(outerParams, tirx::SeqStmt::Flatten(body), ::tvm::VoidType(), outerBuffers, attrs);
+				return tirx::PrimFunc(
+						outerParams, tirx::SeqStmt::Flatten(body), ::tvm::VoidType(), outerBuffers, attrs
+				);
 			}
 
 			/** @brief The size of the context buffer in bytes (valid after build with packing). */
@@ -294,7 +301,8 @@ namespace mdl::backend::tvm {
 					const PrimExpr slot = IntImm(DataType::Int(64), static_cast<int64_t>(k));
 					if (role == Role::Producer) {
 						prologue.push_back(tirx::BufferStore(header, ::tvm::cast(DataType::Int(64), dim), {slot}));
-					} else if (std::find(boundByParams.begin(), boundByParams.end(), dim.get()) == boundByParams.end()) {
+					} else if (std::find(boundByParams.begin(), boundByParams.end(), dim.get()) ==
+							   boundByParams.end()) {
 						// Not determined by another argument (e.g. the sequence length when only [batch, classes]
 						// cotangents are passed): a scalar parameter of this (inner) function, which the outer entry
 						// function reads from the header (see wrapForHeaderDims). (A binding in the body would not
@@ -503,7 +511,8 @@ namespace mdl::backend::tvm {
 				}
 				auto hook = [&](const char* fn) {
 					return tirx::Evaluate(tirx::Call(
-							DataType::Int(32), tirx::builtin::call_extern(), {tirx::StringImm(fn), tirx::StringImm(it->second)}
+							DataType::Int(32), tirx::builtin::call_extern(),
+							{tirx::StringImm(fn), tirx::StringImm(it->second)}
 					));
 				};
 				if (profile)
@@ -564,7 +573,8 @@ namespace mdl::backend::tvm {
 					if (auto out = outputOf.find(var); out != outputOf.end())
 						values[var] = Value::tensor(out->second); // returned tensor: compute into the output buffer
 					else
-						values[var] = Value::tensor(allocate(shapeArg(call->args[0]), dtypeArg(call->args[1]), "tensor"));
+						values[var] =
+								Value::tensor(allocate(shapeArg(call->args[0]), dtypeArg(call->args[1]), "tensor"));
 				} else if (call->op.same_as(allocStorage)) {
 					// Storage of `size` bytes; allocated as elements of the storage dtype.
 					Array<PrimExpr> size = shapeArg(call->args[0]);
@@ -585,7 +595,9 @@ namespace mdl::backend::tvm {
 					Value x = evaluate(call->args[0]);
 					if (x.kind != Value::Kind::Tensor)
 						unsupported("reshape of a non-tensor");
-					values[var] = Value::tensor(view(x.buffer, shapeArg(call->args[1]), x.buffer->dtype, x.buffer->elem_offset));
+					values[var] = Value::tensor(
+							view(x.buffer, shapeArg(call->args[1]), x.buffer->dtype, x.buffer->elem_offset)
+					);
 				} else if (call->op.same_as(killStorage) || call->op.same_as(killTensor)) {
 					// Lifetimes are handled by the workspace allocations.
 				} else {
@@ -597,7 +609,8 @@ namespace mdl::backend::tvm {
 
 	namespace {
 		/** @brief `size(dims...) -> bytes`: the size of a context buffer for the given dimensions of `...`. */
-		tirx::PrimFunc contextSizeFunction(const PrimExpr& bytes, const Array<tirx::Var>& dims, const std::string& symbol) {
+		tirx::PrimFunc
+		contextSizeFunction(const PrimExpr& bytes, const Array<tirx::Var>& dims, const std::string& symbol) {
 			for (const auto& var : tirx::UndefinedVars(bytes))
 				if (std::find_if(dims.begin(), dims.end(), [&](const tirx::Var& d) { return d.same_as(var); }) ==
 					dims.end())
@@ -614,18 +627,23 @@ namespace mdl::backend::tvm {
 	} // namespace
 
 	IRModule lowerToAOT(
-			IRModule mod, const std::string& kernelPrefix, const std::unordered_map<std::string, EntrySignature>& packing,
-			bool profile
+			IRModule mod, const std::string& kernelPrefix,
+			const std::unordered_map<std::string, EntrySignature>& packing, bool profile
 	) {
 		// Give every kernel a unique global symbol.
 		std::unordered_map<const ::tvm::GlobalVarNode*, std::string> symbols;
-		IRModule result = IRModule(::tvm::ffi::Map<GlobalVar, ::tvm::BaseFunc>(), mod->source_map, mod->attrs, mod->global_infos);
+		IRModule result =
+				IRModule(::tvm::ffi::Map<GlobalVar, ::tvm::BaseFunc>(), mod->source_map, mod->attrs, mod->global_infos);
 		for (const auto& [gv, func] : mod->functions) {
 			if (const auto* prim = func.as<tirx::PrimFuncNode>()) {
 				std::string symbol = kernelPrefix + std::string(gv->name_hint);
 				symbols[gv.get()] = symbol;
-				result->Add(gv, ::tvm::WithAttr(::tvm::ffi::GetRef<tirx::PrimFunc>(prim), ::tvm::attr::kGlobalSymbol,
-												::tvm::ffi::String(symbol)));
+				result->Add(
+						gv, ::tvm::WithAttr(
+									::tvm::ffi::GetRef<tirx::PrimFunc>(prim), ::tvm::attr::kGlobalSymbol,
+									::tvm::ffi::String(symbol)
+							)
+				);
 			}
 		}
 		for (const auto& [gv, func] : mod->functions) {

@@ -48,10 +48,9 @@ namespace mdl::autodiff {
 	 * @param weightOrder the weights of the module in canonical order (see mdl::weightPaths).
 	 * @return the gradient function, or an error if a builtin without gradient rule is involved.
 	 */
-	std::expected<FunctionDecl, std::string> vjp(
-			Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
-			const Options& options = {}
-	);
+	std::expected<FunctionDecl, std::string>
+	vjp(Computegraph& graph, const FunctionDecl& func, const std::vector<std::string>& weightOrder,
+		const Options& options = {});
 
 	/** @brief A gradient function split into a forward pass that saves residuals and a backward pass. */
 	struct Split {
@@ -77,9 +76,8 @@ namespace mdl::autodiff {
 	 * computations are recomputed in the backward pass instead of being saved (gradient checkpointing): only their
 	 * inputs are saved. nullptr for none.
 	 */
-	std::expected<Split, std::string> split(
-			Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint = nullptr
-	);
+	std::expected<Split, std::string>
+	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint = nullptr);
 
 } // namespace mdl::autodiff
 

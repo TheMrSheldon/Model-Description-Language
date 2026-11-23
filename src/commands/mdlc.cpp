@@ -1,12 +1,13 @@
-#include "commands/common.hpp"
+#include "common.hpp"
 #include "mdl/argvals.hpp"
+#include <mdl/version.hpp>
 
 #include <mdl/bindings/generator.hpp>
 #include <mdl/compiler.hpp>
-#include <mdl/exports.hpp>
-#include <mdl/utils/pathpattern.hpp>
 #include <mdl/computegraphv2/function.hpp>
+#include <mdl/exports.hpp>
 #include <mdl/parser.hpp>
+#include <mdl/utils/pathpattern.hpp>
 #include <mdl/utils/utils.hpp>
 
 #include <yaml-cpp/yaml.h>
@@ -75,7 +76,9 @@ public:
 			const std::string name = buildOption.results().front();
 			const YAML::Node builds = root["builds"];
 			if (!builds || !builds.IsMap() || !builds[name])
-				throw CLI::ConfigError(std::format("--build {}: the argument values have no section builds.{}", name, name));
+				throw CLI::ConfigError(
+						std::format("--build {}: the argument values have no section builds.{}", name, name)
+				);
 			collect(builds[name], "builds." + name);
 		}
 
@@ -123,7 +126,9 @@ public:
 					for (const auto& entry : rule) {
 						const auto name = entry.first.as<std::string>();
 						if (name != "weights" && name != "format" && name != "group")
-							throw CLI::ConfigError("build key quantize: unknown key " + name + " (weights, format, group)");
+							throw CLI::ConfigError(
+									"build key quantize: unknown key " + name + " (weights, format, group)"
+							);
 					}
 					std::string value = rule["format"].as<std::string>();
 					if (rule["group"])
@@ -143,7 +148,9 @@ public:
 			} else {
 				item.name = key == "bindings" ? "binding" : key;
 				if (app.get_option_no_throw("--" + item.name) == nullptr)
-					throw CLI::ConfigError(std::format("unknown build key {} (the keys are mdlc's long option names)", key));
+					throw CLI::ConfigError(
+							std::format("unknown build key {} (the keys are mdlc's long option names)", key)
+					);
 				item.inputs = scalars(node, key);
 			}
 			items.push_back(std::move(item));
@@ -174,6 +181,7 @@ struct CompileArgs {
 	std::vector<std::string> quantize;
 	mdl::PrimitiveType defaultFloat = mdl::PrimitiveType::float32;
 	std::vector<std::string> warnings;
+	bool strict = false;
 	std::optional<std::string> build;
 	LoggerConf logConf;
 	std::vector<BindingRequest> bindings;
@@ -258,15 +266,18 @@ static void runCompileCommand(const CompileArgs& args) {
 		std::filesystem::create_directories(output.parent_path());
 	/** \todo: handle multiple input files */
 	mdl::parser::ParseOptions parseOptions{.importDirs = args.importdirs, .defaultFloat = args.defaultFloat};
+	// Strict: what may be wrong (e.g. sizes that may differ) is an error; -W options below take precedence.
+	if (args.strict)
+		parseOptions.permitsIllegalInstantiation = mdl::parser::DiagnosticLevel::error;
 	// -W<name>: warning, -Wno-<name>: ignored, -Werror=<name>: error.
 	for (const auto& w : args.warnings) {
-		auto level = mdl::parser::Diagnostic::warning;
+		auto level = mdl::parser::DiagnosticLevel::warning;
 		std::string name = w;
 		if (name.starts_with("no-")) {
-			level = mdl::parser::Diagnostic::ignored;
+			level = mdl::parser::DiagnosticLevel::ignored;
 			name = name.substr(3);
 		} else if (name.starts_with("error=")) {
-			level = mdl::parser::Diagnostic::error;
+			level = mdl::parser::DiagnosticLevel::error;
 			name = name.substr(6);
 		}
 		if (name == "float-widening")
@@ -275,9 +286,13 @@ static void runCompileCommand(const CompileArgs& args) {
 			parseOptions.floatNarrowing = level;
 		else if (name == "unknown-annotation")
 			parseOptions.unknownAnnotation = level;
+		else if (name == "permits-illegal-instantiation")
+			parseOptions.permitsIllegalInstantiation = level;
 		else
 			throw std::runtime_error(
-					"unknown diagnostic -W" + w + " (known: float-widening, float-narrowing, unknown-annotation)"
+					"unknown diagnostic -W" + w +
+					" (known: float-widening, float-narrowing, unknown-annotation, "
+					"permits-illegal-instantiation)"
 			);
 	}
 	auto result = mdl::parser::parse(args.inputs[0], parseOptions);
@@ -287,7 +302,10 @@ static void runCompileCommand(const CompileArgs& args) {
 	logger->debug("Computegraph has {} nodes", program.graph().getNumNodes());
 
 	mdl::GradientRequest gradients{
-			.functions = args.gradFunctions, .options = {}, .fused = args.gradFused, .accumulate = !args.gradOverwrite,
+			.functions = args.gradFunctions,
+			.options = {},
+			.fused = args.gradFused,
+			.accumulate = !args.gradOverwrite,
 			.checkpoint = args.checkpoint
 	};
 	{
@@ -320,7 +338,9 @@ static void runCompileCommand(const CompileArgs& args) {
 	}
 	for (const auto& [name, rank] : compileOpts.inputEllipsisRanks)
 		if (rank > compileOpts.ellipsisRank)
-			throw std::runtime_error("--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`");
+			throw std::runtime_error(
+					"--ellipsis-rank " + name + "=" + std::to_string(rank) + " exceeds the rank of `...`"
+			);
 	auto exports = mdl::exportedFunctions(
 			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks,
 			parseQuantizationRules(args.quantize)
@@ -329,8 +349,8 @@ static void runCompileCommand(const CompileArgs& args) {
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
 	for (const auto& fn : exports)
 		logger->info(
-				"Exporting {} ({} input(s), {} weight(s), {} output(s))", fn.symbol, fn.inputs.size(), fn.weights.size(),
-				fn.outputs.size()
+				"Exporting {} ({} input(s), {} weight(s), {} output(s))", fn.symbol, fn.inputs.size(),
+				fn.weights.size(), fn.outputs.size()
 		);
 
 	mdl::compileToFile(exports, output, argvals, compileOpts);
@@ -348,6 +368,7 @@ static void runCompileCommand(const CompileArgs& args) {
 
 int main(int argc, char* argv[]) {
 	CLI::App app("mdlc -- compiler for the model description language");
+	app.set_version_flag("--version", std::string{mdl::version});
 
 	CompileArgs args;
 	setupLoggerArgs(app, args.logConf);
@@ -370,8 +391,10 @@ int main(int argc, char* argv[]) {
 	config->check(CLI::ExistingFile);
 	app.add_option(
 			   "--binding", args.bindings,
-			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ header), "
-			   "python, python-torch, python-tensorflow, json (metadata). Without PATH, the file is placed next to the output. Repeatable."
+			   "Generate bindings for the compiled functions: TYPE or TYPE=PATH, where TYPE is one of cpp (C++ "
+			   "header), "
+			   "python, python-torch, python-tensorflow, json (metadata). Without PATH, the file is placed next to the "
+			   "output. Repeatable."
 	)
 			->type_name("TYPE[=PATH]");
 	app.add_option("--depfile", args.depfile, "Write a dependency file listing all (imported) source files.");
@@ -413,7 +436,8 @@ int main(int argc, char* argv[]) {
 	app.add_option(
 			   "--quantize", args.quantize,
 			   "Quantize the weights selected by the patterns (e.g. 'int4:128=**.W,!classifier.**'): FORMAT int8 (one "
-			   "scale per output unless GROUP is given), int4 (symmetric), or int4-asym (with zero points); GROUP values "
+			   "scale per output unless GROUP is given), int4 (symmetric), or int4-asym (with zero points); GROUP "
+			   "values "
 			   "of the input dimension share a scale (default 128 for int4). A weight W [N, K] becomes W.qweight, "
 			   "W.scales (and W.zeros); quantized weights are frozen. Repeatable; later rules take precedence."
 	)
@@ -439,31 +463,44 @@ int main(int argc, char* argv[]) {
 			}));
 	app.add_option(
 			   "--ellipsis-rank", args.ellipsisRanks,
-			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, seq]). "
+			   "Number of dimensions that `...` stands for in compiled signatures (default 1; e.g. 2 for [batch, "
+			   "seq]). "
 			   "NAME=K gives the input NAME a smaller rank: its `...` are the leading K dimensions (e.g. labels=1 for "
 			   "labels [batch] next to token ids [batch, seq]). Repeatable."
 	)
 			->type_name("N|NAME=K");
 	app.add_option(
 			   "--float", args.defaultFloat,
-			   "The type that `float` stands for: f32 (default), bf16, or f16. The explicit types float32, bfloat16 and "
+			   "The type that `float` stands for: f32 (default), bf16, or f16. The explicit types float32, bfloat16 "
+			   "and "
 			   "float16 are not affected; conversions between float types are explicit (e.g. float32(x))."
 	)
 			->transform(CLI::CheckedTransformer(
 					std::map<std::string, mdl::PrimitiveType>{
 							{"f32", mdl::PrimitiveType::float32},
 							{"bf16", mdl::PrimitiveType::bfloat16},
-							{"f16", mdl::PrimitiveType::float16}},
+							{"f16", mdl::PrimitiveType::float16}
+					},
 					CLI::ignore_case
 			));
 	app.add_option(
 			   "-W", args.warnings,
 			   "Diagnostics like g++: -W<name> warns, -Wno-<name> ignores, -Werror=<name> makes it an error. "
-			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or between "
+			   "float-widening (implicit bfloat16/float16 to float32) and float-narrowing (float32 to 16 bits, or "
+			   "between "
 			   "bfloat16 and float16) are errors by default; as a warning or ignored, the conversion is inserted. "
-			   "unknown-annotation (an annotation the compiler does not know) is a warning by default. Repeatable."
+			   "unknown-annotation (an annotation the compiler does not know) is a warning by default. "
+			   "permits-illegal-instantiation (code that is an error for some hyperparameter values: sizes that are "
+			   "different compile-time expressions where equal ones are needed, e.g. the hyperparameters input and "
+			   "output in `W @ x`, or a member with @conditional(c) used where c may be false) is a warning by "
+			   "default and an error with --strict. Repeatable."
 	)
 			->type_name("[no-|error=]NAME");
+	app.add_flag(
+			"--strict", args.strict,
+			"Strict checking: report what may be wrong as errors, e.g. sizes that may differ "
+			"or members with @conditional(c) used where c may be false (-Werror=permits-illegal-instantiation)."
+	);
 	app.add_flag("--fast-math", args.compileOpts.fastMath, "Use fast (approximate) math functions.");
 	app.add_flag(
 			"--profile", args.compileOpts.profile,

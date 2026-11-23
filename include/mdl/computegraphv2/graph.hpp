@@ -81,7 +81,8 @@ namespace mdl {
 		 * @return the output nodes of the inlined call.
 		 */
 		std::expected<Outputs, std::string> addInvocationNode(
-				const FunctionDecl& func, std::vector<NodeRef>&& arguments, std::vector<NodeRef>&& templateArguments = {}
+				const FunctionDecl& func, std::vector<NodeRef>&& arguments,
+				std::vector<NodeRef>&& templateArguments = {}
 		);
 
 		/**

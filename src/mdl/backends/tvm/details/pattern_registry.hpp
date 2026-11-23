@@ -34,7 +34,7 @@ namespace mdl::backend::tvm {
 
 	/** @brief One recognizable decomposition and its replacement. */
 	struct PatternEntry {
-		std::string_view name;			///< logged on match (diagnostic only)
+		std::string_view name;			 ///< logged on match (diagnostic only)
 		::tvm::relax::DFPattern pattern; ///< root DFPattern to match
 		RewriterFn rewriter;			 ///< called on every successful match
 	};

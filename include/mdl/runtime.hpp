@@ -28,8 +28,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace mdl::runtime {
@@ -449,7 +449,8 @@ namespace mdl::runtime {
 			if (t->strides != nullptr)
 				throw std::runtime_error("safetensors: tensor " + name + " is not contiguous");
 			std::vector<int64_t> shape(t->shape, t->shape + t->ndim);
-			uint64_t bytes = (t->dtype.bits / 8) * std::accumulate(shape.begin(), shape.end(), uint64_t{1}, std::multiplies<>{});
+			uint64_t bytes =
+					(t->dtype.bits / 8) * std::accumulate(shape.begin(), shape.end(), uint64_t{1}, std::multiplies<>{});
 			header[name] = {{"dtype", dtype}, {"shape", shape}, {"data_offsets", {offset, offset + bytes}}};
 			sizes.push_back(bytes);
 			offset += bytes;
@@ -507,8 +508,8 @@ namespace mdl::runtime {
 	 */
 	template <typename Model>
 	LoadedWeights<Model> loadWeights(
-			const std::filesystem::path& path, const NameMap& map = {}, FloatConversion conversion = FloatConversion::none,
-			Quantization quantization = Quantization::none
+			const std::filesystem::path& path, const NameMap& map = {},
+			FloatConversion conversion = FloatConversion::none, Quantization quantization = Quantization::none
 	) {
 		detail::SafetensorsFile file{path};
 		LoadedWeights<Model> result;
@@ -566,15 +567,24 @@ namespace mdl::runtime {
 				auto it = quantized.find(weight);
 				if (it == quantized.end())
 					it = quantized
-								 .emplace(weight, detail::quantize(
-														  detail::readAsFloat(file, e), N, K, K / scales->shape[0],
-														  q->shape[1] != K, asymmetric, scaleDtype
-												  ))
+								 .emplace(
+										 weight, detail::quantize(
+														 detail::readAsFloat(file, e), N, K, K / scales->shape[0],
+														 q->shape[1] != K, asymmetric, scaleDtype
+												 )
+								 )
 								 .first;
 				const std::vector<int64_t> shape(info.shape.begin(), info.shape.begin() + info.ndim);
 				if (suffix != ".scales") {
 					const auto& values = suffix == ".qweight" ? it->second.q : it->second.zeros;
-					auto& stored = result.bytes.emplace(info.name, BasicTensor<int8_t>{shape, std::vector<int8_t>(values.begin(), values.end())}).first->second;
+					auto& stored = result.bytes
+										   .emplace(
+												   info.name,
+												   BasicTensor<int8_t>{
+														   shape, std::vector<int8_t>(values.begin(), values.end())
+												   }
+										   )
+										   .first->second;
 					*result.weights.find(info.name) = stored.dl();
 					continue;
 				}
@@ -604,15 +614,16 @@ namespace mdl::runtime {
 			for (int32_t d = 0; shapeOk && d < info.ndim; ++d)
 				shapeOk = info.shape[d] < 0 || info.shape[d] == e.shape[d];
 			auto isFloat = [](const std::string& d) { return d == "F32" || d == "BF16" || d == "F16"; };
-			const bool convert = conversion == FloatConversion::allowed && e.dtype != dtype && isFloat(e.dtype) && isFloat(dtype);
+			const bool convert =
+					conversion == FloatConversion::allowed && e.dtype != dtype && isFloat(e.dtype) && isFloat(dtype);
 			if ((e.dtype != dtype && !convert) || !shapeOk) {
 				std::string fileShape, modelShape;
 				for (auto d : e.shape)
 					fileShape += (fileShape.empty() ? "" : ", ") + std::to_string(d);
 				for (int32_t d = 0; d < info.ndim; ++d)
 					modelShape += (d > 0 ? ", " : "") + std::to_string(info.shape[d]);
-				problems += std::string("\n  ") + info.name + ": file has " + e.dtype + "[" + fileShape + "], model expects " +
-							dtype + "[" + modelShape + "]";
+				problems += std::string("\n  ") + info.name + ": file has " + e.dtype + "[" + fileShape +
+							"], model expects " + dtype + "[" + modelShape + "]";
 				continue;
 			}
 			auto bind = [&](auto& storage, auto tensor) {

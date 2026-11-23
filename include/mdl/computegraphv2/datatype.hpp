@@ -3,6 +3,7 @@
 
 #include "../utils/overload.hpp"
 #include "node_decl.hpp"
+#include <algorithm>
 
 #include <expected>
 #include <format>
@@ -17,12 +18,12 @@ namespace mdl {
 	struct Elipsis {};
 
 	enum class PrimitiveType {
-		error,	  /**< used to mark invalid nodes in the computegraph (e.g., due to semantic errors) **/
-		float32,  /**< IEEE 754 single precision (`float32`; `float` by default, see the option for the default float) */
-		integer,  /**< represents arbitrary signed integers. The precise datatype is compile-time configurable. */
-		uint,	  /**< represents arbitrary unsigned integers. The precise datatype is compile-time configurable. */
-		boolean,  /**< represents booleans. */
-		float16,  /**< IEEE 754 half precision (`float16`) */
+		error,	 /**< used to mark invalid nodes in the computegraph (e.g., due to semantic errors) **/
+		float32, /**< IEEE 754 single precision (`float32`; `float` by default, see the option for the default float) */
+		integer, /**< represents arbitrary signed integers. The precise datatype is compile-time configurable. */
+		uint,	 /**< represents arbitrary unsigned integers. The precise datatype is compile-time configurable. */
+		boolean, /**< represents booleans. */
+		float16, /**< IEEE 754 half precision (`float16`) */
 		bfloat16, /**< bfloat16 (`bfloat16`): float32's exponent range with 8 bits of precision */
 		int8	  /**< 8-bit integers: the storage of quantized weights (see builtins::FunctionIDs::DEQUANT) */
 	};
@@ -34,9 +35,9 @@ namespace mdl {
 
 	/** @brief The size of an element of @p type in bytes (booleans: 1). */
 	constexpr unsigned byteSize(PrimitiveType type) {
-		return type == PrimitiveType::float16 || type == PrimitiveType::bfloat16	   ? 2
-			   : type == PrimitiveType::boolean || type == PrimitiveType::int8 ? 1
-																			   : 4;
+		return type == PrimitiveType::float16 || type == PrimitiveType::bfloat16 ? 2
+			   : type == PrimitiveType::boolean || type == PrimitiveType::int8	 ? 1
+																				 : 4;
 	}
 
 	struct TensorType final {
@@ -107,6 +108,8 @@ namespace mdl {
 		 * e.g. ("conf.dims.model", 768) or ("ch.2", 256) for arrays.
 		 */
 		std::vector<std::pair<std::string, std::variant<int64_t, double>>> hyperparameterValues;
+		/** @brief The instance for messages and tools, e.g. `Linear[768, 3, 1]` or `Linear[d, d, bias]` (symbolic). */
+		std::string instanceName;
 
 		static constexpr size_t InvalidIdx = -1;
 
@@ -127,8 +130,8 @@ namespace mdl {
 	};
 
 	/** \todo handle member functions? **/
-	using DataType =
-			std::variant<PrimitiveType, TensorType, struct AggregateType, ModuleType, BoundModuleType, struct ArrayType>;
+	using DataType = std::variant<
+			PrimitiveType, TensorType, struct AggregateType, ModuleType, BoundModuleType, struct ArrayType>;
 
 	struct AggregateType final {
 		std::map<std::string, DataType> members;

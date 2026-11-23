@@ -44,9 +44,8 @@ namespace mdl::masking {
 	 * @return the masked function (same name; the mask is its last parameter `mask`) and its mask input, or an error
 	 * (e.g. if a masked dimension cannot be aligned with the mask).
 	 */
-	std::expected<Masked, std::string> apply(
-			Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes
-	);
+	std::expected<Masked, std::string>
+	apply(Computegraph& graph, const FunctionDecl& func, const shapes::Shapes& shapes);
 
 } // namespace mdl::masking
 

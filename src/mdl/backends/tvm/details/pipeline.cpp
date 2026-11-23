@@ -71,7 +71,10 @@ namespace mdl::backend::tvm {
 						return v;
 					const auto* ptr = v->type_annotation.as<::tvm::PointerTypeNode>();
 					const auto lanes = ptr->element_type.as<::tvm::PrimTypeNode>()->dtype.lanes();
-					tirx::Var u(v->name_hint, ::tvm::PointerType(::tvm::PrimType(DataType::UInt(16, lanes)), ptr->storage_scope));
+					tirx::Var u(
+							v->name_hint,
+							::tvm::PointerType(::tvm::PrimType(DataType::UInt(16, lanes)), ptr->storage_scope)
+					);
 					vars.emplace(v.get(), u);
 					return u;
 				}
@@ -83,14 +86,16 @@ namespace mdl::backend::tvm {
 						return b;
 					const DataType dtype = b->dtype.is_bfloat16() ? DataType::UInt(16, b->dtype.lanes()) : b->dtype;
 					tirx::Buffer u(
-							data, dtype, b->shape, b->strides, b->elem_offset, b->name, b->data_alignment, b->offset_factor,
-							b->buffer_type, b->axis_separators, b->span
+							data, dtype, b->shape, b->strides, b->elem_offset, b->name, b->data_alignment,
+							b->offset_factor, b->buffer_type, b->axis_separators, b->span
 					);
 					buffers.emplace(b.get(), u);
 					return u;
 				}
 
-				::tvm::PrimExpr VisitExpr_(const tirx::VarNode* op) final { return var(::tvm::ffi::GetRef<tirx::Var>(op)); }
+				::tvm::PrimExpr VisitExpr_(const tirx::VarNode* op) final {
+					return var(::tvm::ffi::GetRef<tirx::Var>(op));
+				}
 				::tvm::PrimExpr VisitExpr_(const tirx::BufferLoadNode* op) final {
 					auto load = ::tvm::Downcast<tirx::BufferLoad>(tirx::StmtExprMutator::VisitExpr_(op));
 					tirx::Buffer b = buffer(load->buffer);
@@ -112,11 +117,12 @@ namespace mdl::backend::tvm {
 					auto call = ::tvm::Downcast<tirx::Call>(tirx::StmtExprMutator::VisitExpr_(op));
 					if (call->op.same_as(tirx::builtin::reinterpret())) {
 						const ::tvm::PrimExpr& x = call->args[0];
-						const DataType to = call->dtype.is_bfloat16() ? DataType::UInt(16, call->dtype.lanes()) : call->dtype;
+						const DataType to =
+								call->dtype.is_bfloat16() ? DataType::UInt(16, call->dtype.lanes()) : call->dtype;
 						if (x.dtype() == to)
 							return x;
-						if (const auto* inner = x.as<tirx::CallNode>(); inner && inner->op.same_as(tirx::builtin::reinterpret()) &&
-																	 inner->args[0].dtype() == to)
+						if (const auto* inner = x.as<tirx::CallNode>();
+							inner && inner->op.same_as(tirx::builtin::reinterpret()) && inner->args[0].dtype() == to)
 							return inner->args[0];
 						if (to != call->dtype)
 							return ::tvm::reinterpret(to, x);
@@ -180,8 +186,8 @@ namespace mdl::backend::tvm {
 			::tvm::relax::Expr VisitExpr_(const ::tvm::relax::CallNode* op) final {
 				auto call = ::tvm::Downcast<::tvm::relax::Call>(ExprMutator::VisitExpr_(op));
 				static const std::vector<::tvm::Op> elementwise{
-						::tvm::Op::Get("relax.add"), ::tvm::Op::Get("relax.subtract"),
-						::tvm::Op::Get("relax.multiply"), ::tvm::Op::Get("relax.divide")
+						::tvm::Op::Get("relax.add"), ::tvm::Op::Get("relax.subtract"), ::tvm::Op::Get("relax.multiply"),
+						::tvm::Op::Get("relax.divide")
 				};
 				const auto* callee = call->op.as<::tvm::OpNode>();
 				if (!callee || std::none_of(elementwise.begin(), elementwise.end(), [&](const auto& o) {
@@ -212,7 +218,8 @@ namespace mdl::backend::tvm {
 						}
 					}
 					if (value) {
-						args.push_back(::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType(c->data->dtype), *value)));
+						args.push_back(::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType(c->data->dtype), *value))
+						);
 						changed = true;
 					} else {
 						args.push_back(arg);
@@ -249,8 +256,11 @@ namespace mdl::backend::tvm {
 					!(info->dtype.is_float() || info->dtype.is_bfloat16()))
 					return call;
 				static const auto astype = ::tvm::ffi::Function::GetGlobalRequired("relax.op.astype");
-				auto wide = builder_->Emit(astype(call->args[0], ::tvm::DataType::Float(32)).cast<::tvm::relax::Expr>(), "wide");
-				auto reduced = builder_->Emit(::tvm::relax::Call(call->op, {wide}, call->attrs, call->sinfo_args), "sum32");
+				auto wide = builder_->Emit(
+						astype(call->args[0], ::tvm::DataType::Float(32)).cast<::tvm::relax::Expr>(), "wide"
+				);
+				auto reduced =
+						builder_->Emit(::tvm::relax::Call(call->op, {wide}, call->attrs, call->sinfo_args), "sum32");
 				return astype(reduced, info->dtype).cast<::tvm::relax::Expr>();
 			}
 		};

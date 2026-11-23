@@ -38,13 +38,21 @@ namespace {
 
 		void print() {
 			std::vector<std::pair<std::string, Entry>> sorted(entries.begin(), entries.end());
-			std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.seconds > b.second.seconds; });
+			std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+				return a.second.seconds > b.second.seconds;
+			});
 			double total = 0;
 			for (const auto& [name, e] : sorted)
 				total += e.seconds;
-			std::fprintf(stderr, "\nmdl kernel profile (total %.3f s):\n%10s %7s %8s  %s\n", total, "seconds", "share", "calls", "kernel");
+			std::fprintf(
+					stderr, "\nmdl kernel profile (total %.3f s):\n%10s %7s %8s  %s\n", total, "seconds", "share",
+					"calls", "kernel"
+			);
 			for (const auto& [name, e] : sorted)
-				std::fprintf(stderr, "%10.3f %6.1f%% %8lld  %s\n", e.seconds, total > 0 ? 100 * e.seconds / total : 0.0, e.calls, name.c_str());
+				std::fprintf(
+						stderr, "%10.3f %6.1f%% %8lld  %s\n", e.seconds, total > 0 ? 100 * e.seconds / total : 0.0,
+						e.calls, name.c_str()
+				);
 		}
 	};
 

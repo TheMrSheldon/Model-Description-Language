@@ -1,8 +1,8 @@
 #ifndef MDL_PASSES_SHAPES_HPP
 #define MDL_PASSES_SHAPES_HPP
 
-#include "../computegraphv2/datatype.hpp"
 #include "../computegraphv2/builtins.hpp"
+#include "../computegraphv2/datatype.hpp"
 #include "../computegraphv2/node.hpp"
 
 #include <cstdint>
@@ -117,16 +117,20 @@ namespace mdl::shapes {
 	 * @brief Whether a computed type matches a declared one (e.g. a function's result against its declared return type).
 	 * @details Only definite mismatches count: the shapes are compared from the end up to the first `...` of either,
 	 * and a dimension that is not constant matches any. With @p elements, floating-point and integer/boolean element
-	 * types differ as well. Float tensors of different float types never match (conversions are explicit).
+	 * types differ as well. Float tensors of different float types never match (conversions are explicit). With
+	 * @p strict, sizes that are different compile-time expressions (e.g. `indim` and `outdim`) do not match either:
+	 * they may differ in an instance.
 	 */
-	bool matches(const DataType& declared, const DataType& computed, bool elements = true);
+	bool matches(const DataType& declared, const DataType& computed, bool elements = true, bool strict = false);
 
 	/**
 	 * @brief Checks the arguments of the builtin @p id for definite mismatches (e.g. the inner dimensions of a matrix
-	 * product, or shapes that do not broadcast).
+	 * product, or shapes that do not broadcast). With @p strict, also for sizes that are different compile-time
+	 * expressions (e.g. `indim @ outdim`), which may differ in an instance.
 	 * @return a description of the mismatch, or std::nullopt.
 	 */
-	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args);
+	std::optional<std::string>
+	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args, bool strict = false);
 
 	/**
 	 * @brief The float type of float results of non-float values (e.g. the mean of integers, or `x.mask` of an integer
@@ -137,10 +141,9 @@ namespace mdl::shapes {
 	/** @brief A type for messages, e.g. `float[..., 768]`. */
 	std::string str(const DataType& type);
 
-	std::expected<Shapes, std::string> infer(
-			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
-			const std::unordered_map<const Node*, Shape>& known = {}
-	);
+	std::expected<Shapes, std::string>
+	infer(const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
+		  const std::unordered_map<const Node*, Shape>& known = {});
 
 } // namespace mdl::shapes
 

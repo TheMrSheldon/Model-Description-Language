@@ -159,7 +159,8 @@ namespace mdl::bindings::detail {
 					emitHyperparameterFields(out, first, indent + "    ");
 					out << indent << "};\n";
 				}
-				out << indent << "std::array<" << element << ", " << node.children.size() << "> " << cppIdent(name) << ";\n";
+				out << indent << "std::array<" << element << ", " << node.children.size() << "> " << cppIdent(name)
+					<< ";\n";
 			} else {
 				out << indent << "struct {\n"; // anonymous struct type (initialized by designated initializers)
 				emitHyperparameterFields(out, node, indent + "    ");
@@ -182,7 +183,8 @@ namespace mdl::bindings::detail {
 				init += "{{";
 				for (size_t i = 0; i < node.children.size(); ++i) {
 					const auto& element = node.children[i].second;
-					init += (i > 0 ? ", " : "") + (element.children.empty() ? value(element) : "{" + hyperparameterInit(element) + "}");
+					init += (i > 0 ? ", " : "") +
+							(element.children.empty() ? value(element) : "{" + hyperparameterInit(element) + "}");
 				}
 				init += "}}";
 			} else {
@@ -230,7 +232,8 @@ namespace mdl::bindings::detail {
 			out << "},\n";
 		}
 		out << "        }};\n\n"
-			<< "        /// Returns the slot of the weight with the given path, or nullptr if there is no such weight.\n"
+			<< "        /// Returns the slot of the weight with the given path, or nullptr if there is no such "
+			   "weight.\n"
 			<< "        const DLTensor** find(std::string_view path) {\n";
 		for (const auto& path : fns.front()->moduleWeights)
 			out << "            if (path == \"" << path << "\") return &" << cppAccess(path) << ";\n";
@@ -277,9 +280,10 @@ namespace mdl::bindings::detail {
 					dims += (d > 0 ? ", " : "") + std::format("int64_t d{}", d);
 					dimArgs += (d > 0 ? ", " : "") + std::format("d{}", d);
 				}
-				out << "\n    /// Size in bytes of the context buffer `" << context->name << "` (written by `" << fn->function
-					<< "`) for the given\n"
-					<< "    /// dimensions of `...`. It grows with the dimensions: a buffer for the largest dimensions can be\n"
+				out << "\n    /// Size in bytes of the context buffer `" << context->name << "` (written by `"
+					<< fn->function << "`) for the given\n"
+					<< "    /// dimensions of `...`. It grows with the dimensions: a buffer for the largest dimensions "
+					   "can be\n"
 					<< "    /// reused for all smaller ones.\n"
 					<< "    static size_t " << context->name << "_size(" << dims << ") {\n";
 				if (context->ellipsisRank > 0) {
@@ -290,8 +294,8 @@ namespace mdl::bindings::detail {
 				} else {
 					out << "        const TVMFFIAny* args = nullptr;\n";
 				}
-				out << "        return static_cast<size_t>(mdl_detail::callInt(__tvm_ffi_" << context->sizeSymbol << ", args, "
-					<< context->ellipsisRank << ", \"" << context->sizeSymbol << "\"));\n"
+				out << "        return static_cast<size_t>(mdl_detail::callInt(__tvm_ffi_" << context->sizeSymbol
+					<< ", args, " << context->ellipsisRank << ", \"" << context->sizeSymbol << "\"));\n"
 					<< "    }\n"
 					<< "    /// Allocates a context buffer for the given dimensions of `...` (free it with "
 					<< context->name << "_free).\n"
@@ -308,16 +312,20 @@ namespace mdl::bindings::detail {
 			for (size_t i = 0; i < outputs.size(); ++i)
 				out << (i > 0 ? ", " : "") << shapeStr(*outputs[i]);
 			out << "`\n"
-				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must be\n"
-				<< "    /// contiguous CPU tensors of the declared type (float32, or int32 for `int`) whose data is aligned to\n"
+				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must "
+				   "be\n"
+				<< "    /// contiguous CPU tensors of the declared type (float32, or int32 for `int`) whose data is "
+				   "aligned to\n"
 				<< "    /// 64 bytes (e.g. mdl::runtime::Tensor / mdl::runtime::IntTensor).\n"
-				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all tensors).\n";
+				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all "
+				   "tensors).\n";
 			if (context)
 				out << "    /// " << (context->producer ? "Writes the values the backward pass needs into" : "Reads")
 					<< " the context buffer `ctx` (see " << context->name << "_size)"
 					<< (context->producer ? "" : ", which must have been written with the same dimensions") << ".\n";
 			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
-				out << "    /// The gradients are added to the given buffers (accumulation): zero them before the first step.\n";
+				out << "    /// The gradients are added to the given buffers (accumulation): zero them before the "
+					   "first step.\n";
 			out << "    static void " << fn->function << "(";
 			for (const auto* in : inputs)
 				out << "const DLTensor* " << in->name << ", ";
@@ -329,25 +337,26 @@ namespace mdl::bindings::detail {
 			out << ") {\n";
 			if (context)
 				out << "        int64_t ctx_shape[1] = {static_cast<int64_t>(ctx.bytes)};\n"
-					<< "        DLTensor ctx_tensor{ctx.data, {kDLCPU, 0}, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, 0};\n";
+					<< "        DLTensor ctx_tensor{ctx.data, {kDLCPU, 0}, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, "
+					   "0};\n";
 			out << "        TVMFFIAny args[] = {\n";
 			for (const auto* in : inputs)
-				out << "            mdl_detail::tensorArg(" << in->name << ", \"" << in->name << "\", " << dlDtype(in->dtype)
-					<< "),\n";
+				out << "            mdl_detail::tensorArg(" << in->name << ", \"" << in->name << "\", "
+					<< dlDtype(in->dtype) << "),\n";
 			for (const auto& w : fn->weights)
 				out << "            mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name << "\", "
 					<< dlDtype(w.dtype) << "),\n";
 			for (const auto* o : outputs)
-				out << "            mdl_detail::tensorArg(" << o->name << ", \"" << o->name << "\", " << dlDtype(o->dtype)
-					<< "),\n";
+				out << "            mdl_detail::tensorArg(" << o->name << ", \"" << o->name << "\", "
+					<< dlDtype(o->dtype) << "),\n";
 			if (context)
 				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\", {kDLUInt, 8, 1}),\n";
 			out << "        };\n"
 				<< "        mdl_detail::call(__tvm_ffi_" << fn->symbol << ", args, \"" << fn->symbol << "\");\n"
 				<< "    }\n";
 			auto emitInfos = [&](const char* suffix, const std::vector<const TensorSignature*>& tensors) {
-				out << "    static constexpr std::array<mdl_detail::TensorInfo, " << tensors.size() << "> " << fn->function
-					<< "_" << suffix << "{{\n";
+				out << "    static constexpr std::array<mdl_detail::TensorInfo, " << tensors.size() << "> "
+					<< fn->function << "_" << suffix << "{{\n";
 				for (const auto* t : tensors)
 					out << "        {\"" << t->name << "\", " << infoShape(*t) << "},\n";
 				out << "    }};\n";
@@ -388,7 +397,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#ifndef MDL_MODELS_DETAIL_DEFINED\n"
 		<< "#define MDL_MODELS_DETAIL_DEFINED\n"
 		<< "namespace mdl_detail {\n"
-		<< "    /// Path (or name), shape, and element type of a tensor; -1 marks dimensions that are only known at runtime.\n"
+		<< "    /// Path (or name), shape, and element type of a tensor; -1 marks dimensions that are only known at "
+		   "runtime.\n"
 		<< "    struct TensorInfo {\n"
 		<< "        const char* name;\n"
 		<< "        int32_t ndim;\n"
@@ -400,8 +410,10 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "    inline TVMFFIAny tensorArg(const DLTensor* tensor, const char* name, DLDataType dtype) {\n"
 		<< "        if (tensor == nullptr)\n"
 		<< "            throw std::invalid_argument(std::string{\"missing tensor \"} + (name ? name : \"argument\"));\n"
-		<< "        if (tensor->dtype.code != dtype.code || tensor->dtype.bits != dtype.bits || tensor->dtype.lanes != dtype.lanes)\n"
-		<< "            throw std::invalid_argument(std::string{\"tensor \"} + name + \" has the wrong element type\");\n"
+		<< "        if (tensor->dtype.code != dtype.code || tensor->dtype.bits != dtype.bits || tensor->dtype.lanes != "
+		   "dtype.lanes)\n"
+		<< "            throw std::invalid_argument(std::string{\"tensor \"} + name + \" has the wrong element "
+		   "type\");\n"
 		<< "        if ((reinterpret_cast<uintptr_t>(tensor->data) + tensor->byte_offset) % kTensorAlignment != 0)\n"
 		<< "            throw std::invalid_argument(std::string{\"tensor \"} + (name ? name : \"argument\") +\n"
 		<< "                                        \" is not aligned to 64 bytes\");\n"
@@ -424,7 +436,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "    };\n\n"
 		<< "    inline Context allocContext(size_t bytes) {\n"
 		<< "        const size_t rounded = (bytes + kTensorAlignment - 1) / kTensorAlignment * kTensorAlignment;\n"
-		<< "        Context ctx{std::aligned_alloc(kTensorAlignment, rounded > 0 ? rounded : kTensorAlignment), bytes};\n"
+		<< "        Context ctx{std::aligned_alloc(kTensorAlignment, rounded > 0 ? rounded : kTensorAlignment), "
+		   "bytes};\n"
 		<< "        if (ctx.data == nullptr)\n"
 		<< "            throw std::bad_alloc();\n"
 		<< "        return ctx;\n"
@@ -466,7 +479,9 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 	// Group the exported functions by module (preserving order).
 	std::vector<std::vector<const ExportedFunction*>> modules;
 	for (const auto& fn : exports) {
-		auto it = std::find_if(modules.begin(), modules.end(), [&](const auto& m) { return m.front()->module == fn.module; });
+		auto it = std::find_if(modules.begin(), modules.end(), [&](const auto& m) {
+			return m.front()->module == fn.module;
+		});
 		if (it == modules.end())
 			modules.push_back({&fn});
 		else

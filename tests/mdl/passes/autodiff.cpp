@@ -261,7 +261,7 @@ TEST_CASE("integer inputs get no gradient; the embedding table gets a scatter-ad
 	auto unit = parseOrFail(R"(
 		module M[] {
 			table: float[10, 4]
-			float[..., 4] forward(ids: int[...], x: float[..., 4]) => __builtin_take(table, ids) * x;
+			float[..., 4] forward(ids: int[...], x: float[..., 4]) => table[ids] * x;
 		}
 	)");
 	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));

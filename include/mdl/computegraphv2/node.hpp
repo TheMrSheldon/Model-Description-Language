@@ -21,22 +21,7 @@ namespace mdl {
 		/**
 		 * @brief Get the data type of this node.
 		 */
-		const DataType& datatype() const {
-			static DataType inttype = PrimitiveType::integer;
-			static DataType floattype = PrimitiveType::float32;
-			return std::visit(
-					mdl::overloaded{
-							[&](const int&) -> const DataType& { return inttype; },
-							[&](const double&) -> const DataType& { return floattype; },
-							[&](const std::vector<int>& v) -> const DataType& {
-								if (!_cachedType)
-									_cachedType = TensorType{PrimitiveType::integer, {static_cast<unsigned>(v.size())}};
-								return *_cachedType;
-							},
-					},
-					value
-			);
-		}
+		const DataType& datatype() const; // (in node.cpp: the node types must be complete for libc++)
 
 		/**
 		 * @brief Whether this node can be evaluated at compile time.

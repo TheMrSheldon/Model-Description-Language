@@ -32,8 +32,8 @@ extern "C" {
  */
 #define MDL_MATMUL_DECLARE(suffix, type)                                                                               \
 	int mdl_matmul_##suffix(                                                                                           \
-			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,      \
-			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,    \
+			type* dst, const type* A, const type* B, const type* bias, int32_t has_bias, int64_t b0, int64_t b1,       \
+			int64_t M, int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0,     \
 			int64_t b_s1, int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN,          \
 			const type* addend, int32_t has_addend, int32_t activation, float alpha                                    \
 	);
@@ -53,9 +53,9 @@ MDL_MATMUL_DECLARE(f16, uint16_t)
  */
 #define MDL_MATMUL_Q_DECLARE(suffix, type)                                                                             \
 	int mdl_matmul_q_##suffix(                                                                                         \
-			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,    \
-			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,       \
-			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,           \
+			type* dst, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t has_zeros,     \
+			int32_t format, int64_t group, const type* bias, int32_t has_bias, int64_t M, int64_t K, int64_t N,        \
+			int64_t a_sM, int64_t a_sK, int64_t d_sM, int64_t d_sN, const type* addend, int32_t has_addend,            \
 			int32_t activation, float alpha                                                                            \
 	);
 MDL_MATMUL_Q_DECLARE(f32, float)

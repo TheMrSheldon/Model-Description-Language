@@ -48,7 +48,8 @@ that can be repeated take a list:
 | `fast-math`, `profile` | the flags | `true` |
 | `bindings` | `--binding` | `[cpp, python-torch]` |
 | `quantize` | `--quantize` | `[{ weights: ["**"], format: int4, group: 128 }]` (see [Quantization](#quantization)) |
-| `diagnostics` | `-W` | `{ float-widening: warning, unknown-annotation: error }` (`error`, `warning`, or `ignored`) |
+| `strict` | `--strict` | `true`: what may be wrong is an error (code that fails for some hyperparameter values, `permits-illegal-instantiation`) |
+| `diagnostics` | `-W` | `{ float-widening: warning, unknown-annotation: error, permits-illegal-instantiation: error }` (`error`, `warning`, or `ignored`; the names: [Diagnostics](language-spec.md#diagnostics)) |
 
 The settings of the selected build replace those of `build:` key by key (e.g. `mask` above). Unknown keys, invalid
 values, and unknown builds are errors.

@@ -5,6 +5,23 @@
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/utils/overload.hpp>
 
+const mdl::DataType& mdl::ConstNode::datatype() const {
+	static DataType inttype = PrimitiveType::integer;
+	static DataType floattype = PrimitiveType::float32;
+	return std::visit(
+			mdl::overloaded{
+					[&](const int&) -> const DataType& { return inttype; },
+					[&](const double&) -> const DataType& { return floattype; },
+					[&](const std::vector<int>& v) -> const DataType& {
+						if (!_cachedType)
+							_cachedType = TensorType{PrimitiveType::integer, {static_cast<unsigned>(v.size())}};
+						return *_cachedType;
+					},
+			},
+			value
+	);
+}
+
 #include <vector>
 
 using namespace mdl;

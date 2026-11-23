@@ -8,9 +8,9 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <utility>
 #include <variant>
-#include <string>
 #include <vector>
 
 namespace mdl {

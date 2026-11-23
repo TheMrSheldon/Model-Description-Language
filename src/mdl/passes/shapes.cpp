@@ -41,11 +41,49 @@ namespace mdl::shapes {
 		return result;
 	}
 
+	namespace {
+		/** @brief A compile-time size expression for messages, e.g. `dim`, `conf.dims.model`, or `heads * key`. */
+		std::string sizeExpression(const Node& node, int parentPrecedence = 0) {
+			using FIDs = builtins::FunctionIDs;
+			if (const auto* hp = std::get_if<HyperparameterNode>(&node))
+				return hp->name.empty() ? "N" : hp->name;
+			if (const auto* cn = std::get_if<ConstNode>(&node)) {
+				if (const auto* i = std::get_if<int>(&cn->value))
+					return std::to_string(*i);
+				return "N";
+			}
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr || inv->arguments.size() != 2)
+				return "N";
+			const char* op = nullptr;
+			int precedence = 0;
+			switch (inv->id) {
+			case FIDs::TENSOR_ADD:
+				op = " + ", precedence = 1;
+				break;
+			case FIDs::TENSOR_SUB:
+				op = " - ", precedence = 1;
+				break;
+			case FIDs::TENSOR_PROD:
+				op = " * ", precedence = 2;
+				break;
+			case FIDs::TENSOR_DIV:
+				op = " / ", precedence = 2;
+				break;
+			default:
+				return "N";
+			}
+			std::string s = sizeExpression(inv->arguments[0].get(), precedence) + op +
+							sizeExpression(inv->arguments[1].get(), precedence + 1);
+			return precedence < parentPrecedence ? "(" + s + ")" : s;
+		}
+	} // namespace
+
 	std::string Dim::str() const {
 		if (group)
 			return "...";
 		if (node != nullptr)
-			return "N";
+			return sizeExpression(*node);
 		if (!known)
 			return "?";
 		std::string s = (factor != 1 || symbols.empty()) ? std::to_string(factor) : "";
@@ -75,6 +113,18 @@ namespace mdl::shapes {
 
 		[[noreturn]] void fail(std::string message) { throw ShapeError{std::move(message)}; }
 		[[noreturn]] void mismatched(std::string message) { throw Mismatch{{std::move(message)}}; }
+
+		/**
+		 * @brief Whether sizes that are different compile-time expressions (e.g. the hyperparameters `indim` and
+		 * `outdim`) count as a mismatch: they may differ in an instance (see check(..., strict)).
+		 */
+		thread_local bool strictSizes = false;
+
+		/** @brief Whether @p a and @p b are known sizes that may differ (not both constant, not equal). */
+		bool mayDiffer(const Dim& a, const Dim& b) {
+			return strictSizes && a.known && b.known && !a.group && !b.group && a != b &&
+				   !(a.isConstant() && b.isConstant());
+		}
 
 		Dim numel(const Shape& shape) {
 			Dim d = Dim::constant(1);
@@ -107,6 +157,8 @@ namespace mdl::shapes {
 					tail.push_back(db);
 				else if (db == Dim::constant(1) || da == db)
 					tail.push_back(da);
+				else if (mayDiffer(da, db))
+					mismatched(std::format("cannot broadcast {} and {} (the sizes may differ)", str(a), str(b)));
 				else if (!da.known || !db.known || (symbolic && !(da.isConstant() && db.isConstant())))
 					tail.push_back(Dim::unknown());
 				else
@@ -182,7 +234,8 @@ namespace mdl::shapes {
 				fail("expected a compile-time integer");
 			}
 
-			Shape apply(FIDs id, const std::vector<NodeRef>& args, const std::function<const Shape&(size_t)>& shapeOf) const {
+			Shape
+			apply(FIDs id, const std::vector<NodeRef>& args, const std::function<const Shape&(size_t)>& shapeOf) const {
 				auto arg = [&](size_t i) -> const Shape& {
 					if (i >= args.size())
 						fail("missing argument");
@@ -213,7 +266,8 @@ namespace mdl::shapes {
 				case FIDs::CAST:
 					return arg(0);
 
-				case FIDs::TENSOR_DOT: return matmul(arg(0), arg(1));
+				case FIDs::TENSOR_DOT:
+					return matmul(arg(0), arg(1));
 
 				// Reductions over the last axis: max/min/sum keep it (size 1), mean removes it. (If the last axis is
 				// part of a group, the group keeps the others.)
@@ -243,7 +297,8 @@ namespace mdl::shapes {
 					arg(0); // (the shapes of the whole function are inferred)
 					return {};
 
-				case FIDs::RESHAPE: return reshape(args, arg(0));
+				case FIDs::RESHAPE:
+					return reshape(args, arg(0));
 				case FIDs::PERMUTE:
 				case FIDs::PERMUTE_INVERSE: {
 					const Shape& x = arg(0);
@@ -328,7 +383,9 @@ namespace mdl::shapes {
 					Shape s = arg(0);
 					for (size_t i = 1; i < args.size(); ++i)
 						if (!symbolic && arg(i) != s)
-							mismatched(std::format("the stacked tensors have different shapes ({} and {})", str(s), str(arg(i))));
+							mismatched(std::format(
+									"the stacked tensors have different shapes ({} and {})", str(s), str(arg(i))
+							));
 					s.insert(s.begin(), Dim::constant(static_cast<int64_t>(args.size())));
 					return s;
 				}
@@ -353,8 +410,15 @@ namespace mdl::shapes {
 					fail("matmul of a scalar");
 				const Dim& ka = a.back();
 				const Dim& kb = b.size() == 1 ? b.back() : b[b.size() - 2];
-				if (ka.known && kb.known && !ka.group && !kb.group && ka.node == nullptr && kb.node == nullptr && ka != kb)
-					mismatched(std::format("the inner dimensions of the matrix product differ ({} @ {})", str(a), str(b)));
+				if (ka.known && kb.known && !ka.group && !kb.group && ka.node == nullptr && kb.node == nullptr &&
+					ka != kb)
+					mismatched(
+							std::format("the inner dimensions of the matrix product differ ({} @ {})", str(a), str(b))
+					);
+				if (mayDiffer(ka, kb))
+					mismatched(std::format(
+							"the inner dimensions of the matrix product may differ ({} @ {})", str(a), str(b)
+					));
 				if (b.size() == 1)
 					return Shape(a.begin(), a.end() - 1);
 				if (a.size() == 1) {
@@ -477,7 +541,8 @@ namespace mdl::shapes {
 			}
 		};
 
-		PrimitiveType defaultFloatType = PrimitiveType::float32;
+		thread_local PrimitiveType defaultFloatType =
+				PrimitiveType::float32; // per thread: documents may be analyzed concurrently
 
 		/**
 		 * @brief The operands of @p id whose element types must agree (no implicit conversions between float types;
@@ -519,7 +584,9 @@ namespace mdl::shapes {
 					return tensor->type;
 				return std::nullopt;
 			};
-			auto isTensor = [&](size_t i) { return i < args.size() && std::holds_alternative<TensorType>(getDataType(args[i].get())); };
+			auto isTensor = [&](size_t i) {
+				return i < args.size() && std::holds_alternative<TensorType>(getDataType(args[i].get()));
+			};
 			// The float type of argument i (the default float for other types, e.g. the mean of integers).
 			auto floatOf = [&](size_t i) {
 				auto t = of(i);
@@ -595,25 +662,25 @@ namespace mdl::shapes {
 	} // namespace
 
 	std::optional<Shape> shapeOfType(const DataType& type) {
-			if (std::holds_alternative<PrimitiveType>(type))
-				return Shape{};
-			const auto* tensor = std::get_if<TensorType>(&type);
-			if (tensor == nullptr)
-				return std::nullopt;
-			Shape shape;
-			for (const auto& dim : tensor->shape)
-				std::visit(
-						overloaded{
-								[&](Elipsis) { shape.push_back(Dim::ellipsis()); },
-								[&](unsigned u) { shape.push_back(Dim::constant(u)); },
-								[&](const Node* n) {
-									auto value = constantInteger(*n);
-									shape.push_back(value ? Dim::constant(*value) : Dim::of(*n));
-								},
-						},
-						dim
-				);
-			return shape;
+		if (std::holds_alternative<PrimitiveType>(type))
+			return Shape{};
+		const auto* tensor = std::get_if<TensorType>(&type);
+		if (tensor == nullptr)
+			return std::nullopt;
+		Shape shape;
+		for (const auto& dim : tensor->shape)
+			std::visit(
+					overloaded{
+							[&](Elipsis) { shape.push_back(Dim::ellipsis()); },
+							[&](unsigned u) { shape.push_back(Dim::constant(u)); },
+							[&](const Node* n) {
+								auto value = constantInteger(*n);
+								shape.push_back(value ? Dim::constant(*value) : Dim::of(*n));
+							},
+					},
+					dim
+			);
+		return shape;
 	}
 
 	namespace {
@@ -642,7 +709,7 @@ namespace mdl::shapes {
 		return s + (shape ? str(*shape) : "[?]");
 	}
 
-	bool matches(const DataType& declared, const DataType& computed, bool elements) {
+	bool matches(const DataType& declared, const DataType& computed, bool elements, bool strict) {
 		auto element = [](const DataType& t) -> std::optional<PrimitiveType> {
 			if (const auto* p = std::get_if<PrimitiveType>(&t))
 				return *p;
@@ -676,14 +743,16 @@ namespace mdl::shapes {
 				return true;
 			if (d.isConstant() && c.isConstant() && d != c)
 				return false;
+			if (strict && d.known && c.known && d != c)
+				return false;
 		}
 		return true;
 	}
 
-
 	void setDefaultFloat(PrimitiveType type) { defaultFloatType = type; }
 
-	std::optional<std::string> check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
+	std::optional<std::string>
+	check(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args, bool strict) {
 		// Float tensors of different types do not combine (conversions are explicit).
 		std::optional<PrimitiveType> floatType;
 		for (size_t i : combinedOperands(id, args.size())) {
@@ -705,13 +774,16 @@ namespace mdl::shapes {
 			shapes.push_back(std::move(*shape));
 		}
 		static const ConstantEvaluator evaluate = constantInteger;
+		const bool outer = std::exchange(strictSizes, strict);
+		std::optional<std::string> problem;
 		try {
 			Rules{evaluate, true}.apply(id, args, [&](size_t i) -> const Shape& { return shapes[i]; });
 		} catch (const Mismatch& e) {
-			return e.message;
+			problem = e.message;
 		} catch (const ShapeError&) {
 		}
-		return std::nullopt;
+		strictSizes = outer;
+		return problem;
 	}
 
 	DataType resultType(builtins::FunctionIDs id, const std::vector<std::reference_wrapper<const Node>>& args) {
@@ -761,10 +833,9 @@ namespace mdl::shapes {
 
 	void Oracle::assume(const Node& node, Shape shape) { impl->inference.result.of[&node] = std::move(shape); }
 
-	std::expected<Shapes, std::string> infer(
-			const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
-			const std::unordered_map<const Node*, Shape>& known
-	) {
+	std::expected<Shapes, std::string>
+	infer(const FunctionDecl& func, unsigned ellipsisRank, const ConstantEvaluator& evaluate,
+		  const std::unordered_map<const Node*, Shape>& known) {
 		Inference inference{ellipsisRank, evaluate};
 		inference.result.of = known;
 		try {

@@ -22,10 +22,17 @@ namespace mdl {
 		AggregateType type;
 		std::vector<Object> members;
 
-		AggregateInstance(AggregateType type, std::vector<Object> members)
-				: type(std::move(type)), members(std::move(members)) {}
+		AggregateInstance(AggregateType type, std::vector<Object> members);
 
 	public:
+		// Defined in object.cpp, where all alternatives of Object are complete (libc++ checks them when the members
+		// of std::vector<Object> are instantiated).
+		AggregateInstance(const AggregateInstance&);
+		AggregateInstance(AggregateInstance&&) noexcept;
+		AggregateInstance& operator=(const AggregateInstance&);
+		AggregateInstance& operator=(AggregateInstance&&) noexcept;
+		~AggregateInstance();
+
 		static std::expected<AggregateInstance, std::string>
 		create(AggregateType type, std::map<std::string, Object> values);
 
@@ -45,10 +52,16 @@ namespace mdl {
 		BoundModuleType type;
 		std::vector<Object> params;
 
-		ModuleInstance(BoundModuleType type, std::vector<Object> params)
-				: type(std::move(type)), params(std::move(params)) {}
+		ModuleInstance(BoundModuleType type, std::vector<Object> params);
 
 	public:
+		// Defined in object.cpp (see AggregateInstance).
+		ModuleInstance(const ModuleInstance&);
+		ModuleInstance(ModuleInstance&&) noexcept;
+		ModuleInstance& operator=(const ModuleInstance&);
+		ModuleInstance& operator=(ModuleInstance&&) noexcept;
+		~ModuleInstance();
+
 		static std::expected<ModuleInstance, std::string>
 		create(BoundModuleType type, std::map<std::string, Object> values);
 
@@ -60,6 +73,11 @@ namespace mdl {
 	 */
 	struct ArrayInstance {
 		std::vector<Object> elements;
+		/**
+		 * @brief Whether the only element stands for all elements of an array of unknown size (symbolic analysis of a
+		 * module without hyperparameter values): every index selects it.
+		 */
+		bool representative = false;
 	};
 
 	std::optional<std::reference_wrapper<const FunctionDecl>>

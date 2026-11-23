@@ -23,6 +23,8 @@ namespace mdl {
 		Namespace* parent;
 		std::map<std::string, std::any> objects;
 		std::map<std::string, DataType> types;
+		/** @brief The definitions (see analysis::SemanticIndex) of the names defined here, for tools. */
+		std::map<std::string, size_t> symbols;
 
 		explicit Namespace(
 				Namespace* parent, const std::map<std::string, std::any>& objects = {},
@@ -76,6 +78,26 @@ namespace mdl {
 			return parent != nullptr && parent->assign(name, std::forward<T>(obj));
 		}
 
+		/** @brief Records the definition (an index of analysis::SemanticIndex) of @p name in this namespace. */
+		void setSymbol(std::string_view name, size_t symbol) { symbols[std::string{name}] = symbol; }
+
+		/** @brief The definition of the object or type that @p name refers to here, if recorded. */
+		std::optional<size_t> symbol(std::string_view name) const {
+			const std::string key{name};
+			if (objects.contains(key) || types.contains(key)) {
+				auto it = symbols.find(key);
+				return it == symbols.end() ? std::nullopt : std::optional<size_t>{it->second};
+			}
+			return parent != nullptr ? parent->symbol(name) : std::nullopt;
+		}
+
+		/** @brief The namespace (this or a parent) that defines @p name, if any. */
+		const Namespace* definedIn(std::string_view name) const {
+			if (definesLocally(name))
+				return this;
+			return parent != nullptr ? parent->definedIn(name) : nullptr;
+		}
+
 		/** @brief Whether an object or type named @p name is defined in this namespace itself (not in a parent). */
 		bool definesLocally(std::string_view name) const {
 			return objects.contains(std::string{name}) || types.contains(std::string{name});
@@ -84,7 +106,7 @@ namespace mdl {
 		const DataType& putType(std::string_view name, DataType&& type) {
 			auto [it, inserted] = types.emplace(std::string{name}, std::move(type));
 			assert(inserted);
-			return std::any_cast<const DataType&>(it->second);
+			return it->second;
 		}
 		std::optional<std::reference_wrapper<const DataType>> getType(std::string_view name) const {
 			auto it = types.find(std::string{name});
