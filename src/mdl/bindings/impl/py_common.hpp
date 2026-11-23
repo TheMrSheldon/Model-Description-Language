@@ -3,105 +3,141 @@
 #include "cpp_common.hpp"
 
 #include <mdl/bindings/generator.hpp>
-#include <mdl/compiler.hpp>
-#include <mdl/computegraphv2/datatype.hpp>
-#include <mdl/computegraphv2/function.hpp>
-#include <mdl/parserv2/compilation_unit.hpp>
+#include <mdl/exports.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <ostream>
 #include <string>
-
-namespace mdl {
-	struct ModuleType;
-}
+#include <vector>
 
 namespace mdl::bindings {
 
 	/**
 	 * @brief Abstract base for all Python binding generators.
-	 * @details Implements the common code-generation logic (class skeleton, method signatures,
-	 * docstrings, mangled symbol lookup). Subclasses supply the framework-specific details
-	 * through the virtual hooks below.
+	 * @details Generated classes load the compiled shared library with `tvm_ffi`, hold the weights (by fully qualified
+	 * path) and call the compiled functions with the inputs, the weights (in canonical order), and preallocated outputs.
+	 * Subclasses supply the framework-specific details through the virtual hooks below.
 	 */
 	class PyBindingGenerator : public BindingGenerator {
 	public:
 		// inferBindingsFilename() is left to each subclass so they can choose their suffix.
 
-		void generate(const CompilationUnit& unit, const std::filesystem::path& output) override;
-
-	private:
-		void generateModule(std::ostream& out, std::string_view name, const mdl::ModuleType& mod) const;
+		void generate(const std::vector<ExportedFunction>& exports, const std::filesystem::path& output) override;
 
 	protected:
-		/// Import block written at the top of the generated file (e.g. "import torch\nimport tvm.nd\n").
+		/// Import block written at the top of the generated file.
 		virtual std::string imports() const = 0;
 
-		/// Python type hint for a tensor input parameter (e.g. "torch.Tensor", "tvm.nd.NDArray").
-		virtual std::string tensorInputType() const = 0;
+		/// Python type hint for tensors (e.g. "torch.Tensor").
+		virtual std::string tensorType() const = 0;
 
 		/// Python type hint for the pre-allocated output tensor (may differ, e.g. tf.Variable for TF).
-		virtual std::string tensorOutputType() const = 0;
+		virtual std::string tensorOutputType() const { return tensorType(); }
 
 		/**
-		 * @brief Wraps a parameter name for passing to the TVM packed function.
-		 * @details For native TVM tensors this is the identity; for other frameworks this emits
-		 * the DLPack conversion (e.g. "tvm.nd.from_dlpack(x)").
+		 * @brief Wraps a tensor expression for passing to the compiled function.
+		 * @details tvm_ffi accepts any object implementing the DLPack protocol (`__dlpack__`), so this is the identity
+		 * for most frameworks.
 		 */
-		virtual std::string toTvmArg(const std::string& paramName) const = 0;
+		virtual std::string toFfiArg(const std::string& expr) const { return expr; }
+
+		/** @brief Additional methods of the class of @p module (e.g. autograd integration). */
+		virtual void classExtras(std::ostream& /*out*/, const std::string& /*module*/, const std::vector<ExportedFunction>& /*exports*/) const {}
+
+		/** @brief Additional code at the end of the file. */
+		virtual void fileExtras(std::ostream& /*out*/, const std::vector<ExportedFunction>& /*exports*/) const {}
 	};
 
 } // namespace mdl::bindings
 
-inline void mdl::bindings::PyBindingGenerator::generateModule(
-		std::ostream& out, std::string_view name, const mdl::ModuleType& mod
-) const {
-	using namespace mdl::bindings::detail;
-
-	out << "\nclass " << name << ":\n"
-		<< "    \"\"\"\n"
-		<< "    Wrapper for MDL module '" << name << "'.\n";
-	if (!mod.variables.empty()) {
-		out << "    Variables (will be loaded from ArgVals in a future release):";
-		for (const auto& [vname, vnode] : mod.variables)
-			out << " " << vname << ": " << dtypeStr(mdl::getDataType(vnode.get()));
-		out << "\n";
-	}
-	out << "    \"\"\"\n\n"
-		<< "    def __init__(self, mod) -> None:\n"
-		<< "        \"\"\"\n"
-		<< "        :param mod: The compiled TVM module (tvm.runtime.Module).\n"
-		<< "        \"\"\"\n"
-		<< "        self._mod = mod\n";
-
-	for (const auto& [funcName, funcDecl] : mod.functions) {
-		out << "\n    def " << funcName << "(self";
-		for (const auto& [pname, pnode] : funcDecl.parameters)
-			out << ", " << pname << ": " << tensorInputType();
-		out << ", _out: " << tensorOutputType() << ") -> None:\n"
-			<< "        \"\"\"" << funcSignatureStr(funcDecl) << "\n"
-			<< "        :param _out: Pre-allocated output tensor (matching shape and device).\n"
-			<< "        \"\"\"\n"
-			<< "        self._mod[\"" << mdl::mangledName(name, funcName) << "\"](";
-		bool first = true;
-		for (const auto& [pname, _] : funcDecl.parameters) {
-			if (!first)
-				out << ", ";
-			out << toTvmArg(pname);
-			first = false;
-		}
-		out << ", " << toTvmArg("_out") << ")\n";
-	}
-}
-
-inline void
-mdl::bindings::PyBindingGenerator::generate(const CompilationUnit& unit, const std::filesystem::path& output) {
+inline void mdl::bindings::PyBindingGenerator::generate(
+		const std::vector<ExportedFunction>& exports, const std::filesystem::path& output
+) {
+	using detail::primTypeStr;
 	std::ofstream out(output);
-	out << "# Generated by mdlc -- do not edit\n" << imports() << "\n";
+	out << "# Generated by mdlc -- do not edit\n"
+		<< "import tvm_ffi\n"
+		<< imports() << "\n";
 
-	for (const auto& [name, def] : unit.definitions) {
-		if (const auto* mod = std::get_if<mdl::ModuleType>(&def))
-			generateModule(out, name, *mod);
-		/** \todo generate free functions for top-level FunctionDecl **/
+	std::vector<std::string> modules;
+	for (const auto& fn : exports)
+		if (std::find(modules.begin(), modules.end(), fn.module) == modules.end())
+			modules.push_back(fn.module);
+
+	for (const auto& module : modules) {
+		const ExportedFunction* first = nullptr;
+		for (const auto& fn : exports)
+			if (fn.module == module && first == nullptr)
+				first = &fn;
+		out << "\nclass " << module << ":\n"
+			<< "    \"\"\"Compiled functions of the MDL module '" << module << "'.\"\"\"\n\n"
+			<< "    weight_paths = (";
+		for (const auto& path : first->moduleWeights)
+			out << '"' << path << "\", ";
+		out << ")\n\n"
+			<< "    def __init__(self, library, weights: dict[str, " << tensorType() << "]) -> None:\n"
+			<< "        \"\"\"\n"
+			<< "        :param library: path of the compiled shared library or a module loaded with tvm_ffi.load_module.\n"
+			<< "        :param weights: the weights by fully qualified path (see weight_paths).\n"
+			<< "        \"\"\"\n"
+			<< "        self._mod = tvm_ffi.load_module(library) if isinstance(library, str) else library\n"
+			<< "        missing = [p for p in self.weight_paths if p not in weights]\n"
+			<< "        if missing:\n"
+			<< "            raise KeyError(f\"missing weights: {missing}\")\n"
+			<< "        self.weights = weights\n";
+
+		for (const auto& fn : exports) {
+			if (fn.module != module)
+				continue;
+			// Packed tensors are not arguments: they are stored in the context buffer `ctx`.
+			std::vector<const TensorSignature*> inputs, outputs;
+			for (const auto& in : fn.inputs)
+				if (!in.packed)
+					inputs.push_back(&in);
+			for (const auto& o : fn.outputs)
+				if (!o.packed)
+					outputs.push_back(&o);
+			const auto& context = fn.context;
+			if (context && context->producer)
+				out << "\n    def " << context->name << "_size(self, *dims: int) -> int:\n"
+					<< "        \"\"\"Size in bytes of the context buffer for the given " << context->ellipsisRank
+					<< " dimension(s) of `...` (a buffer for the largest\n"
+					<< "        dimensions can be reused for all smaller ones; its data must be aligned to 64 bytes).\"\"\"\n"
+					<< "        return self._mod[\"" << context->sizeSymbol << "\"](*dims)\n";
+
+			out << "\n    def " << fn.function << "(self";
+			for (const auto* in : inputs)
+				out << ", " << in->name << ": " << tensorType();
+			for (const auto* o : outputs)
+				out << ", " << o->name << ": " << tensorOutputType();
+			if (context)
+				out << ", ctx: " << tensorType();
+			out << ") -> None:\n"
+				<< "        \"\"\"Outputs are written to the preallocated tensors (";
+			for (size_t i = 0; i < outputs.size(); ++i)
+				out << (i > 0 ? ", " : "") << outputs[i]->name << ": " << detail::shapeStr(*outputs[i]);
+			out << ")";
+			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
+				out << ".\n        The gradients are added to the given tensors (accumulation): zero them before the first step";
+			if (context)
+				out << ".\n        `ctx` is the context buffer (1-D uint8, see " << context->name << "_size)";
+			out << ".\"\"\"\n"
+				<< "        self._mod[\"" << fn.symbol << "\"](";
+			std::vector<std::string> args;
+			for (const auto* in : inputs)
+				args.push_back(toFfiArg(in->name));
+			for (const auto& w : fn.weights)
+				args.push_back(toFfiArg("self.weights[\"" + w.name + "\"]"));
+			for (const auto* o : outputs)
+				args.push_back(toFfiArg(o->name));
+			if (context)
+				args.push_back(toFfiArg("ctx"));
+			for (size_t i = 0; i < args.size(); ++i)
+				out << (i > 0 ? ", " : "") << args[i];
+			out << ")\n";
+		}
+		classExtras(out, module, exports);
 	}
+	fileExtras(out, exports);
 }

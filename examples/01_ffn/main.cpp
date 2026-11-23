@@ -1,39 +1,42 @@
-#include <tvm/ffi/c_api.h>
+// Calls the compiled FFN through the generated header and compares the result against a reference implementation.
+#include "model.hpp"
 
-//#include <tvm/ffi/container/tensor.h>
-//#include <tvm/ffi/extra/module.h>
+#include <mdl/runtime.hpp>
 
-#include <iostream>
-#include <string_view>
+#include <cmath>
+#include <cstdio>
 
+using mdl::runtime::Tensor;
+using Model = mdl::models::FFN;
 
-extern "C" {
-    // https://tvm.apache.org/ffi/get_started/stable_c_abi.html#tvm-ffi-c-abi
-    int __tvm_ffi_forward(void* handle, const TVMFFIAny* args, int N, TVMFFIAny* result);
-};
+int main() {
+	constexpr int64_t batch = 2, indim = 8, outdim = 3;
 
+	Tensor x({batch, indim}), W({outdim, indim}), b({outdim}), out({batch, outdim});
+	for (size_t i = 0; i < x.size(); ++i)
+		x.data()[i] = 0.1f * static_cast<float>(i);
+	for (size_t i = 0; i < W.size(); ++i)
+		W.data()[i] = 0.01f * static_cast<float>(i) - 0.1f;
+	for (size_t i = 0; i < b.size(); ++i)
+		b.data()[i] = static_cast<float>(i);
 
-int main(int argc, char* argv[]) {
-    //tvm::ffi::Module mod = tvm::ffi::Module::LoadFromFile("/workspaces/model-description-language/build/examples/01_ffn/libtest.so");
-    // Look up `add_one_cpu` function
-    //tvm::ffi::Function tmp = mod->GetFunction("forward").value();
-    //tvm::ffi::TensorView a,b;
-    //tmp(a,b);
-    
-    TVMFFIVersion version;
-    TVMFFIGetVersion(&version);
+	Model::Weights weights;
+	weights.W = W;
+	weights.b = b;
+	Model::forward(x, weights, out);
 
-    std::cout << "Running on TVM ABI v" << version.major << '.' << version.minor << '.' << version.patch << std::endl;
-
-    TVMFFIAny none = {.type_index = kTVMFFINone};
-    TVMFFIAny args[0];
-    auto i = __tvm_ffi_forward(nullptr, args, 0, &none);
-
-    std::cout << "Return code " << i << std::endl;
-
-    TVMFFIObjectHandle err = NULL;
-    TVMFFIErrorMoveFromRaised(&err);
-    auto cell = reinterpret_cast<TVMFFIErrorCell*>(reinterpret_cast<uintptr_t>(err) + sizeof(TVMFFIObject));
-    std::cout << cell->kind.data << ": " << std::string_view(cell->message.data, cell->message.size) << std::endl;
-    return 0;
+	int failures = 0;
+	for (int64_t r = 0; r < batch; ++r) {
+		for (int64_t c = 0; c < outdim; ++c) {
+			float expected = b.data()[c];
+			for (int64_t k = 0; k < indim; ++k)
+				expected += x.data()[r * indim + k] * W.data()[c * indim + k];
+			float actual = out.data()[r * outdim + c];
+			std::printf("out[%lld, %lld] = %8.4f (expected %8.4f)\n", static_cast<long long>(r),
+						static_cast<long long>(c), actual, expected);
+			failures += std::abs(actual - expected) > 1e-4f;
+		}
+	}
+	std::printf(failures == 0 ? "OK\n" : "FAILED\n");
+	return failures == 0 ? 0 : 1;
 }

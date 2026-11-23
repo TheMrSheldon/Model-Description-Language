@@ -20,12 +20,12 @@ namespace mdl {
 		/** @brief Builtin datatypes. **/
 		static const std::map<std::string, DataType> builtinTypes;
 
-		const Namespace* parent;
+		Namespace* parent;
 		std::map<std::string, std::any> objects;
 		std::map<std::string, DataType> types;
 
 		explicit Namespace(
-				const Namespace* parent, const std::map<std::string, std::any>& objects = {},
+				Namespace* parent, const std::map<std::string, std::any>& objects = {},
 				const std::map<std::string, DataType>& types = {}
 		)
 				: parent(parent), objects{objects}, types{types} {}
@@ -44,9 +44,41 @@ namespace mdl {
 		std::optional<std::reference_wrapper<const T>> get(std::string_view name) const {
 			/** \todo handle misses **/
 			auto it = objects.find(std::string{name});
-			if (it != std::end(objects))
-				return std::any_cast<const T&>(it->second);
+			if (it != std::end(objects)) {
+				if (const T* object = std::any_cast<T>(&it->second))
+					return *object;
+				return std::nullopt; // an entry of another kind (e.g. a tensor whose slots are assigned one by one)
+			}
 			return (parent != nullptr) ? parent->get<T>(name) : std::nullopt;
+		}
+
+		/**
+		 * @brief The entry named @p name in this or a parent namespace if it is a @p T (mutable, e.g. to assign a slot
+		 * of a tensor); nullptr otherwise.
+		 */
+		template <typename T>
+		T* find(std::string_view name) {
+			if (auto it = objects.find(std::string{name}); it != objects.end())
+				return std::any_cast<T>(&it->second);
+			return parent != nullptr ? parent->find<T>(name) : nullptr;
+		}
+
+		/**
+		 * @brief Rebinds the object named @p name in the closest namespace (this or a parent) that defines it.
+		 * @return false if no namespace defines @p name.
+		 */
+		template <typename T>
+		bool assign(std::string_view name, T&& obj) {
+			if (auto it = objects.find(std::string{name}); it != objects.end()) {
+				it->second = std::forward<T>(obj);
+				return true;
+			}
+			return parent != nullptr && parent->assign(name, std::forward<T>(obj));
+		}
+
+		/** @brief Whether an object or type named @p name is defined in this namespace itself (not in a parent). */
+		bool definesLocally(std::string_view name) const {
+			return objects.contains(std::string{name}) || types.contains(std::string{name});
 		}
 
 		const DataType& putType(std::string_view name, DataType&& type) {
@@ -54,10 +86,10 @@ namespace mdl {
 			assert(inserted);
 			return std::any_cast<const DataType&>(it->second);
 		}
-		const std::optional<DataType> getType(std::string_view name) const {
+		std::optional<std::reference_wrapper<const DataType>> getType(std::string_view name) const {
 			auto it = types.find(std::string{name});
 			if (it != std::end(types))
-				return it->second;
+				return std::cref(it->second);
 			if (parent != nullptr)
 				return parent->getType(name);
 			return std::nullopt;
@@ -69,7 +101,7 @@ namespace mdl {
 			static Namespace bns{nullptr, builtins, builtinTypes};
 			return bns;
 		}
-		Namespace createSubnamespace() const { return Namespace{this}; }
+		Namespace createSubnamespace() { return Namespace{this}; }
 	};
 
 } // namespace mdl

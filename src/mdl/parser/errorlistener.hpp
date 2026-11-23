@@ -3,6 +3,8 @@
 
 #include <antlr4-runtime.h>
 
+#include <algorithm>
+
 using namespace antlr4;
 
 class PrettyErrorListener : public BaseErrorListener {
@@ -26,20 +28,46 @@ public:
 
 	PrettyErrorListener(const std::string& filename) : numErrors(0), numWarnings(0), file(filename) {}
 
+	/**
+	 * @brief Returns the line that is @p offset lines away from the line containing the character @p startOffset.
+	 * @details Lines are delimited by '\n' or by the beginning/end of the stream; an empty string is returned if the
+	 * requested line does not exist.
+	 */
 	static std::string getline(antlr4::CharStream& stream, ssize_t offset, size_t startOffset) {
-		auto findLinefeed = [&stream](size_t offset, int dir) {
-			while (stream.getText(antlr4::misc::Interval{offset, offset}) != "\n")
-				offset += dir;
-			return offset;
+		const ssize_t size = static_cast<ssize_t>(stream.size());
+		auto isLinefeed = [&stream](ssize_t pos) {
+			return stream.getText(antlr4::misc::Interval{static_cast<size_t>(pos), static_cast<size_t>(pos)}) == "\n";
+		};
+		// Position of the linefeed that precedes the line containing `pos` (-1 for the first line).
+		auto lineStart = [&](ssize_t pos) {
+			pos = std::min(pos, size) - 1;
+			while (pos >= 0 && !isLinefeed(pos))
+				--pos;
+			return pos;
+		};
+		// Position of the linefeed that terminates the line starting after `start` (size for the last line).
+		auto lineEnd = [&](ssize_t start) {
+			ssize_t pos = start + 1;
+			while (pos < size && !isLinefeed(pos))
+				++pos;
+			return pos;
 		};
 
-		auto startOfLine = findLinefeed(startOffset, -1);
-		auto dir = (offset <= 0) ? -1 : 1;
-		for (ssize_t i = 0; i < offset * dir; ++i) {
-			startOfLine = findLinefeed(startOfLine + dir, dir);
+		ssize_t start = lineStart(static_cast<ssize_t>(startOffset) + 1);
+		for (ssize_t i = 0; i < -offset; ++i) {
+			if (start < 0)
+				return "";
+			start = lineStart(start);
 		}
-		size_t endOfLine = findLinefeed(startOfLine + 1, 1);
-		return stream.getText(antlr4::misc::Interval{startOfLine + 1, endOfLine - 1});
+		for (ssize_t i = 0; i < offset; ++i) {
+			start = lineEnd(start);
+			if (start >= size)
+				return "";
+		}
+		ssize_t end = lineEnd(start);
+		if (end - 1 < start + 1)
+			return "";
+		return stream.getText(antlr4::misc::Interval{static_cast<size_t>(start + 1), static_cast<size_t>(end - 1)});
 	}
 	void syntaxError(
 			Recognizer* recognizer, Token* offendingSymbol, size_t line, size_t charPositionInLine,

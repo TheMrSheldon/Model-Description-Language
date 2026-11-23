@@ -5,9 +5,10 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <vector>
 
 namespace mdl {
-	class CompilationUnit;
+	struct ExportedFunction;
 }
 
 namespace mdl::bindings {
@@ -23,7 +24,11 @@ namespace mdl::bindings {
          * `/path/model_tensorflow.py`).
          */
 		virtual std::filesystem::path inferBindingsFilename(const std::filesystem::path& outfile) = 0;
-		virtual void generate(const CompilationUnit& unit, const std::filesystem::path& output) = 0;
+		/**
+		 * @brief Generates bindings for the exported (compiled) functions.
+		 * @see mdl::exportedFunctions for the calling convention of the compiled functions.
+		 */
+		virtual void generate(const std::vector<ExportedFunction>& exports, const std::filesystem::path& output) = 0;
 	};
 
 	using GeneratorFactory = std::function<std::unique_ptr<BindingGenerator>()>;

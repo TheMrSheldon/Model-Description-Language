@@ -1,0 +1,36 @@
+# The tiny BERT of model_bert_tiny.yml with a classification head of 3 classes (data/bert_tiny_cls.safetensors), and
+# its builds (see docs/build-config.md): inference, training with the loss as objective, the logits as a PyTorch
+# autograd function (examples/07_pytorch_training), and quantized inference.
+args:
+  BertForSequenceClassification:
+    conf:
+      dims:
+        model: 32
+        key: 8
+        value: 8
+        inner: 64
+      numEncoders: 2
+      numAttnHeads: 4
+    emb:
+      vocab: 100
+      positions: 16
+      types: 2
+    classes: 3
+
+build:
+  ellipsis-rank: { default: 2, labels: 1 }   # ids [batch, seq], labels [batch]
+  mask: [logits]
+
+builds:
+  inference: {}
+  train:
+    mask: [logits, loss]
+    grad: [loss]
+  autograd:
+    grad: [logits]
+  int8:                                     # the weight matrices as int8 (one scale per output)
+    quantize: [{ weights: ["**"], format: int8 }]
+  int4:                                     # 4 bits, groups of 16 inputs (with zero points for the head)
+    quantize:
+      - { weights: ["bert.encoder.**"], format: int4, group: 16 }
+      - { weights: ["bert.pooler.**", "classifier.**"], format: int4-asym, group: 16 }

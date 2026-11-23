@@ -4,6 +4,7 @@
 
 namespace mdl::bindings {
 
+	/** @brief Python bindings that accept any DLPack-compatible tensor. */
 	class PyFfiGenerator final : public PyBindingGenerator {
 	public:
 		std::filesystem::path inferBindingsFilename(const std::filesystem::path& outfile) override {
@@ -11,17 +12,8 @@ namespace mdl::bindings {
 		}
 
 	protected:
-		std::string imports() const override {
-			return "import tvm.nd\n"
-				   "import tvm.runtime\n";
-		}
-
-		std::string tensorInputType() const override { return "tvm.nd.NDArray"; }
-		std::string tensorOutputType() const override { return "tvm.nd.NDArray"; }
-
-		std::string toTvmArg(const std::string& paramName) const override {
-			return paramName; // already a TVM NDArray — no conversion needed
-		}
+		std::string imports() const override { return "from typing import Any\n"; }
+		std::string tensorType() const override { return "Any"; }
 	};
 
 } // namespace mdl::bindings

@@ -1,0 +1,14 @@
+# A tiny BERT for the comparison with Hugging Face (data/bert_tiny.safetensors, see export_bert_reference.py).
+Bert:
+  conf:
+    dims:
+      model: 32
+      key: 8
+      value: 8
+      inner: 64
+    numEncoders: 2
+    numAttnHeads: 4
+  emb:
+    vocab: 100
+    positions: 16
+    types: 2

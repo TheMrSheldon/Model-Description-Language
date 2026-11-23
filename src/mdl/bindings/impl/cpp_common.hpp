@@ -4,16 +4,25 @@
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
 #include <mdl/computegraphv2/node.hpp>
+#include <mdl/exports.hpp>
 #include <mdl/utils/overload.hpp>
 
+#include <algorithm>
+#include <format>
 #include <string>
 
 namespace mdl::bindings::detail {
 
 	inline std::string primTypeStr(mdl::PrimitiveType p) {
 		switch (p) {
-		case mdl::PrimitiveType::floating:
-			return "float"; /** \todo load the configured datatype for default float */
+		case mdl::PrimitiveType::float32:
+			return "float32";
+		case mdl::PrimitiveType::float16:
+			return "float16";
+		case mdl::PrimitiveType::bfloat16:
+			return "bfloat16";
+		case mdl::PrimitiveType::int8:
+			return "int8";
 		case mdl::PrimitiveType::integer:
 			return "int"; /** \todo load the configured datatype for default int */
 		case mdl::PrimitiveType::uint:
@@ -46,48 +55,30 @@ namespace mdl::bindings::detail {
 							return s;
 						},
 						[](const mdl::AggregateType&) -> std::string { return std::string{"struct"}; },
-						[](const mdl::BoundModuleType&) -> std::string { return std::string{"module"}; }
+						[](const mdl::ModuleType&) -> std::string { return std::string{"module"}; },
+						[](const mdl::BoundModuleType&) -> std::string { return std::string{"module"}; },
+						[](const mdl::ArrayType& a) -> std::string {
+							return std::format("array[{}; {}]", dtypeStr(*a.element), a.size);
+						}
 				},
 				dt
 		);
 	}
 
-	/// C++ parameter type for the TVM FFI: tensors become NDArray, scalars their C++ equivalents.
-	inline std::string cppParamType(const mdl::DataType& dt) {
-		return std::visit(
-				mdl::overloaded{
-						[](const mdl::PrimitiveType& p) -> std::string {
-							switch (p) {
-							case mdl::PrimitiveType::floating:
-								return std::string{"float"};
-							case mdl::PrimitiveType::integer:
-								return std::string{"std::int32_t"};
-							case mdl::PrimitiveType::uint:
-								return std::string{"std::uint32_t"};
-							case mdl::PrimitiveType::boolean:
-								return std::string{"bool"};
-							default:
-								return std::string{"void*"};
-							}
-						},
-						[](const mdl::TensorType&) { return std::string{"tvm::runtime::NDArray"}; },
-						[](const mdl::AggregateType&) { return std::string{"void*"}; },
-						[](const mdl::BoundModuleType&) { return std::string{"void*"}; },
-				},
-				dt
-		);
-	}
-
-	inline std::string funcSignatureStr(const mdl::FunctionDecl& func) {
-		std::string sig = func.name + "(";
-		bool first = true;
-		for (const auto& [pname, pnode] : func.parameters) {
-			if (!first)
-				sig += ", ";
-			sig += pname + ": " + dtypeStr(mdl::getDataType(pnode.get()));
-			first = false;
+	/// Shape of an exported tensor, e.g. `float[B, 768]` or `float[B0, B1, 768]` (`B`/`Bi` mark the runtime
+	/// dimensions of the ellipsis; they are the same in all tensors of a function).
+	inline std::string shapeStr(const mdl::TensorSignature& sig) {
+		const auto dynamic = std::count(sig.shape.begin(), sig.shape.end(), int64_t{-1});
+		std::string s = primTypeStr(sig.dtype) + "[";
+		int k = 0;
+		for (size_t i = 0; i < sig.shape.size(); ++i) {
+			s += i > 0 ? ", " : "";
+			if (sig.shape[i] >= 0)
+				s += std::to_string(sig.shape[i]);
+			else
+				s += dynamic == 1 ? std::string{"B"} : "B" + std::to_string(k++);
 		}
-		return sig + ") -> " + dtypeStr(func.returnType());
+		return s + "]";
 	}
 
 } // namespace mdl::bindings::detail

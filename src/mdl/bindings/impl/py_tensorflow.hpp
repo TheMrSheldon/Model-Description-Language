@@ -15,18 +15,16 @@ namespace mdl::bindings {
 	protected:
 		std::string imports() const override {
 			return "import tensorflow as tf\n"
-				   "import tensorflow.experimental.dlpack as tf_dlpack\n"
-				   "import tvm.nd\n"
-				   "import tvm.runtime\n";
+				   "import tensorflow.experimental.dlpack as tf_dlpack\n";
 		}
 
-		std::string tensorInputType() const override { return "tf.Tensor"; }
+		std::string tensorType() const override { return "tf.Tensor"; }
 
 		// Output must be a tf.Variable since tf.Tensor is immutable and cannot receive DLPack writes.
 		std::string tensorOutputType() const override { return "tf.Variable"; }
 
-		std::string toTvmArg(const std::string& paramName) const override {
-			return "tvm.nd.from_dlpack(tf_dlpack.to_dlpack(" + paramName + "))";
+		std::string toFfiArg(const std::string& expr) const override {
+			return "tvm_ffi.from_dlpack(tf_dlpack.to_dlpack(" + expr + "))";
 		}
 	};
 

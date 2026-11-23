@@ -1,102 +1,4 @@
-// TODO: implement imports
-// import std;
-
-/**
- * @brief Computes the elementwise \p x -th power of e.
- * @details \f[(x_i)_{1\leq i \leq n} \mapsto (e^{x_i})_{1\leq i \leq n}.\f]
- * @ingroup Arithmetic
- * 
- * @param x
- * @return the \p x -th power of e for  each component of \p x .
- */
-float[...] exp(x: float[...]) => __builtin_exp(x);
-
-/**
- * @brief Sum
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-template<N: uint>
-float[...] sum(x: float[..., N]) => __builtin_sum(x);
-
-/**
- * @brief Maximum
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-template<N: uint>
-float[...] max(x: float[..., N]) => __builtin_max(x);
-
-/**
- * @brief (Gauss) Error Function
- * @details
- * @ingroup Statistics
- * 
- * @param x 
- * @return 
- */
-float[...] erf(x: float[...]) => __builtin_erf(x);
-
-/**
- * @brief Computes the softmax function of the input vector.
- * @details Let \f(x \in \mathbb R^n\f) be a vector, the softmax is defined as
- * \f[
- * 	\text{softmax}\colon \mathbb R^n \to \mathbb R^n
- * 	~\text{via}~ x\mapsto \left(\frac{e^{x_i}}{\sum_{j=1}^n e^{x_j}}\right)_{1\leq i\leq n}.
- * \f]
- * 
- * @param x the input tensor.
- * @return The softmax of \p x .
- */
-float[...] softmax(x: float[...]) {
-    auto power = exp(x - max(x));
-    return power / sum(power);
-}
-
-/**
- * @brief Recitifed Linear Unit
- * @details
- * \f[\text{ReLU}(x) := \max(0, x)\f]
- * 
- * @param x 
- * @return 
- */
-float[...] relu(x: float[...]) => max(x, 0);
-
-/**
- * @brief Implements layer normalization as proposed by \cite layernorm.
- */
-module LayerNorm[dim: uint] {
-    beta: float[dim]
-    gamma: float[dim]
-
-    template<N: uint>
-    float[..., dim, N] forward(x: float[..., dim, N]) {
-        auto numerator = mean(input)[... -> ... 1];
-        auto denominator = rsqrt(var(x[... a b -> ... b a]) + 1e-5);
-        return (numerator * denominator) * gamma + beta;
-    }
-}
-
-/**
- * @brief Applies a learnable linear transformation with optional bias.
- * @details Given a vector \f(x\f) computes \f(xW^\top + b\f).
- */
-module Linear[indim: uint, outdim: uint, bias: bool = false] {
-    W: float[outdim, indim]
-    b: float[outdim]
-
-    float[..., outdim] forward(x: float[..., indim]) =>
-        bias?
-            no => x @ W.T
-            yes => x @ W.T + b;
-}
+import std;
 
 struct TransformerConf {
     dims: struct {
@@ -116,20 +18,17 @@ module TransformerEncoder[conf: TransformerConf] {
     weightValue: Linear[conf.dims.model, conf.numAttnHeads*conf.dims.value]
     weightOut: Linear[conf.numAttnHeads * conf.dims.value, conf.dims.model]
     weightIntermed: Linear[conf.dims.model, conf.dims.inner]
-    mhaNorm: Linear[conf.dims.model]
+    mhaNorm: LayerNorm[conf.dims.model]
     // FFN
     weightIntermedOut: Linear[conf.dims.inner, conf.dims.model]
     ffnNorm: LayerNorm[conf.dims.model]
-
-    float[...] bertGELU(x: float[...]) =>
-        x * 0.5 * (1 + erf(x / sqrt(2)));
 
     float[..., conf.numAttnHeads * conf.dims.value] sdpa(query: float[..., conf.numAttnHeads * conf.dims.key], key: float[..., conf.numAttnHeads * conf.dims.key], value: float[..., conf.numAttnHeads * conf.dims.value]) {
         auto facq = query[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto fack = key[... (h d) -> h ... d | h=conf.numAttnHeads];
         auto facv = value[... (h d) -> h ... d | h=conf.numAttnHeads];
-        auto prod = facq @ fack.T;
-        auto tmp = softmax(prod / sqrt(conf.dims.key), -1) @ facv;
+        auto prod = facq @ fack.T();
+        auto tmp = softmax(prod / sqrt(conf.dims.key)/*, -1*/) @ facv;
         return tmp[h ... d -> ... (h d)];
     }
     
@@ -138,7 +37,99 @@ module TransformerEncoder[conf: TransformerConf] {
 
     float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
         auto attn = mhaNorm(mha(weightQuery(x), weightKey(x), weightValue(x)) + x);
-        auto intermed = bertGELU(weightIntermed(attn));
+        auto intermed = gelu(weightIntermed(attn));
         return ffnNorm(weightIntermedOut(intermed) + attn);
     }
+}
+
+/**
+ * @brief A stack of `conf.numEncoders` encoder layers (e.g. the encoder of BERT).
+ */
+module BertEncoder[conf: TransformerConf] {
+    layers: [TransformerEncoder[conf] for i in 0..conf.numEncoders]
+
+    float[..., conf.dims.model] forward(x: float[..., conf.dims.model]) {
+        auto h = x;
+        for (i in 0..conf.numEncoders) {
+            h = layers[i](h);
+        }
+        return h;
+    }
+
+    /** @brief The output of every layer (e.g. for features from intermediate layers): [layers, ..., model]. */
+    float[conf.numEncoders, ..., conf.dims.model] hiddenStates(x: float[..., conf.dims.model]) {
+        float[conf.numEncoders, ..., conf.dims.model] hs;
+        auto h = x;
+        for (i in 0..conf.numEncoders) {
+            h = layers[i](h);
+            hs[i] = h;
+        }
+        return hs;
+    }
+}
+
+/** @brief Sizes of BERT's embedding tables. */
+struct EmbeddingConf {
+    vocab: uint      // number of tokens
+    positions: uint  // maximum sequence length
+    types: uint      // number of segment types
+}
+
+/**
+ * @brief BERT's input embeddings: the sum of the token, position, and segment embeddings, normalized.
+ */
+module BertEmbeddings[conf: TransformerConf, emb: EmbeddingConf] {
+    word: Embedding[emb.vocab, conf.dims.model]
+    position: Embedding[emb.positions, conf.dims.model]
+    tokenType: Embedding[emb.types, conf.dims.model]
+    norm: LayerNorm[conf.dims.model]
+
+    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+        norm(word(ids) + position(positions) + tokenType(types));
+}
+
+/**
+ * @brief BERT's pooler: the first position of each sequence ([CLS]), transformed (the input of classification heads).
+ * For h: [batch, seq, model], the result is [batch, model].
+ */
+module BertPooler[conf: TransformerConf] {
+    dense: Linear[conf.dims.model, conf.dims.model]
+
+    float[..., conf.dims.model] forward(h: float[..., conf.dims.model]) => tanh(dense(h[..., 0, :]));
+}
+
+/**
+ * @brief The BERT model (like Hugging Face's `BertModel`): token, segment, and position ids to the last hidden states
+ * (`forward`) and to the pooled output (`pooled`). With `--ellipsis-rank 2`, the ids are [batch, seq], the hidden states
+ * [batch, seq, model], and the pooled output [batch, model].
+ */
+module Bert[conf: TransformerConf, emb: EmbeddingConf] {
+    embeddings: BertEmbeddings[conf, emb]
+    encoder: BertEncoder[conf]
+    pooler: BertPooler[conf]
+
+    float[..., conf.dims.model] forward(ids: int[...], types: int[...], positions: int[...]) =>
+        encoder(embeddings(ids, types, positions));
+
+    float[..., conf.dims.model] pooled(ids: int[...], types: int[...], positions: int[...]) =>
+        pooler(forward(ids, types, positions));
+}
+
+/**
+ * @brief Sequence classification (like Hugging Face's `BertForSequenceClassification` in eval mode): the logits of
+ * `classes` classes from the pooled output. For ids: [batch, seq], the logits are [batch, classes].
+ */
+module BertForSequenceClassification[conf: TransformerConf, emb: EmbeddingConf, classes: uint] {
+    bert: Bert[conf, emb]
+    classifier: Linear[conf.dims.model, classes]
+
+    float[..., classes] logits(ids: int[...], types: int[...], positions: int[...]) =>
+        classifier(bert.pooled(ids, types, positions));
+
+    /**
+     * The training objective: the mean cross-entropy of the logits and the class labels (one per sequence; compile
+     * with `--ellipsis-rank labels=1` so that labels are [batch] while the ids are [batch, seq]).
+     */
+    float loss(ids: int[...], types: int[...], positions: int[...], labels: int[...]) =>
+        cross_entropy(logits(ids, types, positions), labels);
 }

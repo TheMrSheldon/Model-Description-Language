@@ -1,4 +1,5 @@
 #include <mdl/computegraphv2/datatype.hpp>
+#include <mdl/computegraphv2/object.hpp>
 
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/computegraphv2/graph.hpp>
@@ -14,18 +15,7 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const PrimitiveType& prim,
 	for (auto& arg : typeargs) {
 		using RT = std::expected<TensorType::Shape::value_type, std::string>;
 		auto val = std::visit(
-				overloaded{
-						[](Elipsis) -> RT { return Elipsis{}; },
-						[](const Atomic& value) -> RT {
-							if (auto val = std::get_if<int>(&value)) {
-								return static_cast<unsigned>(*val);
-							} else {
-								return std::unexpected("Invalid type"); /** \todo more descriptive message **/
-							}
-						},
-						[](const Node* node) -> RT { return node; }
-				},
-				arg
+				overloaded{[](Elipsis) -> RT { return Elipsis{}; }, [](const Node* node) -> RT { return node; }}, arg
 		);
 		if (val.has_value())
 			shape.emplace_back(*val);
@@ -43,18 +33,32 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const AggregateType& agg, 
 	return std::unexpected("Type arguments are not available for aggregate types");
 }
 
+std::expected<DataType, std::string> mdl::setTypeArgs(const ModuleType& mod, const std::vector<TypeArg>& typeargs) {
+	if (typeargs.size() != mod.typeargs.size())
+		return std::unexpected(std::format("Expected {} type arg(s), got {}", mod.typeargs.size(), typeargs.size()));
+	BoundModuleType bound{std::cref(mod), {}};
+	for (size_t i = 0; i < typeargs.size(); ++i) {
+		auto& [name, _] = mod.typeargs[i];
+		const Node* node = std::get<const Node*>(typeargs[i]);
+		if (!mdl::isCompiletimeEvalable(*node))
+			return std::unexpected("Module hyperparameters must be compile-time constants");
+		bound.hyperparamValues.insert({name, node});
+	}
+	return bound;
+}
+
 std::expected<DataType, std::string>
 mdl::setTypeArgs(const BoundModuleType& mod, const std::vector<TypeArg>& typeargs) {
-	const auto& decl = mod.definition.get();
+	const auto& decl = mod.definition;
 	if (typeargs.size() != decl.typeargs.size())
 		return std::unexpected(std::format("Expected {} type arg(s), got {}", decl.typeargs.size(), typeargs.size()));
 	BoundModuleType bound{mod.definition, {}};
 	for (size_t i = 0; i < typeargs.size(); ++i) {
 		auto& [name, _] = decl.typeargs[i];
-		if (auto atom = std::get_if<Atomic>(&typeargs[i]))
-			bound.hyperparamValues.emplace_back(name, *atom);
-		else
+		const Node* node = std::get<const Node*>(typeargs[i]);
+		if (!mdl::isCompiletimeEvalable(*node))
 			return std::unexpected("Module hyperparameters must be compile-time constants");
+		bound.hyperparamValues.insert({name, node});
 	}
 	return bound;
 }
@@ -65,8 +69,18 @@ std::expected<DataType, std::string> mdl::setTypeArgs(const DataType& dtype, con
 
 std::optional<std::reference_wrapper<const FunctionDecl>>
 mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<DataType> argtypes) {
+	if (auto* bmt = std::get_if<BoundModuleType>(&dtype)) {
+		if (name != "operator()")
+			return std::nullopt;
+		auto& funcs = bmt->definition.functions;
+		auto it = funcs.find("forward");
+		if (it == funcs.end())
+			return std::nullopt;
+		return std::cref(it->second);
+	}
+
 	/** \todo implement properly for all types; for now only TensorType arithmetic operators are supported **/
-	if (!std::holds_alternative<TensorType>(dtype)) {
+	if (!std::holds_alternative<TensorType>(dtype) && !std::holds_alternative<PrimitiveType>(dtype)) {
 		return std::nullopt;
 	}
 
@@ -74,20 +88,20 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 	static Computegraph graph;
 	static std::map<std::string, FunctionDecl, std::less<>> ops = []() {
 		std::map<std::string, FunctionDecl, std::less<>> m;
-		DataType ttype = TensorType{.type = PrimitiveType::floating, .shape = {Elipsis{}}};
+		DataType ttype = TensorType{.type = PrimitiveType::float32, .shape = {Elipsis{}}};
 
 		auto makeOp = [&](std::string opName, FunctionIDs id) {
-			const Node& lhs = graph.addParameterNode(ttype);
-			const Node& rhs = graph.addParameterNode(ttype);
-			const Node& out = graph.addInvocationNode(id, ttype, {std::cref(lhs), std::cref(rhs)});
+			const Node& lhs = graph.addInputNode(ttype, "lhs");
+			const Node& rhs = graph.addInputNode(ttype, "rhs");
+			const Node& out = graph.addInvocationNode(id, {std::cref(lhs), std::cref(rhs)});
 			m.emplace(
 					std::move(opName), FunctionDecl{
 											   .name = opName,
 											   .templateParameters = {},
 											   .parameters =
-													   {{"lhs", std::cref(std::get<ParameterNode>(lhs))},
-														{"rhs", std::cref(std::get<ParameterNode>(rhs))}},
-											   .output = std::cref(out),
+													   {{"lhs", std::cref(std::get<InputNode>(lhs))},
+														{"rhs", std::cref(std::get<InputNode>(rhs))}},
+											   .outputs = {std::cref(out)},
 									   }
 			);
 		};
@@ -97,6 +111,22 @@ mdl::getMember(const DataType& dtype, std::string_view name, const std::vector<D
 		makeOp("operator@", FunctionIDs::TENSOR_DOT);
 		makeOp("operator*", FunctionIDs::TENSOR_PROD);
 		makeOp("operator/", FunctionIDs::TENSOR_DIV);
+
+		// T() — swap last two dimensions via PERMUTE with trailing perm {-1, -2}
+		{
+			const Node& self = graph.addInputNode(ttype, "self");
+			const Node& permNode = graph.addConstNode(Atomic{std::vector<int>{-1, -2}});
+			const Node& out = graph.addInvocationNode(FunctionIDs::PERMUTE, {std::cref(self), std::cref(permNode)});
+			m.emplace(
+					"T", FunctionDecl{
+								 .name = "T",
+								 .templateParameters = {},
+								 .parameters = {{"self", std::cref(std::get<InputNode>(self))}},
+								 .outputs = {std::cref(out)},
+						 }
+			);
+		}
+
 		return m;
 	}();
 
@@ -111,4 +141,55 @@ mdl::getMember(const FunctionDecl& decl, std::string_view name, const std::vecto
 	if (name == "operator()")
 		return std::cref(decl);
 	return std::nullopt;
+}
+
+std::optional<std::reference_wrapper<const FunctionDecl>>
+mdl::getMember(const Object& obj, std::string_view name, const std::vector<DataType>& argtypes) {
+	return std::visit(
+			overloaded{
+					[&](const Node* node) { return getMember(getDataType(*node), name, argtypes); },
+					[&](const FunctionDecl& decl) { return getMember(decl, name, argtypes); },
+					[&](const AggregateInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
+					},
+					[&](const ModuleInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
+					},
+					[&](const ArrayInstance&) -> std::optional<std::reference_wrapper<const FunctionDecl>> {
+						return std::nullopt;
+					}
+			},
+			obj
+	);
+}
+
+static void aggregatePaths(const AggregateType& agg, const std::string& prefix, std::vector<std::string>& paths) {
+	for (const auto& [member, type] : agg.members) {
+		if (const auto* sub = std::get_if<AggregateType>(&type))
+			aggregatePaths(*sub, prefix + "." + member, paths);
+		else
+			paths.push_back(prefix + "." + member);
+	}
+}
+
+std::vector<std::string> mdl::weightPaths(const ModuleType& mod) {
+	std::vector<std::string> paths;
+	for (const auto& [name, node] : mod.variables) {
+		std::visit(
+				overloaded{
+						[&](const AggregateType& agg) { aggregatePaths(agg, name, paths); },
+						[&](const BoundModuleType& sub) {
+							for (auto& path : weightPaths(sub.definition))
+								paths.push_back(name + "." + path);
+						},
+						[&](const ModuleType& sub) {
+							for (auto& path : weightPaths(sub))
+								paths.push_back(name + "." + path);
+						},
+						[&](const auto&) { paths.push_back(name); },
+				},
+				node.get().type
+		);
+	}
+	return paths;
 }

@@ -5,24 +5,34 @@
 #include "./datatype.hpp"
 #include "./node_decl.hpp"
 
+#include <optional>
+
 namespace mdl {
 	/**
-     * @brief "Const nodes" represent constant values in the compute graph. They consist of a data type and an atomic value.
+     * @brief "Const nodes" represent constant values in the compute graph.
+     * @details The value is an Atomic: a scalar (int/double) or a compile-time integer
+     *          tensor (std::vector<int>, e.g. permutation indices).
      * @see Atomic
      */
 	struct ConstNode {
 		mdl::Atomic value;
+		mutable std::optional<DataType> _cachedType; ///< for non-scalar Atomic variants
 
 		/**
 		 * @brief Get the data type of this node.
 		 */
 		const DataType& datatype() const {
 			static DataType inttype = PrimitiveType::integer;
-			static DataType floattype = PrimitiveType::floating;
+			static DataType floattype = PrimitiveType::float32;
 			return std::visit(
 					mdl::overloaded{
 							[&](const int&) -> const DataType& { return inttype; },
-							[&](const double&) -> const DataType& { return floattype; }
+							[&](const double&) -> const DataType& { return floattype; },
+							[&](const std::vector<int>& v) -> const DataType& {
+								if (!_cachedType)
+									_cachedType = TensorType{PrimitiveType::integer, {static_cast<unsigned>(v.size())}};
+								return *_cachedType;
+							},
 					},
 					value
 			);
@@ -73,7 +83,27 @@ namespace mdl {
 		bool isConsteval() const { return true; }
 	};
 	/**
-     * @brief "Parameter nodes" represent member variables.
+     * @brief "Input nodes" represent function arguments, i.e., runtime inputs that are passed when calling a function.
+     */
+	struct InputNode {
+		DataType type;
+		std::string name;
+
+		/**
+		 * @brief Get the data type of this node.
+		 */
+		const DataType& datatype() const { return type; }
+
+		/**
+		 * @brief Function arguments are only known at runtime.
+		 */
+		bool isConsteval() const { return false; }
+	};
+	/**
+     * @brief "Parameter nodes" represent module member variables (weights).
+     * @details The name is the fully qualified path of the weight relative to the module whose function references it
+     * (e.g., `weightQuery.W` inside `TransformerEncoder`, or `layers.3.weightQuery.W` inside a model that contains
+     * a stack of encoders).
      */
 	struct ParameterNode {
 		DataType type;
@@ -112,6 +142,7 @@ namespace mdl {
 	const mdl::DataType& getDataType(const mdl::ConstNode& node);
 	const mdl::DataType& getDataType(const mdl::InvocationNode& node);
 	const mdl::DataType& getDataType(const mdl::ErrorNode& node);
+	const mdl::DataType& getDataType(const mdl::InputNode& node);
 	const mdl::DataType& getDataType(const mdl::ParameterNode& node);
 	const mdl::DataType& getDataType(const mdl::HyperparameterNode& node);
 	/**

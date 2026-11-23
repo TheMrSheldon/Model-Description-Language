@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace mdl {
 	/**
@@ -23,7 +24,12 @@ namespace mdl {
      */
 	struct ErrorNode;
 	/**
-     * @brief "Parameter nodes" represent member variables.
+     * @brief "Input nodes" represent function arguments (runtime inputs of a function).
+     */
+	struct InputNode;
+	/**
+     * @brief "Parameter nodes" represent module member variables (weights). Their name is the fully qualified path of
+     * the weight relative to the module whose function owns them (e.g., `layers.3.weightQuery.W`).
      */
 	struct ParameterNode;
 	/**
@@ -32,15 +38,19 @@ namespace mdl {
 	struct HyperparameterNode;
 
 	/**
-     * @brief An atomic value.
-     */
-	using Atomic = std::variant<int, double>;
+	 * @brief An atomic (compile-time constant) value.
+	 * @details Scalars (int, double) and a 1-d integer tensor (permutation indices).
+	 * \todo Replace std::vector<int> with a proper N-d array type (e.g. xt::xarray<int>)
+	 *       and unify scalars as 0-d tensors so int/double become redundant.
+	 */
+	using Atomic = std::variant<int, double, std::vector<int>>;
 
 	/**
      * @brief A node in the compute graph.
      */
-	using Node = std::variant<ConstNode, InvocationNode, ErrorNode, ParameterNode, HyperparameterNode>;
+	using Node = std::variant<ConstNode, InvocationNode, ErrorNode, InputNode, ParameterNode, HyperparameterNode>;
 
+	const std::string& getName(const InputNode& node);
 	const std::string& getName(const ParameterNode& node);
 	const std::string& getName(const HyperparameterNode& node);
 	std::expected<std::reference_wrapper<const std::string>, bool> getName(const Node& node);

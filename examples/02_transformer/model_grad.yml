@@ -1,0 +1,10 @@
+# Tiny configuration for the gradient check: 1 layer, hidden size 32, 4 heads of size 8, FFN size 64.
+BertEncoder:
+  conf:
+    dims:
+      model: 32
+      key: 8
+      value: 8
+      inner: 64
+    numEncoders: 1
+    numAttnHeads: 4
