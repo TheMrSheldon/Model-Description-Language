@@ -70,7 +70,7 @@ namespace {
 	bool build(fe::graph::Graph& graph, Context& ctx) {
 		return graph.validate().is_good() && graph.build_operation_graph(ctx.handle).is_good() &&
 			   graph.create_execution_plans({fe::HeurMode_t::A}).is_good() && graph.check_support(ctx.handle).is_good() &&
-			   graph.build_plans(ctx.handle).is_good();
+			   graph.build_plans(ctx.handle, fe::BuildPlanPolicy_t::ALL).is_good(); // (all: measured on first use)
 	}
 
 	/** @brief The graph of a configuration (nullptr if cuDNN does not support it). */
@@ -174,19 +174,57 @@ namespace {
 		auto graph = graphFor(*ctx, kind, type, dims, strides, bias, padding, scale);
 		if (!graph)
 			return 3;
-		int64_t bytes = 0;
-		if (!graph->get_workspace_size(bytes).is_good())
-			return 4;
-		if (bytes > ctx->workspaceBytes) {
-			if (ctx->workspace != nullptr)
-				cudaFree(ctx->workspace);
-			ctx->workspace = nullptr;
-			ctx->workspaceBytes = 0;
-			if (cudaMalloc(&ctx->workspace, bytes) != cudaSuccess)
-				return 5;
-			ctx->workspaceBytes = bytes;
+		// The fastest of the heuristics' plans, measured once per configuration (on the first call's tensors: the
+		// outputs are written again by the call itself).
+		thread_local std::map<const fe::graph::Graph*, int64_t> chosen;
+		auto workspaceFor = [&](int64_t plan) -> bool {
+			int64_t bytes = 0;
+			if (!graph->get_workspace_size_plan_at_index(plan, bytes).is_good())
+				return false;
+			if (bytes > ctx->workspaceBytes) {
+				if (ctx->workspace != nullptr)
+					cudaFree(ctx->workspace);
+				ctx->workspace = nullptr;
+				ctx->workspaceBytes = 0;
+				if (cudaMalloc(&ctx->workspace, bytes) != cudaSuccess)
+					return false;
+				ctx->workspaceBytes = bytes;
+			}
+			return true;
+		};
+		auto it = chosen.find(graph.get());
+		if (it == chosen.end()) {
+			const int64_t count = graph->get_execution_plan_count();
+			int64_t best = 0;
+			float bestMs = -1;
+			cudaEvent_t start = nullptr, stop = nullptr;
+			if (count > 1 && cudaEventCreate(&start) == cudaSuccess && cudaEventCreate(&stop) == cudaSuccess) {
+				for (int64_t plan = 0; plan < count; ++plan) {
+					if (!workspaceFor(plan) || !graph->execute_plan_at_index(ctx->handle, pack, ctx->workspace, plan).is_good())
+						continue; // (also the warm-up)
+					constexpr int kRuns = 3;
+					cudaEventRecord(start, stream);
+					for (int r = 0; r < kRuns; ++r)
+						graph->execute_plan_at_index(ctx->handle, pack, ctx->workspace, plan);
+					cudaEventRecord(stop, stream);
+					cudaEventSynchronize(stop);
+					float ms = 0;
+					cudaEventElapsedTime(&ms, start, stop);
+					if (bestMs < 0 || ms < bestMs) {
+						bestMs = ms;
+						best = plan;
+					}
+				}
+			}
+			if (start != nullptr)
+				cudaEventDestroy(start);
+			if (stop != nullptr)
+				cudaEventDestroy(stop);
+			it = chosen.emplace(graph.get(), best).first;
 		}
-		if (!graph->execute(ctx->handle, pack, ctx->workspace).is_good())
+		if (!workspaceFor(it->second))
+			return 5;
+		if (!graph->execute_plan_at_index(ctx->handle, pack, ctx->workspace, it->second).is_good())
 			return 6;
 		return 0;
 	}

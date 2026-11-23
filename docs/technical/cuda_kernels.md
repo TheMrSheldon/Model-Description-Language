@@ -77,7 +77,9 @@ LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfa
 2. **Second pass:** 256 threads per block. Each thread sums the chunks of one column in a register (a local cache
    write, not an initialized global buffer) and applies the epilogue.
 
-The rule needs at least `kMinRows = 256` rows; with fewer, DLight's rules take the kernel.
+The rule needs at least `kMinRows = 256` rows; with fewer, DLight's rules take the kernel. The second pass's write-back
+is not predicated, so its thread count must divide a static number of columns: the largest power of two from 256
+down to 32 that does, or the number of columns itself if it is at most 256. Otherwise DLight takes the kernel.
 
 ### Elementwise (`elementwise.{hpp,cpp}`)
 
@@ -158,6 +160,9 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 - **Lengths (suffix masks, `--mask f=suffix`):** int32 per-sequence lengths turn on cuDNN's padding mode
   (`set_padding_mask`, `set_seq_len_q/kv`). No mask bias is materialized. Batch dimensions are swapped where cuDNN
   requires it.
+- **Plan selection:** all execution plans that the heuristic (mode A) offers are built. On the first call of a
+  configuration each is timed three times on the call's tensors, and the fastest is kept, as the cuBLAS package does
+  for algorithms. On the A100 slice the first plan was already the fastest.
 - **Caching:** one operation graph per configuration (device, kind, type, dims, strides, bias, padding, scale), built
   once (`HeurMode A`, then check support, then build plans) and cached per thread. If cuDNN does not support a
   configuration, the call returns an error.
@@ -175,7 +180,7 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 
 ## Known gaps (see TODO.md)
 
-- Column sums of the same input (bias and LayerNorm-parameter gradients) are separate kernels, each reading the
-  input again.
+- The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on the A100 slice and is not
+  used; see TODO.md.
 - CUDA graphs and a caller-provided workspace.
 - Unpadding of suffix-masked regions.

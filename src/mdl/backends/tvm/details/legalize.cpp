@@ -848,6 +848,38 @@ namespace mdl::backend::tvm {
 					const int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
 					return te.finish(topi::concatenate(parts, axis));
 				}));
+		map.Set("relax.stack", wrap([](const BlockBuilder& bb, const Call& call) {
+					const auto* attrs = call->attrs.as<::tvm::relax::StackAttrs>();
+					TECall te{bb, "stack"};
+					Array<te::Tensor> parts;
+					for (const auto& field : (call->args[0]).as_or_throw<::tvm::relax::Tuple>()->fields)
+						parts.push_back(te.tensor(field));
+					const int rank = static_cast<int>(parts[0]->shape.size());
+					int axis = attrs->axis ? static_cast<int>(attrs->axis.value()) : 0;
+					if (axis < 0)
+						axis += rank + 1;
+					// (not topi::stack: its new axis has an int32 extent, the Relax type an int64 one)
+					Array<PrimExpr> shape;
+					for (int d = 0; d < rank; ++d) {
+						if (d == axis)
+							shape.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), static_cast<int64_t>(parts.size())));
+						shape.push_back(parts[0]->shape[d]);
+					}
+					if (axis == rank)
+						shape.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), static_cast<int64_t>(parts.size())));
+					return te.finish(te::compute(shape, [&](const Array<::tvm::PrimVar>& i) {
+						Array<PrimExpr> index;
+						for (int d = 0; d <= rank; ++d)
+							if (d != axis)
+								index.push_back(i[d]);
+						PrimExpr value = parts.back()(index);
+						for (size_t k = parts.size() - 1; k-- > 0;)
+							value = ::tvm::prim::Select(
+									i[axis] == ::tvm::IntImm(i[axis].ty(), static_cast<int64_t>(k)), parts[k](index), value
+							);
+						return value;
+					}, "T_stack"));
+				}));
 		map.Set("relax.collapse_sum_to", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					// (Column sums by a kernel: kernels/onednn, sum-rows.)
 					const auto& x = call->args[0];

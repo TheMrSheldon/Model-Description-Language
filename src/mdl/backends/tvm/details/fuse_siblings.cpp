@@ -18,6 +18,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <exception>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -146,6 +147,7 @@ namespace mdl::backend::tvm {
 			ffi::Array<tirx::Var> inputs, outputs;
 			ffi::Array<Expr> mergedArgs;
 			std::unordered_map<const void*, tirx::BufferVar> paramOfArg; // argument -> parameter
+			std::unordered_set<const void*> usedParams;
 			for (size_t m = 0; m < kernels.size(); ++m) {
 				const Injective& k = kernels[m];
 				const auto& block = k.realize->block;
@@ -181,7 +183,10 @@ namespace mdl::backend::tvm {
 						shape.push_back(subst(d));
 						changed |= !shape.back().same_as(d);
 					}
-					const auto param = changed ? reshaped(buffer, shape) : buffer;
+					// (a kernel merged with itself, e.g. two `take`s: its parameters again, as new buffers)
+					const bool seen = usedParams.contains(buffer.get());
+					const auto param = changed || seen ? reshaped(buffer, shape) : buffer;
+					usedParams.insert(buffer.get());
 					buffers.emplace(buffer.get(), param);
 					if (output) {
 						outputs.push_back(param);
@@ -195,17 +200,18 @@ namespace mdl::backend::tvm {
 					auto it = buffers.find(b.get());
 					return it == buffers.end() ? b : it->second;
 				};
-				auto rewrite = [&](const PrimExpr& e) {
-					const PrimExpr loads = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
+				// (loads of other buffers; also in the indices of loads, e.g. `table[i, ids[]]`)
+				std::function<PrimExpr(const PrimExpr&)> rewrite = [&](const PrimExpr& e) {
+					const PrimExpr loads = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
 												   e,
 												   [&](const ::tvm::TensorLoad& load) -> ffi::UnchangedOr<ffi::Any> {
 													   auto buffer = load->source.as<tirx::BufferVar>();
 													   if (!buffer)
 														   return ffi::Unchanged();
-													   const auto to = bufferOf(*buffer);
-													   if (to.same_as(*buffer))
-														   return ffi::Unchanged();
-													   return ffi::Any(tirx::BufferLoad(to, load->indices));
+													   ffi::Array<PrimExpr> indices;
+													   for (const auto& i : load->indices)
+														   indices.push_back(rewrite(i));
+													   return ffi::Any(tirx::BufferLoad(bufferOf(*buffer), indices));
 												   }
 	                                       )
 												   .cast<PrimExpr>();
@@ -215,7 +221,7 @@ namespace mdl::backend::tvm {
 					for (const auto& r : regions) {
 						ffi::Array<PrimExpr> indices;
 						for (const auto& range : r->region)
-							indices.push_back(subst(range->min));
+							indices.push_back(rewrite(range->min));
 						into.push_back(tirx::BufferRegionFromPoint(bufferOf(r->source.as_or_throw<tirx::BufferVar>()), indices));
 					}
 				};
@@ -224,7 +230,7 @@ namespace mdl::backend::tvm {
 				const auto* store = block->body.as<tirx::BufferStoreNode>();
 				ffi::Array<PrimExpr> indices;
 				for (const auto& i : store->indices)
-					indices.push_back(subst(i));
+					indices.push_back(rewrite(i));
 				stores.push_back(tirx::BufferStore(bufferOf(store->buffer), rewrite(store->value), indices));
 			}
 			auto block = baseBlock;

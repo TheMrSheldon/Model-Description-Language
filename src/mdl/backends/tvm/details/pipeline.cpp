@@ -6,6 +6,7 @@
 #include "./flatten_injective.hpp"
 #include "./fuse_rows.hpp"
 #include "./fuse_siblings.hpp"
+#include "./stack_sums.hpp"
 #include "./attention.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
@@ -314,6 +315,8 @@ namespace mdl::backend::tvm {
 		mod = runPasses(
 				mod,
 				{
+						// Sums of tensors computed from a common one: one sum (reads it once).
+						stackSiblingSums(),
 						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
 						RT::AnnotateTIROpPattern(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through

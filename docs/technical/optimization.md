@@ -21,6 +21,7 @@ shape occurs.
 | Relax | Context pruning, context layouts | `details/contexts.cpp` |
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
 | Relax | Producer–consumer fusion (TVM FuseOps/FuseTIR) | TVM |
+| Relax | Stacked sibling sums | `details/stack_sums.cpp` |
 | Relax | Row fusion | `details/fuse_rows.cpp` |
 | Relax | Sibling fusion | `details/fuse_siblings.cpp` |
 | TIR | Flattening of injective kernels | `details/flatten_injective.cpp` |
@@ -162,6 +163,17 @@ Typical siblings:
 - several elementwise results from the same activations, e.g. in normalization gradients.
 
 Reductions are handled by row fusion (below), not by sibling fusion.
+
+### Stacked sibling sums
+
+Column sums to the same shape of tensors computed from a common one are rewritten as one sum over a stack:
+`collapse_sum_to(x_i, S)` becomes `collapse_sum_to(stack(x_1, …, x_k, axis=-1), S + [k])`, followed by a `take` per
+result. Example: a normalization's `Σdy` and `Σ(dy·x̂)`.
+
+- The inputs must share a tensor: one is the other's argument, or their elementwise producers have a common argument.
+- The stacked axis is innermost, so adjacent threads sum the k columns. The producers fuse into the reduction, which
+  then reads `dy` once.
+- Bindings that use an earlier result move after the group, which is safe because dataflow bindings are pure.
 
 ### Row fusion
 

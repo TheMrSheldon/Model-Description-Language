@@ -68,6 +68,7 @@ add_library(mdl
 	backends/tvm/details/flatten_injective.cpp
 	backends/tvm/details/fuse_rows.cpp
 	backends/tvm/details/fuse_siblings.cpp
+	backends/tvm/details/stack_sums.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp

@@ -84,6 +84,16 @@ namespace mdl::backend::tvm::gpu {
 		if (!reads)
 			return std::nullopt;
 
+		// The threads of the second pass: a divisor of the (static) number of columns.
+		int64_t threads = kThreads;
+		if (columns) {
+			while (threads > kWarp && *columns % threads != 0)
+				threads /= 2;
+			if (*columns % threads != 0)
+				threads = *columns <= kThreads ? *columns : 0;
+			if (threads == 0)
+				return std::nullopt; // (DLight's rules)
+		}
 		try {
 			const SBlockRV red = info.block_rv;
 			auto loops = sch->GetLoops(red);
@@ -118,7 +128,8 @@ namespace mdl::backend::tvm::gpu {
 				auto l = sch->GetLoops(red); // [s, chunk]
 				if (l.empty())
 					return std::nullopt;
-				const auto cols = sch->Split(l[0], factors(kThreads));
+				// (threads that divide the columns: the write-back after the loop is not predicated)
+				const auto cols = sch->Split(l[0], factors(threads));
 				sch->Bind(cols[0], "blockIdx.x");
 				sch->Bind(cols[1], "threadIdx.x");
 				// (A local accumulator also avoids accumulating in a 16-bit output: local bfloat16 buffers are computed in
