@@ -51,7 +51,9 @@ namespace mdl::backend::tvm::fusion {
 		} else {
 			for (const auto& m : members)
 				if (m.escapes) {
-					group = Signature{Kind::pointwise, Layout::rows, m.signature->out, m.signature->out, m.signature->out};
+					group = Signature{
+							Kind::pointwise, Layout::rows, m.signature->out, m.signature->out, m.signature->out
+					};
 					break;
 				}
 			if (!group)

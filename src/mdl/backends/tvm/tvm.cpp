@@ -614,9 +614,7 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 	for (size_t i = 0; i < fn.outputs.size(); ++i) {
 		if (!fn.outputs[i].accumulate || fn.outputs[i].packed)
 			continue;
-		previous[i] = makeRelaxParam(
-				"previous" + std::to_string(i), mdl::getDataType(fn.decl->outputs[i].get()), ctx
-		);
+		previous[i] = makeRelaxParam("previous" + std::to_string(i), mdl::getDataType(fn.decl->outputs[i].get()), ctx);
 		bbParams.push_back(*previous[i]);
 		packing.params.push_back(false);
 		packing.aliases.push_back(static_cast<int>(i));
@@ -673,7 +671,6 @@ static mdl::backend::tvm::EntrySignature translateFuncRelax(
 }
 
 // ── main entry point ──────────────────────────────────────────────────────────
-
 
 void mdl::backends::tvm::compileToFile(
 		const std::vector<mdl::ExportedFunction>& exports, const std::filesystem::path& output,

@@ -174,7 +174,8 @@ namespace mdl::bindings {
 				<< "    @staticmethod\n"
 				<< "    def backward(ctx, *grads):\n"
 				<< "        owner = ctx.owner\n"
-				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s, dtype=d, device=ctx.device) for g, s, d in "
+				<< "        cotangents = [g.contiguous() if g is not None else torch.zeros(s, dtype=d, "
+				   "device=ctx.device) for g, s, d in "
 				   "zip(grads, ctx.output_shapes, ctx.output_dtypes)]\n"
 				<< "        # The compiled backward pass adds the gradients to its output buffers: start from zero.\n"
 				<< "        gradients = {p: torch.zeros_like(owner.weights[p]) for p in " << className(fw)
@@ -186,7 +187,8 @@ namespace mdl::bindings {
 					continue;
 				const bool isInput = std::find(inputNames.begin(), inputNames.end(), o.gradientOf) != inputNames.end();
 				if (isInput)
-					out << "torch.zeros(" << shapeExpr(o) << ", dtype=" << torchDtype(o.dtype) << ", device=ctx.device), ";
+					out << "torch.zeros(" << shapeExpr(o) << ", dtype=" << torchDtype(o.dtype)
+						<< ", device=ctx.device), ";
 				else
 					out << "gradients[\"" << o.gradientOf << "\"], ";
 			}

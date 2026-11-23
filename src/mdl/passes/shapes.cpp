@@ -407,7 +407,8 @@ namespace mdl::shapes {
 					Shape s(like.begin(), like.begin() + static_cast<std::ptrdiff_t>(lengths.size() + 1));
 					if (!symbolic && Shape(s.begin(), s.end() - 1) != lengths)
 						mismatched(std::format(
-								"suffix mask: the lengths {} are not the leading dimensions of {}", str(lengths), str(like)
+								"suffix mask: the lengths {} are not the leading dimensions of {}", str(lengths),
+								str(like)
 						));
 					return s;
 				}

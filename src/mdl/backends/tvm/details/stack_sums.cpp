@@ -42,7 +42,8 @@ namespace mdl::backend::tvm {
 			::tvm::IRModule run() {
 				std::vector<std::pair<::tvm::GlobalVar, relax::Function>> updates;
 				for (const auto& [gv, f] : mod->functions)
-					if (const auto* fn = f.as<relax::FunctionNode>(); fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
+					if (const auto* fn = f.as<relax::FunctionNode>();
+						fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
 						if (auto changed = rewrite(ffi::GetRef<relax::Function>(fn)))
 							updates.emplace_back(gv, *changed);
 				for (const auto& [gv, f] : updates)
@@ -120,7 +121,8 @@ namespace mdl::backend::tvm {
 					const auto dtypeA = tensorInfo(sums[a].input)->dtype;
 					for (size_t b = a + 1; b < sums.size() && group.size() < kMaxGroup; ++b) {
 						if (taken[b] || !ffi::StructuralEqual()(*knownShape(sums[b].input), shapeA) ||
-							!ffi::StructuralEqual()(sums[b].shape, sums[a].shape) || tensorInfo(sums[b].input)->dtype != dtypeA)
+							!ffi::StructuralEqual()(sums[b].shape, sums[a].shape) ||
+							tensorInfo(sums[b].input)->dtype != dtypeA)
 							continue;
 						bool shares = false;
 						for (const void* s : sums[b].sources)
@@ -198,7 +200,8 @@ namespace mdl::backend::tvm {
 						return dataflow ? ::tvm::Var(relax::DataflowVar(n, relax::GetType(value)))
 										: ::tvm::Var(n, relax::GetType(value));
 					};
-					const Expr stackedValue = bb->Normalize(stack(relax::Tuple(inputs), ffi::Optional<int64_t>(-1)).cast<Expr>());
+					const Expr stackedValue =
+							bb->Normalize(stack(relax::Tuple(inputs), ffi::Optional<int64_t>(-1)).cast<Expr>());
 					const ::tvm::Var stacked = var(name + "_stacked", stackedValue);
 					result.push_back(relax::VarBinding(stacked, stackedValue));
 					const Expr summed = bb->Normalize(collapseSumTo(stacked, relax::ShapeExpr(shape)).cast<Expr>());
@@ -210,9 +213,9 @@ namespace mdl::backend::tvm {
 						);
 						const int32_t value = static_cast<int32_t>(k); // (AOT: int32 constants)
 						index.CopyFromBytes(&value, sizeof(value));
-						const Expr taken = bb->Normalize(
-								take(sum, relax::MakeTensorConst(index), ffi::Optional<int64_t>(-1), ffi::String("fast")).cast<Expr>()
-						);
+						const Expr taken = bb->Normalize(take(sum, relax::MakeTensorConst(index),
+															  ffi::Optional<int64_t>(-1), ffi::String("fast"))
+																 .cast<Expr>());
 						result.push_back(relax::VarBinding(bindings[sums[group[k]].index]->var, taken));
 					}
 					++groups;

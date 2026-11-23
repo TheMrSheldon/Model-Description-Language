@@ -1,7 +1,7 @@
 // Kernel directories, package discovery, and platform compatibility (see docs/dev/spec/kernel-packages.md).
-#include <optional>
 #include <mdl/kernels.hpp>
 #include <mdl/utils/platform.hpp>
+#include <optional>
 
 #include <algorithm>
 #include <cstdlib>

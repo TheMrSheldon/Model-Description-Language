@@ -307,7 +307,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		const std::string name = request.substr(0, eq);
 		const std::string kind = eq == std::string::npos ? "element" : request.substr(eq + 1);
 		if (kind != "element" && kind != "suffix")
-			throw std::runtime_error(std::format("--mask {}: unknown mask kind '{}' (element or suffix)", request, kind));
+			throw std::runtime_error(std::format("--mask {}: unknown mask kind '{}' (element or suffix)", request, kind)
+			);
 		masked.push_back(name);
 		maskKinds[name] = kind == "suffix" ? masking::MaskKind::suffix : masking::MaskKind::element;
 	}

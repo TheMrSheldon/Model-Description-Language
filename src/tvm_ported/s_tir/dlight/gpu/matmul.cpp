@@ -4,9 +4,9 @@
 // Ported: the helpers, `MatmulTensorization` and `Matmul`. Not ported: `MatmulInt8Tensorization`, `MetalMatmul`, and `Matmul.sch_outer_reduction` (OpenCL on Android/Adreno).
 #include "./gpu.hpp"
 
+#include "../../tensor_intrin/cuda.hpp"
 #include "../analysis/common_analysis.hpp"
 #include "../base/utils.hpp"
-#include "../../tensor_intrin/cuda.hpp"
 
 #include <tvm/tirx/analysis.h>
 
@@ -124,7 +124,8 @@ namespace mdl::tvm_ported::dlight::gpu {
 
 		bool _is_one(const PrimExpr& x) { return as_int(x) == 1; }
 
-		tirx::IndexMap make_iter_fusion_index_map(const std::vector<IterTrait>& traits, const std::vector<IterKind>& kind_order) {
+		tirx::IndexMap
+		make_iter_fusion_index_map(const std::vector<IterTrait>& traits, const std::vector<IterKind>& kind_order) {
 			std::map<IterKind, PrimExpr> fused_iters;
 			Array<PrimVar> input_iters;
 			for (size_t i = 0; i < traits.size(); ++i) {
@@ -239,7 +240,8 @@ namespace mdl::tvm_ported::dlight::gpu {
 				return std::nullopt;
 			using enum IterKind;
 			return IndexMaps{
-					.matmul_index_map = make_iter_fusion_index_map(traits->block_traits, {kIter_S, kIter_I, kIter_J, kIter_K}),
+					.matmul_index_map =
+							make_iter_fusion_index_map(traits->block_traits, {kIter_S, kIter_I, kIter_J, kIter_K}),
 					.a_index_map = make_iter_fusion_index_map(traits->A_traits, {kIter_S, kIter_I, kIter_K}),
 					.b_index_map = make_iter_fusion_index_map(traits->B_traits, {kIter_S, kIter_J, kIter_K}),
 					.c_index_map = make_iter_fusion_index_map(traits->C_traits, {kIter_S, kIter_I, kIter_J}),
@@ -311,9 +313,18 @@ namespace mdl::tvm_ported::dlight::gpu {
 			const std::string kind = target->kind->name;
 			if (kind == "cuda" || kind == "rocm")
 				return Config{
-						.block_size_x = 8, .block_size_y = 16, .vthread_x = 1, .vthread_y = 1, .micro_size_x = 4,
-						.micro_size_y = 4, .micro_size_k = 16, .vector_size = 2, .unroll = 256, .use_shared = true,
-						.storage_align = true, .inner_x = false
+						.block_size_x = 8,
+						.block_size_y = 16,
+						.vthread_x = 1,
+						.vthread_y = 1,
+						.micro_size_x = 4,
+						.micro_size_y = 4,
+						.micro_size_k = 16,
+						.vector_size = 2,
+						.unroll = 256,
+						.use_shared = true,
+						.storage_align = true,
+						.inner_x = false
 				};
 			// (Not ported: the configuration of OpenCL on Android/Adreno.)
 			return Config{};
@@ -382,8 +393,7 @@ namespace mdl::tvm_ported::dlight::gpu {
 
 		// Step 2. Padding for dynamic shape kernels
 		sch->PadEinsum(
-				main_block,
-				{1, micro_size_x * x_pad_factor, micro_size_y * y_pad_factor, micro_size_k * k_pad_factor}
+				main_block, {1, micro_size_x * x_pad_factor, micro_size_y * y_pad_factor, micro_size_k * k_pad_factor}
 		);
 
 		// Step 3. Schedule matmul to use tensor core
@@ -619,9 +629,7 @@ namespace mdl::tvm_ported::dlight::gpu {
 		}
 
 		// Step 3. Schedule matmul
-		auto split = sch->Split(
-				y, factors({std::nullopt, config.vthread_y, config.block_size_y, config.micro_size_y})
-		);
+		auto split = sch->Split(y, factors({std::nullopt, config.vthread_y, config.block_size_y, config.micro_size_y}));
 		LoopRV by = split[0];
 		const LoopRV vy = split[1], ty = split[2], yi = split[3];
 		split = sch->Split(x, factors({std::nullopt, config.vthread_x, config.block_size_x, config.micro_size_x}));
@@ -658,8 +666,7 @@ namespace mdl::tvm_ported::dlight::gpu {
 		const SBlockRV l2g = sch->CacheWrite(main_block, 0, "local");
 		sch->ReverseComputeAt(l2g, tx, /*preserve_unit_loops=*/true);
 		if (config.micro_size_x % config.vector_size == 0) {
-			const LoopRV v =
-					sch->Split(sch->GetLoops(l2g).back(), factors({std::nullopt, config.vector_size}))[1];
+			const LoopRV v = sch->Split(sch->GetLoops(l2g).back(), factors({std::nullopt, config.vector_size}))[1];
 			sch->Vectorize(v);
 		}
 
@@ -670,8 +677,9 @@ namespace mdl::tvm_ported::dlight::gpu {
 				sch->ComputeAt(block, ko, /*preserve_unit_loops=*/true);
 				const auto all_loops = sch->GetLoops(block);
 				const Array<LoopRV> loops(all_loops.end() - static_cast<std::ptrdiff_t>(num_loops), all_loops.end());
-				const auto parts =
-						sch->Split(sch->Fuse(loops), factors({config.block_size_y, config.block_size_x, std::nullopt, vec_len}));
+				const auto parts = sch->Split(
+						sch->Fuse(loops), factors({config.block_size_y, config.block_size_x, std::nullopt, vec_len})
+				);
 				sch->Vectorize(parts[3]);
 				sch->Bind(parts[0], "threadIdx.y");
 				sch->Bind(parts[1], "threadIdx.x");

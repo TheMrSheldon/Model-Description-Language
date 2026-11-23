@@ -28,17 +28,17 @@ namespace mdl::tvm_ported {
 	namespace tirx = ::tvm::tirx;
 	namespace s_tir = ::tvm::s_tir;
 
+	using ffi::Array;
+	using s_tir::LoopRV;
+	using s_tir::SBlockRV;
+	using s_tir::Schedule;
+	using tirx::PrimFunc;
 	using ::tvm::IRModule;
 	using ::tvm::PrimExpr;
 	using ::tvm::PrimVar;
 	using ::tvm::Range;
 	using ::tvm::Target;
 	using ::tvm::TensorRegion;
-	using ffi::Array;
-	using s_tir::LoopRV;
-	using s_tir::SBlockRV;
-	using s_tir::Schedule;
-	using tirx::PrimFunc;
 
 	/** @brief The value of a constant integer (Python's `isinstance(e, tirx.IntImm)` and `e.value`). */
 	inline std::optional<int64_t> as_int(const PrimExpr& e) {

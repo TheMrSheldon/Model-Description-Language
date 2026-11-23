@@ -16,7 +16,8 @@ namespace mdl::backend::tvm::fusion {
 					[](::tvm::IRModule mod, ::tvm::transform::PassContext) {
 						Partition groups;
 						for (const auto& [gv, f] : mod->functions)
-							if (const auto* fn = f.as<relax::FunctionNode>(); fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
+							if (const auto* fn = f.as<relax::FunctionNode>();
+								fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
 								for (auto& g : plan(mod, ::tvm::ffi::GetRef<relax::Function>(fn)))
 									groups.push_back(std::move(g));
 						return materialize(mod, groups);

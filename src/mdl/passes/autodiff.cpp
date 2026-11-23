@@ -123,7 +123,8 @@ namespace mdl::autodiff {
 		 * runtime size, e.g. a sequence length, leaves the parameters unbound, as for a parsed call).
 		 */
 		std::vector<Computegraph::NodeRef> templateArguments(
-				Builder& b, Computegraph& graph, const FunctionDecl& func, const std::vector<Computegraph::NodeRef>& arguments
+				Builder& b, Computegraph& graph, const FunctionDecl& func,
+				const std::vector<Computegraph::NodeRef>& arguments
 		) {
 			std::vector<const Node*> values(func.templateParameters.size(), nullptr);
 			auto index = [&](const TensorType::Shape::value_type& dim) -> std::optional<size_t> {
@@ -152,8 +153,9 @@ namespace mdl::autodiff {
 					if (auto t = index(pdim); t && values[*t] == nullptr)
 						values[*t] = sizeNode(adim);
 				};
-				const auto ellipsis =
-						std::ranges::find_if(p->shape, [](const auto& d) { return std::holds_alternative<Elipsis>(d); });
+				const auto ellipsis = std::ranges::find_if(p->shape, [](const auto& d) {
+					return std::holds_alternative<Elipsis>(d);
+				});
 				const size_t before = static_cast<size_t>(ellipsis - p->shape.begin());
 				for (size_t k = 0; k < before && k < a->size(); ++k)
 					bind(p->shape[k], (*a)[k]);
@@ -261,7 +263,8 @@ namespace mdl::autodiff {
 					return b.op(FIDs::RESHAPE, {v, group, graph.addConstNode(Atomic{1})});
 				};
 				const Node* n = lastDimSize(graph, getDataType(x));
-				const Node& count = n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
+				const Node& count =
+						n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
 				const Node& centered = b.sub(x, keep(b.op(FIDs::MEAN, {x})));
 				return b.div(b.mul(b.mul(keep(g), centered), b.constant(2.0)), b.sub(count, *other));
 			}
@@ -326,8 +329,9 @@ namespace mdl::autodiff {
 				};
 				std::vector<Computegraph::NodeRef> args = operands;
 				for (const Node* n :
-					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)), &b.op(FIDs::ATTENTION_PROBS, withBias(operands)),
-					  &g, &graph.addConstNode(Atomic{static_cast<int>(arg)})})
+					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)),
+					  &b.op(FIDs::ATTENTION_PROBS, withBias(operands)), &g,
+					  &graph.addConstNode(Atomic{static_cast<int>(arg)})})
 					args.push_back(std::cref(*n));
 				return b.op(FIDs::ATTENTION_GRAD, withBias(std::move(args)));
 			}
@@ -360,7 +364,8 @@ namespace mdl::autodiff {
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
 			case FIDs::ATTENTION:
-				return arg != 3 && arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
+				return arg != 3 &&
+					   arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
 			case FIDs::ATTENTION_LSE:
 			case FIDs::ATTENTION_PROBS:
 			case FIDs::ATTENTION_GRAD:

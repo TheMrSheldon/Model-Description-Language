@@ -24,12 +24,15 @@ namespace mdl::backend::tvm::fusion {
 		bool cheap(const ::tvm::IRModule& mod, const ::tvm::Expr& value) {
 			const auto* call = value.as<::tvm::CallNode>();
 			const auto* gv = call ? call->args[0].as<::tvm::GlobalVarNode>() : nullptr;
-			const auto* prim = gv ? mod->Lookup(::tvm::ffi::GetRef<::tvm::GlobalVar>(gv)).as<::tvm::tirx::PrimFuncNode>() : nullptr;
+			const auto* prim =
+					gv ? mod->Lookup(::tvm::ffi::GetRef<::tvm::GlobalVar>(gv)).as<::tvm::tirx::PrimFuncNode>()
+					   : nullptr;
 			if (prim == nullptr)
 				return false;
 			size_t nodes = 0;
 			::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
-					prim->body, [&](const ::tvm::PrimExpr&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
+					prim->body,
+					[&](const ::tvm::PrimExpr&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
 						++nodes;
 						return ::tvm::ffi::WalkResult::Advance();
 					}
@@ -37,7 +40,10 @@ namespace mdl::backend::tvm::fusion {
 			return nodes <= kMaxExprNodes;
 		}
 
-		relax::BindingBlock duplicate(const ::tvm::IRModule& mod, const relax::DataflowBlock& block, const std::unordered_set<const void*>& usedAfter) {
+		relax::BindingBlock duplicate(
+				const ::tvm::IRModule& mod, const relax::DataflowBlock& block,
+				const std::unordered_set<const void*>& usedAfter
+		) {
 			const auto& bindings = block->bindings;
 			std::unordered_map<const void*, size_t> index;
 			std::vector<Signature> signatures;
@@ -56,7 +62,8 @@ namespace mdl::backend::tvm::fusion {
 			for (size_t p = 0; p < bindings.size(); ++p) {
 				const Signature& s = signatures[p];
 				if (s.kind != Kind::pointwise || readers[p].size() < 2 || usedAfter.contains(bindings[p]->var.get()) ||
-					!bindings[p]->var.as<relax::DataflowVarNode>() || !cheap(mod, bindings[p].as_or_throw<relax::VarBinding>()->value))
+					!bindings[p]->var.as<relax::DataflowVarNode>() ||
+					!cheap(mod, bindings[p].as_or_throw<relax::VarBinding>()->value))
 					continue;
 				bool fusible = true;
 				for (size_t r : readers[p]) {
@@ -114,7 +121,9 @@ namespace mdl::backend::tvm::fusion {
 						}
 						blocks.push_back(block);
 					}
-					return relax::Function(f->params, relax::SeqExpr(blocks, seq->body), f->ret_ty, f->is_pure, f->attrs);
+					return relax::Function(
+							f->params, relax::SeqExpr(blocks, seq->body), f->ret_ty, f->is_pure, f->attrs
+					);
 				},
 				0, "mdl.DuplicateProducers", {}
 		);

@@ -11,8 +11,8 @@
 #include <exception>
 #include <optional>
 #include <stdexcept>
-#include <utility>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mdl::backend::tvm {
@@ -177,4 +177,3 @@ namespace mdl::backend::tvm {
 	}
 
 } // namespace mdl::backend::tvm
-

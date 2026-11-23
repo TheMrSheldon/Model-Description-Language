@@ -26,10 +26,12 @@ namespace mdl::tvm_ported {
 	void register_cuda_globals() {
 		static std::once_flag once;
 		std::call_once(once, [] {
-			set_global("tirx.intrinsics.cuda.header_generator", ffi::Function::FromTyped([](ffi::Array<ffi::String> tags) {
-						   std::vector<std::string> t(tags.begin(), tags.end());
-						   return ffi::String(backend::cuda::codegen::header_generator(t));
-					   }));
+			set_global(
+					"tirx.intrinsics.cuda.header_generator", ffi::Function::FromTyped([](ffi::Array<ffi::String> tags) {
+						std::vector<std::string> t(tags.begin(), tags.end());
+						return ffi::String(backend::cuda::codegen::header_generator(t));
+					})
+			);
 			set_global("tirx.intrinsics.cuda.get_codegen", ffi::Function::FromTyped([](ffi::String op) {
 						   return backend::cuda::codegen::get_codegen(op);
 					   }));

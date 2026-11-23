@@ -65,8 +65,11 @@ namespace mdl::backend::tvm::fusion {
 			auto bindings = last->bindings;
 			for (const auto& b : trailing)
 				bindings.push_back(b);
-			blocks.Set(blocks.size() - 1, last.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
-																			  : relax::BindingBlock(bindings));
+			blocks.Set(
+					blocks.size() - 1, last.as<relax::DataflowBlockNode>()
+											   ? relax::BindingBlock(relax::DataflowBlock(bindings))
+											   : relax::BindingBlock(bindings)
+			);
 			return relax::Function(f->params, relax::SeqExpr(blocks, body), f->ret_ty, f->is_pure, f->attrs);
 		}
 	} // namespace
@@ -98,8 +101,9 @@ namespace mdl::backend::tvm::fusion {
 				continue;
 			const auto function = ::tvm::ffi::GetRef<relax::Function>(fn);
 			updates.emplace_back(
-					gv, before.contains(gv.get()) ? relax::EliminateCommonSubexpr(function).as_or_throw<relax::Function>()
-												  : withTrailingResults(function)
+					gv, before.contains(gv.get())
+								? relax::EliminateCommonSubexpr(function).as_or_throw<relax::Function>()
+								: withTrailingResults(function)
 			);
 		}
 		for (const auto& [gv, f] : updates)

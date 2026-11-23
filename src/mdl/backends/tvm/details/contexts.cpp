@@ -49,7 +49,9 @@ namespace mdl::backend::tvm {
 		relax::Function withoutParams(const relax::Function& f, const std::vector<size_t>& positions) {
 			std::vector<::tvm::Var> params(f->params.begin(), f->params.end());
 			erase(params, positions);
-			return relax::Function(Array<::tvm::Var>(params.begin(), params.end()), f->body, f->ret_ty, f->is_pure, f->attrs);
+			return relax::Function(
+					Array<::tvm::Var>(params.begin(), params.end()), f->body, f->ret_ty, f->is_pure, f->attrs
+			);
 		}
 
 		/** @brief @p f without the results at @p positions (of its returned tuple). */
@@ -71,16 +73,22 @@ namespace mdl::backend::tvm {
 					}
 					std::vector<Expr> fields(tuple->fields.begin(), tuple->fields.end());
 					erase(fields, positions);
-					const Expr value = fields.size() == 1 ? fields.front() : Expr(::tvm::Tuple(Array<Expr>(fields.begin(), fields.end())));
+					const Expr value = fields.size() == 1
+											   ? fields.front()
+											   : Expr(::tvm::Tuple(Array<Expr>(fields.begin(), fields.end())));
 					result = ::tvm::Var(std::string(vb->var->name), relax::GetType(value));
 					bindings.push_back(relax::VarBinding(result, value));
 				}
-				blocks.push_back(block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
-																	  : relax::BindingBlock(bindings));
+				blocks.push_back(
+						block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
+															 : relax::BindingBlock(bindings)
+				);
 			}
 			if (!result.defined())
 				throw std::runtime_error("context pruning: the producer does not return a tuple");
-			return relax::Function(f->params, relax::SeqExpr(blocks, result), relax::GetType(result), f->is_pure, f->attrs);
+			return relax::Function(
+					f->params, relax::SeqExpr(blocks, result), relax::GetType(result), f->is_pure, f->attrs
+			);
 		}
 	} // namespace
 
@@ -159,10 +167,10 @@ namespace mdl::backend::tvm {
 		return changed;
 	}
 
-
 	namespace {
 		/** @brief The bindings of @p f that use @p v (by their values), and whether the function's result uses it. */
-		std::pair<std::vector<const relax::VarBindingNode*>, bool> usesOf(const relax::Function& f, const ::tvm::VarNode* v) {
+		std::pair<std::vector<const relax::VarBindingNode*>, bool>
+		usesOf(const relax::Function& f, const ::tvm::VarNode* v) {
 			std::vector<const relax::VarBindingNode*> uses;
 			const auto* seq = f->body.as<relax::SeqExprNode>();
 			if (seq == nullptr)
@@ -294,13 +302,17 @@ namespace mdl::backend::tvm {
 						result = ::tvm::Var(std::string(vb->var->name), relax::GetType(value));
 						bindings.push_back(relax::VarBinding(result, value));
 					}
-					blocks.push_back(block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
-																		  : relax::BindingBlock(bindings));
+					blocks.push_back(
+							block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
+																 : relax::BindingBlock(bindings)
+					);
 				}
 				mod->Update(
 						mod->GetGlobalVar(c.first),
-						relax::Function((*producer)->params, relax::SeqExpr(blocks, result), relax::GetType(result),
-										(*producer)->is_pure, (*producer)->attrs)
+						relax::Function(
+								(*producer)->params, relax::SeqExpr(blocks, result), relax::GetType(result),
+								(*producer)->is_pure, (*producer)->attrs
+						)
 				);
 			}
 			// The consumers read them through the inverse permutations.
@@ -309,7 +321,8 @@ namespace mdl::backend::tvm {
 				const auto positions = packedPositions(packing.at(c.second[i]).params);
 				auto params = f->params;
 				Array<relax::Binding> unpermute;
-				std::unordered_map<const void*, std::pair<::tvm::Var, std::vector<int64_t>>> permutedParams; // q -> (q', inverse)
+				std::unordered_map<const void*, std::pair<::tvm::Var, std::vector<int64_t>>>
+						permutedParams; // q -> (q', inverse)
 				auto bb = relax::BlockBuilder::Create(mod);
 				for (size_t k = 0; k < outPositions.size(); ++k) {
 					auto it = rewrites.find(outPositions[k]);
@@ -322,7 +335,9 @@ namespace mdl::backend::tvm {
 					const auto original = info->GetShape().value();
 					for (int64_t a : axes)
 						shape.push_back(original[a]);
-					const ::tvm::Var permuted(std::string(q->name), relax::TensorType(relax::ShapeExpr(shape), info->dtype));
+					const ::tvm::Var permuted(
+							std::string(q->name), relax::TensorType(relax::ShapeExpr(shape), info->dtype)
+					);
 					params.Set(positions[k], permuted);
 					std::vector<int64_t> inv(axes.size());
 					Array<int64_t> inverse;
@@ -330,7 +345,8 @@ namespace mdl::backend::tvm {
 						inv[axes[d]] = static_cast<int64_t>(d);
 					for (int64_t a : inv)
 						inverse.push_back(a);
-					unpermute.push_back(relax::VarBinding(q, bb->Normalize(permuteDims(permuted, inverse).cast<Expr>())));
+					unpermute.push_back(relax::VarBinding(q, bb->Normalize(permuteDims(permuted, inverse).cast<Expr>()))
+					);
 					permutedParams.emplace(q.get(), std::make_pair(permuted, inv));
 				}
 				// Permutations of them compose with the inverse (e.g. the same permutation as in the producer: the saved
@@ -356,11 +372,14 @@ namespace mdl::backend::tvm {
 							identity &= a == static_cast<int64_t>(d);
 							composed.push_back(a);
 						}
-						const Expr value = identity ? Expr(permuted) : bb->Normalize(permuteDims(permuted, composed).cast<Expr>());
+						const Expr value =
+								identity ? Expr(permuted) : bb->Normalize(permuteDims(permuted, composed).cast<Expr>());
 						bindings.push_back(relax::VarBinding(vb->var, value));
 					}
-					blocks.push_back(block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
-																		  : relax::BindingBlock(bindings));
+					blocks.push_back(
+							block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(bindings))
+																 : relax::BindingBlock(bindings)
+					);
 				}
 				mod->Update(
 						mod->GetGlobalVar(c.second[i]),

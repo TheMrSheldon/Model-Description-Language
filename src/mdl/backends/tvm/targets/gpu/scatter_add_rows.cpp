@@ -23,7 +23,8 @@ namespace mdl::backend::tvm::gpu {
 		constexpr int64_t kThreads = 256;
 
 		/** @brief `for i in [0, extent)` over blockIdx.x * kThreads + threadIdx.x (guarded). */
-		tirx::Stmt grid(const PrimExpr& extent, const std::string& name, const std::function<tirx::Stmt(PrimExpr)>& body) {
+		tirx::Stmt
+		grid(const PrimExpr& extent, const std::string& name, const std::function<tirx::Stmt(PrimExpr)>& body) {
 			const auto i64 = ::tvm::PrimType::Int(64);
 			::tvm::PrimVar bx(name + "_bx", i64), tx(name + "_tx", i64);
 			const PrimExpr threads = IntImm(i64, kThreads);
@@ -35,7 +36,9 @@ namespace mdl::backend::tvm::gpu {
 						tirx::IterVar(::tvm::Range(IntImm(v.ty(), 0), n), v, tirx::IterVarType::kThreadIndex, tag)
 				);
 			};
-			return bind(bx, blocks, "blockIdx.x", bind(tx, threads, "threadIdx.x", tirx::IfThenElse(i < extent, body(i))));
+			return bind(
+					bx, blocks, "blockIdx.x", bind(tx, threads, "threadIdx.x", tirx::IfThenElse(i < extent, body(i)))
+			);
 		}
 
 		tirx::PrimFunc kernel(::tvm::PrimType idsType) {
@@ -54,10 +57,11 @@ namespace mdl::backend::tvm::gpu {
 				// (a pointer: an Expr, not a PrimExpr)
 				const ::tvm::Expr address =
 						::tvm::Call(O.DataPointerType(), tirx::builtin::address_of(), {tirx::BufferLoad(O, {row, c})});
-				const PrimExpr atomic =
-						::tvm::Call(f32, tirx::builtin::call_extern(),
-									{::tvm::StringImm("atomicAdd"), address, tirx::BufferLoad(G, {k, c})})
-								.as_or_throw<PrimExpr>();
+				const PrimExpr atomic = ::tvm::Call(
+												f32, tirx::builtin::call_extern(),
+												{::tvm::StringImm("atomicAdd"), address, tirx::BufferLoad(G, {k, c})}
+				)
+												.as_or_throw<PrimExpr>();
 				return tirx::Evaluate(atomic);
 			});
 			auto body = ::tvm::s_tir::SBlockRealize(

@@ -14,7 +14,7 @@ namespace mdl::tvm_ported::dlight::gpu {
 #define MDL_DLIGHT_RULE(Name)                                                                                          \
 	class Name final : public GPUScheduleRule {                                                                        \
 	public:                                                                                                            \
-		std::optional<Schedule> apply(const PrimFunc& func, const Target& target, bool tunable) const override;       \
+		std::optional<Schedule> apply(const PrimFunc& func, const Target& target, bool tunable) const override;        \
 	};
 
 	/** @brief gpu/fallback.py: a fallback schedule rule for all GPU operators. */

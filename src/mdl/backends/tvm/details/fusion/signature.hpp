@@ -33,9 +33,9 @@ namespace mdl::backend::tvm::fusion {
 		enum class Layout { rows, columns };
 		Kind kind = Kind::opaque;
 		Layout layout = Layout::rows;
-		Domain out;	  ///< the result's domain
-		Domain space; ///< reduction: the kept dimensions (else `out`)
-		Domain full;  ///< reduction: the reduced input's domain (else `out`)
+		Domain out;		   ///< the result's domain
+		Domain space;	   ///< reduction: the kept dimensions (else `out`)
+		Domain full;	   ///< reduction: the reduced input's domain (else `out`)
 		bool view = false; ///< a reshape: free on its own (a view of its input), worth nothing in a group by itself
 	};
 

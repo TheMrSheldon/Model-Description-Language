@@ -3,13 +3,13 @@
 
 #include "../../../logging.hpp"
 #include "./aot.hpp"
+#include "./attention.hpp"
 #include "./flatten_injective.hpp"
 #include "./fusion/fusion.hpp"
-#include "./stack_sums.hpp"
-#include "./attention.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
+#include "./stack_sums.hpp"
 
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
@@ -54,7 +54,8 @@ namespace mdl::backend::tvm {
 						IRModule kernels = mod;
 						kernels.CopyOnWrite();
 						for (const auto& [gv, func] : mod->functions)
-							if (const auto* f = func.as<::tvm::tirx::PrimFuncNode>(); f && f->HasNonzeroAttr(kAOTEntryAttr))
+							if (const auto* f = func.as<::tvm::tirx::PrimFuncNode>();
+								f && f->HasNonzeroAttr(kAOTEntryAttr))
 								kernels->Remove(gv);
 						kernels = registeredPass("tirx.transform.CommonSubexprElim")(kernels);
 						IRModule result = mod; // (with its attributes, e.g. the system library prefix)
@@ -301,9 +302,7 @@ namespace mdl::backend::tvm {
 
 	IRModule afterPruning(IRModule mod, const ::tvm::Target& target) {
 		// (foldPermutesIntoAttention: whether the attention's row statistics are still used)
-		return runPasses(
-				mod, {RT::DeadCodeElimination({}), foldPermutesIntoAttention(), RT::Normalize()}, target
-		);
+		return runPasses(mod, {RT::DeadCodeElimination({}), foldPermutesIntoAttention(), RT::Normalize()}, target);
 	}
 
 	IRModule lowerRelax(IRModule mod, const Target& device, const mdl::CompileOptions& opts) {
@@ -348,7 +347,9 @@ namespace mdl::backend::tvm {
 		return lowerRelax(canonicalize(std::move(mod), target.tvm()), target, opts);
 	}
 
-	void buildObject(IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output) {
+	void buildObject(
+			IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output
+	) {
 		auto logger = mdl::log::getLogger("compiler");
 		const ::tvm::Target& tvmTarget = target.tvm();
 		mod = ::tvm::WithAttr(mod, ::tvm::attr::kSystemLibPrefix, ::tvm::ffi::String(systemLibPrefix));
@@ -382,16 +383,16 @@ namespace mdl::backend::tvm {
 			passes.push_back(std::move(p));
 		for (auto p : {
 					 registeredPass("tirx.transform.StorageRewrite"),
-				registeredPass("s_tir.transform.HoistIfThenElse"),
-				registeredPass("tirx.transform.UnrollLoop"),
-				registeredPass("s_tir.transform.RenormalizeSplitPattern"),
-				registeredPass("tirx.transform.StmtSimplify"),
-				registeredPass("tirx.transform.RemoveNoOp"),
-				registeredPass("s_tir.transform.RewriteUnsafeSelect"),
-				kernelSubexprElim(),
-				registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
-				registeredPass("tirx.transform.VerifyMemory"),
-				registeredPass("tirx.transform.AnnotateEntryFunc"),
+					 registeredPass("s_tir.transform.HoistIfThenElse"),
+					 registeredPass("tirx.transform.UnrollLoop"),
+					 registeredPass("s_tir.transform.RenormalizeSplitPattern"),
+					 registeredPass("tirx.transform.StmtSimplify"),
+					 registeredPass("tirx.transform.RemoveNoOp"),
+					 registeredPass("s_tir.transform.RewriteUnsafeSelect"),
+					 kernelSubexprElim(),
+					 registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
+					 registeredPass("tirx.transform.VerifyMemory"),
+					 registeredPass("tirx.transform.AnnotateEntryFunc"),
 			 })
 			passes.push_back(std::move(p));
 		for (auto& p : target.beforeSplit())

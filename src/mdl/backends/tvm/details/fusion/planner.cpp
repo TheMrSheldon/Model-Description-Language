@@ -18,7 +18,7 @@ namespace mdl::backend::tvm::fusion {
 		namespace relax = ::tvm::relax;
 		using Kind = Signature::Kind;
 
-		constexpr int kMaxRounds = 4;		   ///< of merging (scores change with the groups)
+		constexpr int kMaxRounds = 4;			 ///< of merging (scores change with the groups)
 		constexpr int64_t kSymbolicExtent = 128; ///< the estimate of a symbolic extent (for the scores only)
 
 		int64_t bytesOf(const ::tvm::Expr& e) {
@@ -35,15 +35,16 @@ namespace mdl::backend::tvm::fusion {
 		struct Node {
 			::tvm::Var var;
 			Signature signature;
-			std::vector<size_t> users;			 ///< nodes of the block that read the result
-			std::vector<::tvm::Var> reads;		 ///< the variables it reads
-			bool external = false;				 ///< the result is used after the block
+			std::vector<size_t> users;	   ///< nodes of the block that read the result
+			std::vector<::tvm::Var> reads; ///< the variables it reads
+			bool external = false;		   ///< the result is used after the block
 		};
 
 		/** @brief The nodes of a dataflow block, grouped by union-find. */
 		class Block {
 		public:
-			Block(const ::tvm::IRModule& mod, const relax::BindingBlock& block, const std::unordered_set<const void*>& usedAfter) {
+			Block(const ::tvm::IRModule& mod, const relax::BindingBlock& block,
+				  const std::unordered_set<const void*>& usedAfter) {
 				std::unordered_map<const void*, size_t> index;
 				for (const auto& b : block->bindings) {
 					const auto* vb = b.as<relax::VarBindingNode>();

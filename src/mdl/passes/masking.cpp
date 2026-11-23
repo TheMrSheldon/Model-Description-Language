@@ -419,7 +419,8 @@ namespace mdl::masking {
 					for (const auto& a : inv->arguments)
 						stack.push_back(&a.get());
 			}
-			throw MaskError{"a suffix mask needs a parameter whose shape starts with `...` (and that the function uses)"};
+			throw MaskError{"a suffix mask needs a parameter whose shape starts with `...` (and that the function uses)"
+			};
 		}
 	} // namespace
 

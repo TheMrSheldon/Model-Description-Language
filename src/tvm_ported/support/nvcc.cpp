@@ -199,8 +199,9 @@ using cuda::std::int64_t;
 
 			// Add user-provided options, filtering out nvcc-specific flags that nvrtc doesn't support
 			static const std::vector<std::string> nvcc_only_prefixes{
-					"-c", "-O", "-std", "--std", "-Xcompiler", "-Xlinker", "-Xarchive", "-Xcudafe", "-Xptxas",
-					"--compile", "--compiler-options", "--linker-options", "-fPIC", "-shared", "-o",
+					"-c",		 "-O",		 "-std",	"--std",	 "-Xcompiler",		   "-Xlinker",
+					"-Xarchive", "-Xcudafe", "-Xptxas", "--compile", "--compiler-options", "--linker-options",
+					"-fPIC",	 "-shared",	 "-o",
 			};
 			for (const auto& opt : options) {
 				bool skip = false;

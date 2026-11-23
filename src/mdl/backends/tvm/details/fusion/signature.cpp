@@ -39,7 +39,8 @@ namespace mdl::backend::tvm::fusion {
 		}
 
 		/** @brief The layout of the reductions: of which dimension the reduced reads' innermost index is (none: mixed). */
-		std::optional<Layout> reductionLayout(const ::tvm::s_tir::Schedule& sch, const std::vector<dl::analysis::SBlockInfo>& infos) {
+		std::optional<Layout>
+		reductionLayout(const ::tvm::s_tir::Schedule& sch, const std::vector<dl::analysis::SBlockInfo>& infos) {
 			bool rows = false, columns = false;
 			for (const auto& info : infos) {
 				if (!info.is_reduction())
@@ -70,7 +71,8 @@ namespace mdl::backend::tvm::fusion {
 		}
 
 		/** @brief The domain of the argument that the reduction to @p out reduces (rows: out is its prefix, columns: its suffix). */
-		std::optional<Domain> reducedDomain(const ::tvm::ffi::Array<::tvm::Expr>& args, const Domain& out, Layout layout) {
+		std::optional<Domain>
+		reducedDomain(const ::tvm::ffi::Array<::tvm::Expr>& args, const Domain& out, Layout layout) {
 			for (const auto& arg : args) {
 				const auto d = domainOf(arg);
 				if (!d || d->size() <= out.size())
