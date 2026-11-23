@@ -11,10 +11,12 @@
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <exception>
 #include <map>
 #include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -53,16 +55,16 @@ namespace mdl::backend::tvm {
 			);
 		}
 
-		std::optional<tirx::PrimFunc> flatten(const tirx::PrimFunc& func) {
-			// One block after inlining the elementwise producers (the kernels of TE computations: a root block whose
-			// children are the operations).
+		/** @brief @p func with its producers inlined (the kernels of TE computations: a root block whose children are the
+		 * operations; the results remain). */
+		std::optional<tirx::PrimFunc> inlined(const tirx::PrimFunc& func) {
+			const auto* realize = func->body.as<s_tir::SBlockRealizeNode>();
+			if (realize == nullptr)
+				return std::nullopt;
 			s_tir::Schedule sch = s_tir::Schedule::Concrete(
 					::tvm::IRModule({{::tvm::GlobalVar("main"), func}}), /*seed=*/0, /*debug_mask=*/0,
 					s_tir::ScheduleErrorRenderLevel::kNone
 			);
-			const auto* realize = func->body.as<s_tir::SBlockRealizeNode>();
-			if (realize == nullptr)
-				return std::nullopt;
 			const s_tir::SBlockRV root = sch->GetSBlock(realize->block->name_hint, ffi::String("main"));
 			for (bool progress = true; progress;) {
 				progress = false;
@@ -78,6 +80,111 @@ namespace mdl::backend::tvm {
 					}
 				}
 			}
+			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
+		}
+
+		/**
+		 * @brief The result blocks of a kernel with several results over the same domain (e.g. fused kernels that read
+		 * the same tensors) as one block with a store per result, in the loops of the first: one loop nest to schedule.
+		 */
+		std::optional<tirx::PrimFunc> mergeResults(const tirx::PrimFunc& func) {
+			const auto* rootRealize = func->body.as<s_tir::SBlockRealizeNode>();
+			const auto* seq = rootRealize ? rootRealize->block->body.as<tirx::SeqStmtNode>() : nullptr;
+			if (seq == nullptr || !rootRealize->block->alloc_buffers.empty())
+				return std::nullopt;
+			struct Nest {
+				std::vector<tirx::For> loops;
+				s_tir::SBlockRealize realize;
+			};
+			std::vector<Nest> nests;
+			for (const auto& stmt : seq->seq) {
+				Nest n;
+				tirx::Stmt body = stmt;
+				while (const auto* f = body.as<tirx::ForNode>()) {
+					n.loops.push_back(ffi::GetRef<tirx::For>(f));
+					body = f->body;
+				}
+				const auto* r = body.as<s_tir::SBlockRealizeNode>();
+				if (r == nullptr || r->block->init.has_value() || !r->block->alloc_buffers.empty() ||
+					r->block->iter_vars.size() != n.loops.size() || r->block->body.as<tirx::BufferStoreNode>() == nullptr)
+					return std::nullopt;
+				for (size_t d = 0; d < n.loops.size(); ++d)
+					if (r->block->iter_vars[d]->iter_type != tirx::kDataPar || !r->iter_values[d].same_as(n.loops[d]->loop_var))
+						return std::nullopt;
+				n.realize = ffi::GetRef<s_tir::SBlockRealize>(r);
+				nests.push_back(std::move(n));
+			}
+			::tvm::sym::Analyzer analyzer;
+			const Nest& first = nests.front();
+			ffi::Array<tirx::Stmt> stores;
+			ffi::Array<::tvm::TensorRegion> reads, writes;
+			for (const Nest& n : nests) {
+				if (n.loops.size() != first.loops.size())
+					return std::nullopt;
+				std::unordered_map<const void*, PrimExpr> vars;
+				for (size_t d = 0; d < n.loops.size(); ++d) {
+					if (!analyzer->CanProveEqual(n.loops[d]->extent, first.loops[d]->extent))
+						return std::nullopt;
+					vars.emplace(n.realize->block->iter_vars[d]->var.get(), first.realize->block->iter_vars[d]->var);
+				}
+				auto subst = [&](const PrimExpr& e) {
+					return tirx::SubstituteWithDataTypeLegalization(e, [&](const ::tvm::Var& v) -> ffi::Optional<PrimExpr> {
+						auto it = vars.find(v.get());
+						return it == vars.end() ? ffi::Optional<PrimExpr>() : ffi::Optional<PrimExpr>(it->second);
+					});
+				};
+				auto points = [&](const ffi::Array<::tvm::TensorRegion>& regions, ffi::Array<::tvm::TensorRegion>& into) {
+					for (const auto& r : regions) {
+						ffi::Array<PrimExpr> indices;
+						for (const auto& range : r->region) {
+							if (!::tvm::prim::is_one(range->extent))
+								return false;
+							indices.push_back(subst(range->min));
+						}
+						into.push_back(tirx::BufferRegionFromPoint(r->source.as_or_throw<tirx::BufferVar>(), indices));
+					}
+					return true;
+				};
+				if (!points(n.realize->block->reads, reads) || !points(n.realize->block->writes, writes))
+					return std::nullopt;
+				const auto* store = n.realize->block->body.as<tirx::BufferStoreNode>();
+				ffi::Array<PrimExpr> indices;
+				for (const auto& i : store->indices)
+					indices.push_back(subst(i));
+				stores.push_back(tirx::BufferStore(store->buffer, subst(store->value), indices));
+			}
+			auto block = first.realize->block;
+			auto* b = block.CopyOnWrite();
+			b->body = tirx::SeqStmt(stores);
+			b->reads = reads;
+			b->writes = writes;
+			auto realize = first.realize;
+			realize.CopyOnWrite()->block = block;
+			tirx::Stmt body = realize;
+			for (size_t d = first.loops.size(); d-- > 0;) {
+				auto loop = first.loops[d];
+				loop.CopyOnWrite()->body = body;
+				body = loop;
+			}
+			auto root = rootRealize->block;
+			root.CopyOnWrite()->body = body;
+			auto rr = ffi::GetRef<s_tir::SBlockRealize>(rootRealize);
+			rr.CopyOnWrite()->block = root;
+			auto result = func;
+			result.CopyOnWrite()->body = rr;
+			return result;
+		}
+
+		/** @brief @p func (inlined, one result block) as one flat loop; std::nullopt if not of that form. */
+		std::optional<tirx::PrimFunc> flatten(const tirx::PrimFunc& func) {
+			const auto* realize = func->body.as<s_tir::SBlockRealizeNode>();
+			if (realize == nullptr)
+				return std::nullopt;
+			s_tir::Schedule sch = s_tir::Schedule::Concrete(
+					::tvm::IRModule({{::tvm::GlobalVar("main"), func}}), /*seed=*/0, /*debug_mask=*/0,
+					s_tir::ScheduleErrorRenderLevel::kNone
+			);
+			const s_tir::SBlockRV root = sch->GetSBlock(realize->block->name_hint, ffi::String("main"));
 			const auto children = sch->GetChildBlocks(root);
 			if (children.size() != 1)
 				return std::nullopt;
@@ -93,7 +200,7 @@ namespace mdl::backend::tvm {
 			if (!rootBlock->alloc_buffers.empty() || block->iter_vars.size() < 2)
 				return std::nullopt; // (a single loop is already flat)
 
-			// The results (several: merged sibling kernels, fuseSiblings): each written at the iterators, in order.
+			// The results (several: mergeResults): each written at the iterators, in order.
 			std::vector<const tirx::BufferStoreNode*> stores;
 			if (const auto* seq = block->body.as<tirx::SeqStmtNode>()) {
 				for (const auto& s : seq->seq)
@@ -244,15 +351,21 @@ namespace mdl::backend::tvm {
 			if (prim == nullptr)
 				continue;
 			try {
-				if (auto flat = flatten(ffi::GetRef<tirx::PrimFunc>(prim)))
+				auto inl = inlined(ffi::GetRef<tirx::PrimFunc>(prim));
+				if (!inl)
+					continue;
+				const auto merged = mergeResults(*inl);
+				if (auto flat = flatten(merged.value_or(*inl)))
 					updates.emplace_back(gv, *flat);
+				else if (merged)
+					updates.emplace_back(gv, *merged);
 			} catch (const std::exception& e) {
 				logger->debug("flattenInjective skipped {}: {}", std::string(gv->name_hint), e.what());
 			}
 		}
 		for (auto& [gv, func] : updates)
 			kernels->Update(gv, func);
-		logger->info("Flattened {} injective kernel(s)", updates.size());
+		logger->info("Flattened or merged the results of {} injective kernel(s)", updates.size());
 		return kernels;
 	}
 

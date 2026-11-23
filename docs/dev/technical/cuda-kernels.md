@@ -6,8 +6,9 @@ For the kernel package format (manifests, patterns, expressions) see \ref spec_k
 
 A compiled model's GPU work comes from two sources:
 
-1. **Generated kernels**: TVM fuses the remaining operations into PrimFuncs (FuseOps/FuseTIR), which the CUDA target
-   schedules and compiles to CUDA C, then to a cubin with NVRTC at compile time. The cubin is embedded in the model's
+1. **Generated kernels**: the fusion planner groups the remaining operations and TVM's FuseTIR makes one PrimFunc per
+   group (see [optimization.md](optimization.md)). The CUDA target schedules them and compiles them to CUDA C, then
+   to a cubin with NVRTC at compile time. The cubin is embedded in the model's
    object file. Loading a model needs no compiler.
 2. **Kernel packages**: library calls (cuBLASLt, cuDNN) that the backend selects by pattern matching before fusion.
    From TVM's point of view these are `call_extern`s in host code.
@@ -22,9 +23,8 @@ current stream through the Python binding. Temporary buffers are offsets in one 
 | Attention fusion | `src/mdl/passes/attention.cpp` | softmax(QKᵀ·s + bias)·V → `ATTENTION*` builtins (target-independent) |
 | Kernel selection | `details/kernel_match.cpp`, `tvm.cpp` | Relax ops → package calls, in rounds; context pruning afterwards |
 | Legalization | `details/legalize.cpp`, `Target::overrideLegalizations` | remaining ops → TIR; the CUDA target overrides `mdl.scatter_add_rows` |
-| Row fusion | `details/fuse_rows.cpp` | reductions over the same rows, per-row values and full-shape elementwise ops → one group, possibly with several results (target-independent; before FuseTIR) |
-| Sibling fusion | `details/fuse_siblings.cpp` | independent elementwise kernels with the same result shape that read a common input → one kernel with several results (target-independent) |
-| Flattening | `details/flatten_injective.cpp` | injective kernels → one flat loop (target-independent) |
+| Fusion planner | `details/fusion/` | which kernel calls become one kernel: producers and consumers, readers of the same tensors, reductions over the same rows or columns, several results (target-independent; before FuseTIR) |
+| Merging and flattening | `details/flatten_injective.cpp` | the results of a kernel → one loop nest; injective kernels → one flat loop (target-independent) |
 | Scheduling | `targets/cuda.cpp` `CUDATarget::schedule` | schedule rules, first match wins (below) |
 | Lowering/emit | `CUDATarget::blockLowering/beforeSplit/emit` | TVM's default GPU TIR passes; CUDA C → NVRTC cubin → one `.o` |
 
@@ -104,7 +104,8 @@ reshape copies, broadcasts of trailing dimensions) into one loop over the result
 - Operands with the result's layout are read at `n`.
 - Trailing broadcasts are read at `n % P`.
 
-Blocks with several stores (merged sibling kernels) are flattened as well, as long as every store writes at the
+A kernel with several results over the same domain first becomes one block with a store per result (one loop nest,
+also when it cannot be flattened). Blocks with several stores are flattened as well, as long as every store writes at the
 iterators.
 
 Without this pass, splitting a fused loop over `[batch, seq, 3072]` with symbolic sizes costs several 64-bit

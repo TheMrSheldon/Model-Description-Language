@@ -87,8 +87,9 @@ endif()
 ##########################################################################################
 # Libraries and commands
 ##########################################################################################
-# Parts of TVM's Python package translated to C++ (mdl_tvm_ported, used by the CUDA target; see tvm_ported/README.md).
-if(MDL_ENABLE_COMPILER AND MDL_ENABLE_CUDA)
+# Parts of TVM's Python package translated to C++ (mdl_tvm_ported: DLight's schedule analysis, used by the fusion
+# planner and the targets; the CUDA target's code generation callbacks; see tvm_ported/README.md).
+if(MDL_ENABLE_COMPILER)
 	add_subdirectory(tvm_ported)
 endif()
 add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_profile (compiler)

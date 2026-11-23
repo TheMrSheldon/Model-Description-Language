@@ -111,7 +111,18 @@ namespace mdl::backend::tvm {
 				return ::tvm::prim::cast(dtype, *value);
 			}
 
-			Expr finish(const te::Tensor& out) {
+			Expr finish(te::Tensor out) {
+				// Relax's int64 extents (e.g. TOPI's kept dimensions of reductions are int32): the kernels that FuseTIR
+				// fuses agree on the buffers of the tensors they pass (an identity stage, inlined).
+				if (std::any_of(out->shape.begin(), out->shape.end(), [](const PrimExpr& d) { return d.ty() != ::tvm::PrimType::Int(64); })) {
+					Array<PrimExpr> shape;
+					for (const auto& d : out->shape)
+						shape.push_back(::tvm::prim::cast(::tvm::PrimType::Int(64), d));
+					const te::Tensor narrow = out;
+					out = te::compute(shape, [&](const Array<::tvm::PrimVar>& i) {
+						return narrow(Array<PrimExpr>(i.begin(), i.end()));
+					}, narrow->op->name + "_int64");
+				}
 				shapes.push_back(out->shape);
 				auto vars = unboundVars(shapes, scalars);
 				for (const auto& v : vars)
@@ -826,7 +837,35 @@ namespace mdl::backend::tvm {
 		map.Set("relax.reshape", wrap([](const BlockBuilder& bb, const Call& call) {
 					TECall te{bb, "reshape"};
 					auto x = te.tensor(call->args[0]);
-					return te.finish(topi::reshape(x, (call->args[1]).as_or_throw<ShapeExpr>()->values));
+					const auto shape = (call->args[1]).as_or_throw<ShapeExpr>()->values;
+					// Only unit dimensions inserted or removed: the same indices (topi::reshape divides by the
+					// symbolic extents, which keeps the reshape from being inlined into a fused kernel).
+					auto nonUnit = [](const Array<PrimExpr>& dims) {
+						Array<PrimExpr> r;
+						for (const auto& d : dims)
+							if (!::tvm::prim::is_one(d))
+								r.push_back(d);
+						return r;
+					};
+					const auto from = nonUnit(x->shape), to = nonUnit(shape);
+					::tvm::sym::Analyzer analyzer;
+					bool units = from.size() == to.size();
+					for (size_t i = 0; units && i < from.size(); ++i)
+						units = analyzer->CanProveEqual(from[i], to[i]);
+					if (!units)
+						return te.finish(topi::reshape(x, shape));
+					return te.finish(te::compute(shape, [&](const Array<::tvm::PrimVar>& i) {
+						Array<PrimExpr> index;
+						size_t k = 0;
+						auto next = [&]() -> PrimExpr {
+							while (::tvm::prim::is_one(shape[k]))
+								++k;
+							return i[k++];
+						};
+						for (const auto& d : x->shape)
+							index.push_back(::tvm::prim::is_one(d) ? PrimExpr(::tvm::IntImm(d.ty(), 0)) : next());
+						return x(index);
+					}, "T_reshape"));
 				}));
 		map.Set("relax.permute_dims", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::PermuteDimsAttrs>();

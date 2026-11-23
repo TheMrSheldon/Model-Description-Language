@@ -66,8 +66,12 @@ add_library(mdl
 	backends/tvm/details/schedule.cpp
 	backends/tvm/details/pipeline.cpp
 	backends/tvm/details/flatten_injective.cpp
-	backends/tvm/details/fuse_rows.cpp
-	backends/tvm/details/fuse_siblings.cpp
+	backends/tvm/details/fusion/duplicate_producers.cpp
+	backends/tvm/details/fusion/fusion.cpp
+	backends/tvm/details/fusion/materialize.cpp
+	backends/tvm/details/fusion/planner.cpp
+	backends/tvm/details/fusion/rules.cpp
+	backends/tvm/details/fusion/signature.cpp
 	backends/tvm/details/stack_sums.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
@@ -95,9 +99,6 @@ target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_D
 # The targets of the TVM backend (backends/tvm/targets/): CUDA only with MDL_ENABLE_CUDA (else unsupported). The CUDA
 # target combines host and device code into one object file with the linker (ld -r).
 if(MDL_ENABLE_CUDA)
-	# The GPU schedules, the tensor intrinsics, and the CUDA C code generation callbacks: parts of TVM's Python package
-	# translated to C++, kept separate in src/tvm_ported (see its README.md).
-	target_link_libraries(mdl PRIVATE mdl_tvm_ported)
 	target_sources(mdl PRIVATE backends/tvm/targets/cuda.cpp backends/tvm/targets/gpu/row_reduction.cpp
 		backends/tvm/targets/gpu/scatter_add_rows.cpp
 		backends/tvm/targets/gpu/column_reduction.cpp
@@ -106,6 +107,11 @@ if(MDL_ENABLE_CUDA)
 	set_source_files_properties(backends/tvm/targets/cuda.cpp PROPERTIES INCLUDE_DIRECTORIES "${tvm_SOURCE_DIR}/src")
 	target_compile_definitions(mdl PRIVATE MDL_WITH_CUDA=1 MDL_LINKER="${CMAKE_LINKER}")
 endif()
+# Parts of TVM's Python package translated to C++, kept separate in src/tvm_ported (see its README.md).
+target_link_libraries(mdl PRIVATE mdl_tvm_ported)
+# The fusion planner groups kernels with TVM's grouping of FuseOps (an internal of TVM; see fusion/materialize.cpp).
+set_source_files_properties(backends/tvm/details/fusion/materialize.cpp PROPERTIES INCLUDE_DIRECTORIES
+	"${tvm_SOURCE_DIR}/src;${tvm_SOURCE_DIR}/3rdparty/compiler-rt")
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)
 

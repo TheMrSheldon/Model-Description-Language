@@ -4,8 +4,7 @@
 #include "../../../logging.hpp"
 #include "./aot.hpp"
 #include "./flatten_injective.hpp"
-#include "./fuse_rows.hpp"
-#include "./fuse_siblings.hpp"
+#include "./fusion/fusion.hpp"
 #include "./stack_sums.hpp"
 #include "./attention.hpp"
 #include "./kernel_match.hpp"
@@ -317,19 +316,14 @@ namespace mdl::backend::tvm {
 				{
 						// Sums of tensors computed from a common one: one sum (reads it once).
 						stackSiblingSums(),
-						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
-						RT::AnnotateTIROpPattern(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
 						// Python in TVM 0.24 (constants were folded before the patterns).
-						RT::FuseOps(),
-						// Reductions over the same rows and their epilogue: one group (FuseOps: one reduction each).
-						fuseRows(),
+						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
+						// Which kernel calls become one kernel (fusion/), then those kernels.
+						fusion::fuseKernels(),
 						RT::FuseTIR(),
 						// The fallbacks of runtime guards, now fused: back into their branches.
 						inlineGuardFallbacks(),
-						// Independent elementwise kernels reading the same inputs: one kernel (FuseOps fuses only
-						// producers into consumers).
-						fuseSiblings(),
 						RT::DeadCodeElimination({}),
 				},
 				target

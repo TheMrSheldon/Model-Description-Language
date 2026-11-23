@@ -39,6 +39,7 @@ endif()
 # Compiler tests (passes, exports, backend, runtime).
 add_executable(tests
     mdl/computegraph/einops.cpp
+    mdl/backends/tvm_fusion.cpp
     mdl/backends/tvm_patterns.cpp
     mdl/kernels/packages.cpp
     mdl/passes/autodiff.cpp

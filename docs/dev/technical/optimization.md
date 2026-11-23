@@ -21,11 +21,9 @@ shape occurs.
 | Relax | Kernel selection (library calls) in rounds | `details/kernel_match.cpp`, `tvm.cpp` |
 | Relax | Context pruning, context layouts | `details/contexts.cpp` |
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
-| Relax | Producer–consumer fusion (TVM FuseOps/FuseTIR) | TVM |
 | Relax | Stacked sibling sums | `details/stack_sums.cpp` |
-| Relax | Row fusion | `details/fuse_rows.cpp` |
-| Relax | Sibling fusion | `details/fuse_siblings.cpp` |
-| TIR | Flattening of injective kernels | `details/flatten_injective.cpp` |
+| Relax | Fusion planner: which kernel calls become one kernel | `details/fusion/` (then TVM FuseTIR) |
+| TIR | Merging results, flattening injective kernels | `details/flatten_injective.cpp` |
 | TIR | Schedule rules (per target) | `targets/` |
 | AOT | Workspace arena, kernel CSE | `details/aot.cpp`, `details/pipeline.cpp` |
 
@@ -52,7 +50,7 @@ The masking pass turns a masked function into an unmasked one with explicit fill
 
 - **Element mask:** arbitrary booleans per element. The most general form.
 - **Suffix mask:** per-sequence lengths. The structure is known: everything after the length is masked. This allows
-  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding.
+  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding (see TODO).
 
 ## Gradients: save or recompute
 
@@ -134,37 +132,6 @@ The hidden `previous` parameter aliases the output buffer (`EntrySignature::alia
 There is no separate gradient buffer and no copy, and no special case in the backend: it is pattern matching on the
 graph.
 
-## Producer–consumer fusion
-
-TVM's FuseOps/FuseTIR fuse chains along data edges: elementwise ops into each other, and into the reductions they
-feed or follow (e.g. a cast into a sum). The resulting kernel's name lists the fused ops (e.g.
-`fused_rsqrt_multiply1`).
-
-## Sibling fusion
-
-FuseOps fuses only along producer–consumer edges. `fuseSiblings` merges independent `call_tir`s of injective kernels
-when all of these hold:
-
-- their results have the **same shape**;
-- they **read at least one common tensor**;
-- **neither depends on the other**. Every argument of the later call is computed before the earlier one, so the merged
-  call can take the earlier one's place.
-
-At most 8 kernels are merged into a group. The merged kernel:
-
-- loops once over the shared iteration space, with one block containing one store per result;
-- passes each shared argument once, so it is read once;
-- uses the first member's symbolic dimensions for every member's buffers (they have results of the same shape), so
-  later passes see one consistent layout;
-- returns a tuple, whose elements rebind the original result variables, so the rest of the function is unchanged.
-
-Typical siblings:
-
-- a recomputed forward value and its derivative, e.g. `gelu(h)` for a weight gradient and `gelu_backward(h, dy)`;
-- several elementwise results from the same activations, e.g. in normalization gradients.
-
-Reductions are handled by row fusion (below), not by sibling fusion.
-
 ## Stacked sibling sums
 
 Column sums to the same shape of tensors computed from a common one are rewritten as one sum over a stack:
@@ -176,29 +143,30 @@ result. Example: a normalization's `Σdy` and `Σ(dy·x̂)`.
   then reads `dy` once.
 - Bindings that use an earlier result move after the group, which is safe because dataflow bindings are pure.
 
-## Row fusion
+(This is to be replaced by the planner forming column groups, once ColumnReduction schedules several sums.)
 
-FuseOps puts at most one reduction into a group. A normalization or its gradient therefore becomes many kernels that
-read the same rows again and again. For example, LayerNorm backward,
-`dx = rstd·(g − mean(g) − x̂·mean(g·x̂))`, took five kernels.
+## Fusion planner
 
-`fuseRows` runs between FuseOps and FuseTIR. It groups the fused calls that work on the same rows:
+The planner (`details/fusion/`, inspired by PyTorch Inductor's scheduler) decides which legalized kernel calls
+become one kernel. It replaces TVM's FuseOps. FuseOps fuses only producers into consumers, puts at most one reduction
+into a group, never makes kernels with several results, and never duplicates a producer.
 
-- a reduction over the trailing dimensions L of `[rows…, L…]`, with result `[rows…]`;
-- further reductions over the same rows that read the group's inputs or results;
-- per-row computations on the results (shape `[rows…]`, up to unit dimensions);
-- full-shape elementwise computations of shape `[rows…, L…]`, e.g. `x − mean` between the mean and the variance.
+Its parts:
 
-A group is the longest prefix that ends with a full-shape epilogue:
+| Part | What it does |
+|---|---|
+| `signature` | The **loop signature** of a kernel call, from its PrimFunc's blocks (the same analysis as the schedule rules use) with domains from the Relax types: pointwise over D; reductions over rows or columns (kept dimensions, reduced input domain); an anchor (a reduction whose operands are read along different dimensions, e.g. a matrix product without a library kernel); or opaque (library calls, kernels marked `op_pattern` 8). Reshapes are pointwise **views**. |
+| `rules` | The contract with the targets' schedule rules: which groups one kernel computes. Pointwise groups store results of one domain. Reduction groups combine reductions over the same rows or columns with pointwise computations: rows store per-row results and full-row epilogues, columns per-column results, and nothing of the full domain follows a column reduction. An anchor takes pointwise consumers. Internal members may have any domain (they are inlined). Views never form a group alone and are never a group's result (they are free views on their own). |
+| `planner` | Per dataflow block: candidates are producer→consumer edges and consecutive readers of the same tensor. They are scored by the bytes a merge saves (intermediates that are no longer written and read, inputs read once) and merged greedily (union-find) while the rules hold and no group would depend on itself through another. |
+| `duplicate_producers` | Before planning: a cheap pointwise value whose readers could all contain it (e.g. the `erf` that GELU and its gradient share) is computed once per reader, along shared chains. Copies that are not fused are merged again. |
+| `materialize` | Groups → primitive functions, with TVM's grouping (`MakeGroupedFunctions`, as FuseOps' and FuseOpsByPattern's; the only use of TVM internals). A result that its group also uses is computed again at the end, so that every result is written by a trailing epilogue (the form the schedule rules expect). |
 
-- **Escaping results:** intermediate results used outside the group become further results, if they are elementwise.
-  Reductions stay internal. Each escaping result is computed again at the group's end, so all results are written by
-  trailing epilogues.
-- **Unit-dimension reshapes:** TVM's reshape kernel divides by symbolic sizes and is opaque. Inside a group it is
-  replaced by an elementwise kernel that maps the indices directly.
+FuseTIR then makes one PrimFunc per group. Target limits (row lengths, threads) are not part of the rules: a target's
+rule declines, and its fallback schedules the kernel.
 
-FuseTIR then produces one kernel per group. On GPUs, the RowReduction rule schedules it with a warp per row: all
-reductions first, then the epilogues, whose loops are merged so that they share the row loop.
+Results in BERT-base bf16 training on an A100: one kernel each for LayerNorm forward and backward, GELU and its
+gradient, the bias-gradient sums with their accumulation; 672 kernel launches per step (FuseOps and the earlier
+special passes: 816).
 
 ## Patterns must not duplicate work
 
@@ -210,12 +178,46 @@ would compute the shared value again. This holds for every pattern:
 - **GELU:** its gradient shares `erf(x/√2)` with it, which the graph's common-subexpression elimination already
   shares.
 
-In such cases the decomposed form stays, and the fusion passes turn it into as few kernels as before. Inference, where
+In such cases the decomposed form stays, and the fusion planner turns it into as few kernels as before. Inference, where
 nothing shares the intermediates, keeps the single operations.
 
-## Recomputing shared elementwise values
+# TIR level
 
-FuseOps does not duplicate a producer with several consumers, so a shared elementwise value (e.g. the `erf` above)
-would be written to memory and read back. Before row fusion, an elementwise value whose uses are all elementwise
-computations of its shape is computed in each of them. Sibling fusion then puts the consumers into one kernel, where
-the duplicate computation disappears (TIR CSE, or the CUDA compiler).
+## Merging results and flattening injective kernels
+
+`flattenInjective` (TIR, before scheduling, target-independent):
+
+- A kernel with several results over the same domain becomes one block with a store per result, in one loop nest. If
+  it cannot be flattened (e.g. transposes), it stays that one loop nest.
+- Injective kernels become one loop over the result's flat index: operands with the result's layout are read at `n`,
+  trailing broadcasts at `n % P`. This removes the 64-bit divisions of split loops over symbolic dimensions.
+- Reshapes that only insert or remove unit dimensions are legalized as direct index maps (not TOPI's reshape, which
+  divides by symbolic extents), so that they inline into fused kernels.
+
+## Schedule rules
+
+Each target schedules the kernels with an ordered list of rules, for the kinds of groups the planner forms (the
+contract in `fusion/rules.hpp`). Our rules are written for symbolic dimensions (batch, sequence):
+
+- **CUDA:** warp-per-row reductions (several reductions and epilogues), two-pass column reductions, vectorized
+  elementwise kernels, then DLight's rules; see \ref dev_cuda_kernels.
+- **CPU:** `applyDefaultCPUSchedule`.
+
+# AOT level
+
+- **Workspace arena:** all temporaries of a call are offsets in one arena, sized from the symbolic dimensions.
+  Offsets are bound as variables, so the size computation stays cheap.
+- **Kernel CSE:** common subexpressions are eliminated inside the generated kernels (TIR CSE). It runs on the kernels
+  only, not on the host code with its arena bindings.
+
+# Adding an optimization
+
+- Express it as a structural property of the graph (elementwise, reduction over an axis, a shared input, a known mask
+  structure), not as a model-specific rewrite.
+- Prefer target-independent passes. Put target-specific choices in the target (schedule rules, legalization
+  overrides) or in kernel packages (patterns).
+- Fusion: extend the planner's contract (`fusion/rules`) and the targets' schedule rules, not a new fusion pass.
+- A rewrite must be safe whenever it applies. If a fused form may be unsupported somewhere, keep a fallback, like the
+  attention expansion.
+- Verify with the test suite (`ctest`, including the planner's unit tests in `tests/mdl/backends/tvm_fusion.cpp`) and
+  with the benchmarks against PyTorch (`examples/02_transformer`, `scripts/benchmark_torch.py`).
