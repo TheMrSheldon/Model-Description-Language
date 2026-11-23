@@ -26,4 +26,14 @@ namespace mdl::backend::tvm {
 	 */
 	bool pruneContexts(::tvm::IRModule& mod, std::unordered_map<std::string, EntrySignature>& packing);
 
+	/**
+	 * @brief Saves a context tensor in the layout its producer uses it in: if the producer returns a value v that it
+	 * otherwise only permutes (p = permute(v)), and the consumers pass the tensor only to attention operations, the
+	 * producer returns p and the consumers read permute⁻¹(p). Both permutations then fold into the operations (e.g. the
+	 * attention writes its result in the layout of the output projection, and its gradient reads it through strides)
+	 * instead of a transposition kernel. The tensor's size is unchanged (the buffer's layout too).
+	 * @return whether a context tensor was changed (then fold the permutations: afterPruning).
+	 */
+	bool permuteContexts(::tvm::IRModule& mod, const std::unordered_map<std::string, EntrySignature>& packing);
+
 } // namespace mdl::backend::tvm

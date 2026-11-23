@@ -704,6 +704,8 @@ void mdl::backends::tvm::compileToFile(
 	const auto device = backend::makeTarget(opts);
 	const auto& target = device->tvm();
 	mod = backend::canonicalize(mod, target);
+	if (backend::permuteContexts(mod, packing)) // (saved in the layout their producer uses: the permutations fold)
+		mod = backend::afterPruning(mod, target);
 	dump(mod, "relax-match"); // the matching boundary of kernel packages (see docs/dev/spec/kernel-packages.md)
 	using Inspection = mdl::CompileOptions::KernelInspection;
 	if (opts.inspectKernels == Inspection::dump) {

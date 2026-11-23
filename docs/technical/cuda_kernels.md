@@ -177,6 +177,5 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 
 - Column sums of the same input (bias and LayerNorm-parameter gradients) are separate kernels, each reading the
   input again.
-- The attention head transpose in training (~4 ms per BERT-base step at 64×128).
 - CUDA graphs and a caller-provided workspace.
 - Unpadding of suffix-masked regions.

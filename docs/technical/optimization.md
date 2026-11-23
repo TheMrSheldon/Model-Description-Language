@@ -18,7 +18,7 @@ shape occurs.
 | Graph (frontend) | Gradients: what to save, what to recompute | `src/mdl/passes/autodiff.cpp` |
 | Relax | Canonicalization, CSE, permutation folding | `details/pipeline.cpp`, `details/permutations.cpp` |
 | Relax | Kernel selection (library calls) in rounds | `details/kernel_match.cpp`, `tvm.cpp` |
-| Relax | Context pruning | `details/contexts.cpp` |
+| Relax | Context pruning, context layouts | `details/contexts.cpp` |
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
 | Relax | Producer–consumer fusion (TVM FuseOps/FuseTIR) | TVM |
 | Relax | Row fusion | `details/fuse_rows.cpp` |
@@ -104,6 +104,21 @@ After selection, the context buffer between forward and backward is pruned to th
 reads. For example, once attention and its gradient are library calls, only the statistics remain, not the
 probabilities. Unused context outputs are removed from the producer and unused parameters from the consumer
 (`pruneContexts`), followed by dead-code elimination (`afterPruning`).
+
+### Context layouts
+
+`permuteContexts` runs once before kernel selection. A tensor is saved in the layout its producer uses it in when:
+
+- the forward pass returns a value `v` that it otherwise only permutes (`p = permute(v)`);
+- the consumers use it only in attention operations or permutations.
+
+The producer then returns `p`, and the consumers read `permute⁻¹(p)`. A consumer's own permutations compose with the
+inverse. The same permutation as the producer's cancels, so that use reads the saved tensor itself.
+
+Example: attention writes O head-first. The output projection reads it as `[batch, seq, heads, dim]`, the backward
+pass passes it to the attention gradient, and the weight gradient reads it transposed. Saving the transposed O lets
+cuDNN write it in that layout through strides, and the attention gradient reads it through strides. The transpose
+kernel disappears in both passes. The tensor's size, and so the buffer layout, is unchanged.
 
 ### In-place gradient accumulation
 
