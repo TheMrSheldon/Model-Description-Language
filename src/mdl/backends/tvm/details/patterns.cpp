@@ -210,13 +210,6 @@ namespace mdl::backend::tvm {
 					!lastDimEquals(in, *n) || !near(at(n2), *n) || !epsilon || !isVectorOverLastDim(m.at(gamma), in) ||
 					!isVectorOverLastDim(m.at(beta), in))
 					return call;
-				// Not if the intermediate values are used elsewhere (e.g. saved for the gradient): the normalization would
-				// be computed twice (row fusion fuses the decomposed form into one kernel instead).
-				if (patternUses(m.at(xc)) > 2)
-					return call;
-				for (const auto& p : {sumX, meanX, mu, sq, sumSq, meanSq, var, varEps, s, xhat, scaled})
-					if (patternUses(m.at(p)) > 1)
-						return call;
 				static const auto layerNorm = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.layer_norm");
 				return layerNorm(in, m.at(gamma), m.at(beta), Array<int64_t>{-1}, *epsilon, true, true).cast<Expr>();
 			};

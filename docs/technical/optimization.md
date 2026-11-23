@@ -189,47 +189,20 @@ reductions first, then the epilogues, whose loops are merged so that they share 
 
 ### Patterns must not duplicate work
 
-A pattern that replaces a subgraph by one operation (e.g. `layer_norm`) checks that the subgraph's intermediate values
-have no other users (`patternUses`). In training, the mean, `x − mean`, `rstd` and `x̂` are saved for the backward
-pass. Replacing only the output with `layer_norm` would compute the normalization twice. There, the decomposed form
-stays, and row fusion turns it into one kernel that writes the output and the saved values.
+`applyPatterns` does not rewrite a match whose intermediate values have users outside the match
+(`sharesIntermediates`). Intermediate values are matched operations other than the root. The replacing operation
+would compute the shared value again. This holds for every pattern:
 
-## TIR level
+- **LayerNorm:** in training, the mean, `x − mean`, `rstd` and `x̂` are saved for the backward pass.
+- **GELU:** its gradient shares `erf(x/√2)` with it, which the graph's common-subexpression elimination already
+  shares.
 
-### Flattening injective kernels
+In such cases the decomposed form stays, and the fusion passes turn it into as few kernels as before. Inference, where
+nothing shares the intermediates, keeps the single operations.
 
-Elementwise kernels, casts, reshape copies and trailing broadcasts are rewritten into one loop over the flat result
-index `n`:
+### Recomputing shared elementwise values
 
-- operands with the result's layout are read at `n`;
-- trailing broadcasts (e.g. a bias) are read at `n % P`.
-
-This removes the 64-bit divisions that fusing and splitting loops over symbolic dimensions would otherwise cost per
-element. Merged sibling kernels, with several stores, are flattened as well.
-
-### Schedule rules
-
-Each target schedules the remaining kernels with an ordered list of rules. Our rules are written for symbolic
-dimensions (batch, sequence):
-
-- **CUDA:** warp-per-row reductions, two-pass column reductions, vectorized elementwise kernels; see
-  [cuda_kernels.md](cuda_kernels.md).
-- **CPU:** `applyDefaultCPUSchedule`.
-
-## AOT level
-
-- **Workspace arena:** all temporaries of a call are offsets in one arena, sized from the symbolic dimensions.
-  Offsets are bound as variables, so the size computation stays cheap.
-- **Kernel CSE:** common subexpressions are eliminated inside the generated kernels (TIR CSE). It runs on the kernels
-  only, not on the host code with its arena bindings.
-
-## Adding an optimization
-
-- Express it as a structural property of the graph (elementwise, reduction over an axis, a shared input, a known mask
-  structure), not as a model-specific rewrite.
-- Prefer target-independent passes. Put target-specific choices in the target (schedule rules, legalization
-  overrides) or in kernel packages (patterns).
-- A rewrite must be safe whenever it applies. If a fused form may be unsupported somewhere, keep a fallback, like the
-  attention expansion.
-- Verify with the test suite (`ctest`) and with the benchmarks against PyTorch (`examples/02_transformer`,
-  `scripts/benchmark_torch.py`).
+FuseOps does not duplicate a producer with several consumers, so a shared elementwise value (e.g. the `erf` above)
+would be written to memory and read back. Before row fusion, an elementwise value whose uses are all elementwise
+computations of its shape is computed in each of them. Sibling fusion then puts the consumers into one kernel, where
+the duplicate computation disappears (TIR CSE, or the CUDA compiler).

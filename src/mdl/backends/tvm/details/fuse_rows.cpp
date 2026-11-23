@@ -121,7 +121,8 @@ namespace mdl::backend::tvm {
 
 		class RowFuser {
 		public:
-			explicit RowFuser(::tvm::IRModule mod) : mod(mod), builder(relax::BlockBuilder::Create(mod)) {}
+			enum class Mode { rows, inlineShared };
+			RowFuser(::tvm::IRModule mod, Mode mode) : mod(mod), builder(relax::BlockBuilder::Create(mod)), mode(mode) {}
 
 			::tvm::IRModule run() {
 				std::vector<std::pair<::tvm::GlobalVar, relax::Function>> functions, updates;
@@ -134,14 +135,21 @@ namespace mdl::backend::tvm {
 				mod = builder->GetContextIRModule();
 				for (const auto& [gv, f] : updates)
 					mod->Update(gv, f);
-				mdl::log::getLogger("compiler")->info("Fused {} group(s) of row kernels", groups);
+				if (mode == Mode::rows)
+					mdl::log::getLogger("compiler")->info("Fused {} group(s) of row kernels", groups);
+				else
+					mdl::log::getLogger("compiler")->info("Recomputed {} shared elementwise value(s) in their consumers", groups);
 				return mod;
 			}
 
 		private:
 			::tvm::IRModule mod;
 			relax::BlockBuilder builder;
+			Mode mode;
 			size_t groups = 0;
+
+			/** @brief A function of the module, also one added by this pass. */
+			::tvm::BaseFunc lookup(const ::tvm::GlobalVar& gv) const { return builder->GetContextIRModule()->Lookup(gv); }
 
 			static int patternOf(const ::tvm::BaseFunc& f) {
 				if (f->attrs.defined())
@@ -167,13 +175,14 @@ namespace mdl::backend::tvm {
 					const auto* gv = call->args[0].as<::tvm::GlobalVarNode>();
 					if (gv == nullptr || call->args.size() != 2)
 						return std::nullopt;
-					s.pattern = patternOf(mod->Lookup(ffi::GetRef<::tvm::GlobalVar>(gv)));
+					s.pattern = patternOf(lookup(ffi::GetRef<::tvm::GlobalVar>(gv)));
 					for (const auto& a : call->args[1].as_or_throw<relax::Tuple>()->fields)
 						s.args.push_back(a);
 				} else if (const auto* gv = call->op.as<::tvm::GlobalVarNode>()) {
-					const auto* f = mod->Lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as<relax::FunctionNode>();
-					if (f == nullptr || !f->HasNonzeroAttr(relax::attr::kPrimitive))
+					const auto fn = lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as<relax::Function>();
+					if (!fn || !(*fn)->HasNonzeroAttr(relax::attr::kPrimitive))
 						return std::nullopt;
+					const auto& f = *fn;
 					s.pattern = 0;
 					for (const auto& block : f->body.as_or_throw<relax::SeqExpr>()->blocks)
 						for (const auto& b : block->bindings) {
@@ -186,7 +195,7 @@ namespace mdl::backend::tvm {
 								continue;
 							}
 							s.pattern = std::max(
-									s.pattern, patternOf(mod->Lookup(c->args[0].as_or_throw<::tvm::GlobalVar>()))
+									s.pattern, patternOf(lookup(c->args[0].as_or_throw<::tvm::GlobalVar>()))
 							);
 						}
 					for (const auto& a : call->args)
@@ -247,8 +256,63 @@ namespace mdl::backend::tvm {
 				return relax::Function(f->params, relax::SeqExpr(blocks, seq->body), f->ret_ty, f->is_pure, f->attrs);
 			}
 
+			/**
+			 * @brief An elementwise value whose uses are all elementwise computations of its shape: computed in each of
+			 * them (FuseOps does not duplicate a producer with several consumers; e.g. the `erf` that GELU and its
+			 * gradient share would be written and read again). The consumers usually become one kernel then (sibling
+			 * fusion), where common subexpression elimination computes the value once.
+			 */
+			std::optional<relax::BindingBlock>
+			inlineShared(const relax::BindingBlock& block, const std::unordered_map<const void*, size_t>& uses) {
+				const auto& bindings = block->bindings;
+				std::vector<std::optional<Site>> sites;
+				for (const auto& b : bindings)
+					sites.push_back(site(b));
+				std::map<size_t, size_t> producerOf; // consumer -> producer
+				std::unordered_set<size_t> producers;
+				for (size_t i = 0; i < bindings.size(); ++i) {
+					if (!sites[i] || sites[i]->pattern > kInjective || reducedRow(*sites[i]))
+						continue;
+					const void* v = bindings[i]->var.get();
+					auto u = uses.find(v);
+					if (u == uses.end() || u->second < 2)
+						continue;
+					std::vector<size_t> consumers;
+					for (size_t j = i + 1; j < bindings.size(); ++j)
+						if (usesVar(bindings[j], v))
+							consumers.push_back(j);
+					bool ok = consumers.size() == u->second;
+					for (size_t j : consumers)
+						ok &= sites[j] && sites[j]->pattern <= kInjective && !reducedRow(*sites[j]) &&
+							  !producerOf.contains(j) && !producers.contains(j) && equal(sites[j]->shape, sites[i]->shape);
+					if (!ok)
+						continue;
+					producers.insert(i);
+					for (size_t j : consumers)
+						producerOf.emplace(j, i);
+				}
+				if (producers.empty())
+					return std::nullopt;
+				ffi::Array<relax::Binding> result;
+				for (size_t i = 0; i < bindings.size(); ++i) {
+					if (producers.contains(i))
+						continue;
+					auto it = producerOf.find(i);
+					if (it == producerOf.end()) {
+						result.push_back(bindings[i]);
+						continue;
+					}
+					for (const auto& b : fuse(bindings, {it->second, i}, {}))
+						result.push_back(b);
+				}
+				groups += producers.size();
+				return relax::BindingBlock(relax::DataflowBlock(result));
+			}
+
 			std::optional<relax::BindingBlock>
 			rewrite(const relax::BindingBlock& block, const std::unordered_map<const void*, size_t>& uses) {
+				if (mode == Mode::inlineShared)
+					return inlineShared(block, uses);
 				const auto& bindings = block->bindings;
 				std::vector<std::optional<Site>> sites;
 				for (const auto& b : bindings)
@@ -410,7 +474,7 @@ namespace mdl::backend::tvm {
 					Expr value;
 					if (const auto* gv = call->op.as<::tvm::GlobalVarNode>()) {
 						// A group of FuseOps: its bindings, with fresh variables (a function may be called twice).
-						auto callee = relax::CopyWithNewVars(mod->Lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as_or_throw<relax::Function>());
+						auto callee = relax::CopyWithNewVars(lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as_or_throw<relax::Function>());
 						ffi::Map<::tvm::Var, Expr> inner;
 						for (size_t p = 0; p < callee->params.size(); ++p)
 							inner.Set(callee->params[p], argument(call->args[p]));
@@ -493,7 +557,10 @@ namespace mdl::backend::tvm {
 
 	::tvm::transform::Pass fuseRows() {
 		return ::tvm::transform::CreateModulePass(
-				[](::tvm::IRModule mod, ::tvm::transform::PassContext) { return RowFuser(std::move(mod)).run(); }, 0,
+				[](::tvm::IRModule mod, ::tvm::transform::PassContext) {
+					mod = RowFuser(std::move(mod), RowFuser::Mode::inlineShared).run();
+					return RowFuser(std::move(mod), RowFuser::Mode::rows).run();
+				}, 0,
 				"mdl.FuseRows", {}
 		);
 	}

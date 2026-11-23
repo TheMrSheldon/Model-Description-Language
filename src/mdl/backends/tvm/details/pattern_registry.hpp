@@ -41,12 +41,22 @@ namespace mdl::backend::tvm {
 
 	/**
 	 * @brief During applyPatterns: the number of bindings of the current function that use @p e (a variable, or the
-	 * value bound to one; else 0). A rewriter that replaces a whole subgraph by one operation checks with this that the subgraph's
-	 * intermediate values are not used elsewhere (they would be computed twice).
+	 * value bound to one; else 0).
 	 */
 	size_t patternUses(const ::tvm::relax::Expr& e);
 
-	/** @brief Applies the patterns (in order) to every Relax function of the module. */
+	/**
+	 * @brief Whether an intermediate value of the match @p m of @p root (a matched operation other than the root) is
+	 * also used outside the match. applyPatterns does not rewrite such matches: the replacing operation would compute
+	 * the shared value again (e.g. a normalization whose mean and variance are saved for the gradient, or GELU whose
+	 * `erf` its gradient shares); the decomposed form stays and is fused instead.
+	 */
+	bool sharesIntermediates(
+			const ::tvm::relax::DFPattern& root, const ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr>& m
+	);
+
+	/** @brief Applies the patterns (in order) to every Relax function of the module (not to matches that share
+	 * intermediate values, see sharesIntermediates). */
 	::tvm::IRModule applyPatterns(::tvm::IRModule mod, const std::vector<PatternEntry>& entries);
 
 	/**

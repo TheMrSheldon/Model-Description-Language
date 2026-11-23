@@ -17,6 +17,9 @@ namespace mdl::backend::tvm {
 	 * @details FuseOps puts at most one reduction into a group, so e.g. the gradient of a normalization, dx = rstd *
 	 * (g - mean(g) - x̂ * mean(g * x̂)), takes five kernels. Only intermediate results that are not used outside the
 	 * group are fused (the epilogue's result is the group's result). Target-independent.
+	 * Before the groups: an elementwise value whose uses are all elementwise computations of its shape is computed in
+	 * each of them (FuseOps does not duplicate a producer with several consumers); sibling fusion then usually makes
+	 * one kernel of the consumers.
 	 */
 	::tvm::transform::Pass fuseRows();
 } // namespace mdl::backend::tvm
