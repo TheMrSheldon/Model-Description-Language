@@ -39,6 +39,13 @@ namespace mdl::backend::tvm {
 		RewriterFn rewriter;			 ///< called on every successful match
 	};
 
+	/**
+	 * @brief During applyPatterns: the number of bindings of the current function that use @p e (a variable, or the
+	 * value bound to one; else 0). A rewriter that replaces a whole subgraph by one operation checks with this that the subgraph's
+	 * intermediate values are not used elsewhere (they would be computed twice).
+	 */
+	size_t patternUses(const ::tvm::relax::Expr& e);
+
 	/** @brief Applies the patterns (in order) to every Relax function of the module. */
 	::tvm::IRModule applyPatterns(::tvm::IRModule mod, const std::vector<PatternEntry>& entries);
 

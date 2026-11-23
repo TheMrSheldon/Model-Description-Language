@@ -60,17 +60,25 @@ namespace mdl::backend::tvm::gpu {
 			kind.find_first_not_of('R', numLeadingS) != std::string::npos)
 			return std::nullopt;
 		const size_t numTrailingR = kind.size() - numLeadingS;
-		const bool epilogue = (*infos).back().is_injective();
-		const size_t numReductions = infos->size() - (epilogue ? 1 : 0);
+		// (several epilogues: further results of the same rows, e.g. values saved for a gradient; per row or of the
+		// last epilogue's shape)
+		size_t numReductions = 0;
+		while (numReductions < infos->size() && !(*infos)[numReductions].is_injective())
+			++numReductions;
 		if (numReductions == 0)
 			return std::nullopt;
+		for (size_t b = numReductions; b < infos->size(); ++b) {
+			const size_t rank = (*infos)[b].dom_kind().size();
+			if (!(*infos)[b].is_injective() || (rank != kind.size() && (rank != numLeadingS || b + 1 == infos->size())))
+				return std::nullopt;
+		}
 		::tvm::sym::Analyzer analyzer;
 		std::vector<PrimExpr> rowDoms, rowLengthDoms;
 		for (size_t i = 0; i < kind.size(); ++i)
 			(i < numLeadingS ? rowDoms : rowLengthDoms).push_back((*infos)[0].iters[i].dom);
 		for (size_t b = 0; b < infos->size(); ++b) {
 			const auto& info = (*infos)[b];
-			if (b < numReductions ? info.dom_kind() != kind : info.dom_kind().size() != kind.size())
+			if (b < numReductions && info.dom_kind() != kind)
 				return std::nullopt;
 			for (size_t i = 0; i < numLeadingS; ++i)
 				if (!analyzer->CanProveEqual(info.iters[i].dom, rowDoms[i]))
@@ -122,10 +130,40 @@ namespace mdl::backend::tvm::gpu {
 			size_t numTrailingR, size_t numReductions
 	) {
 		const auto* infos = &infos_;
+		// Several epilogues: in the loops of the last one (merged level by level; per-row results share the row loops).
+		{
+			const SBlockRV lastBlock = infos->back().block_rv;
+			const auto lastLoops = sch->GetLoops(lastBlock);
+			const size_t depth = lastLoops.size();
+			::tvm::sym::Analyzer analyzer;
+			auto sameLoops = [&](const SBlockRV& block) { // (the extents of the last epilogue's loops)
+				const auto loops = sch->GetLoops(block);
+				if (loops.size() != depth)
+					return false;
+				for (size_t d = 0; d < depth; ++d)
+					if (!analyzer->CanProveEqual(sch->Get(loops[d])->extent, sch->Get(lastLoops[d])->extent))
+						return false;
+				return true;
+			};
+			std::vector<SBlockRV> full, perRow;
+			for (size_t b = numReductions; b + 1 < infos->size(); ++b)
+				(sameLoops((*infos)[b].block_rv) ? full : perRow).push_back((*infos)[b].block_rv);
+			full.push_back(lastBlock);
+			if (full.size() > 1)
+				for (size_t d = 0; d < depth; ++d) {
+					Array<LoopRV> level;
+					for (const auto& block : full)
+						level.push_back(sch->GetLoops(block)[d]);
+					sch->Merge(level);
+				}
+			for (const auto& block : perRow)
+				for (size_t d = 0; d < numLeadingS; ++d)
+					sch->Merge({sch->GetLoops(block)[d], sch->GetLoops(lastBlock)[d]});
+		}
 		// The last block: rows over blocks, the row over the warp (threadIdx.x). Several rows per block (threadIdx.y)
 		// only for a single reduction: the intermediate results of several (e.g. the maximum and the sum of softmax)
 		// are computed per row, whose region compute_at can only determine exactly for one row per block.
-		const int64_t rowsPerBlock = infos->size() == 1 ? kRowsPerBlock : 1;
+		const int64_t rowsPerBlock = infos->size() == 1 ? kRowsPerBlock : 1; // (several epilogues: several blocks)
 		const SBlockRV last = infos->back().block_rv;
 		auto loops = sch->GetLoops(last);
 		const LoopRV row = sch->Fuse(Array<LoopRV>(loops.begin(), loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS)));
@@ -141,7 +179,8 @@ namespace mdl::backend::tvm::gpu {
 		}
 		const auto split = sch->Split(col, factors(std::nullopt, kWarp));
 		const LoopRV colOuter = split[0], tx = split[1];
-		sch->Reorder(rowsPerBlock > 1 ? Array<LoopRV>{bx, at, tx, colOuter} : Array<LoopRV>{bx, tx, colOuter});
+		// (one row per block: the row loop is outermost already, and may hold per-row epilogues besides the columns)
+		sch->Reorder(rowsPerBlock > 1 ? Array<LoopRV>{bx, at, tx, colOuter} : Array<LoopRV>{tx, colOuter});
 		sch->Bind(bx, "blockIdx.x");
 		sch->Bind(tx, "threadIdx.x");
 

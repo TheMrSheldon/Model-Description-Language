@@ -256,6 +256,7 @@ namespace mdl::backend::tvm {
 
 				std::vector<bool> taken(bindings.size(), false);
 				std::map<size_t, std::vector<size_t>> groupAt; // last member -> members
+				std::map<size_t, std::vector<size_t>> escapingAt; // last member -> further results (indices into members)
 				for (size_t i = 0; i < bindings.size(); ++i) {
 					if (!sites[i] || taken[i])
 						continue;
@@ -296,30 +297,44 @@ namespace mdl::backend::tvm {
 						for (const auto& a : s.args)
 							inputs.insert(a.get());
 					}
-					// The longest prefix that ends with an elementwise epilogue and whose other results are only used in
-					// the prefix (the epilogue's result is the group's result).
-					auto internalUpTo = [&](size_t end) { // members [0, end] with the result of `end`
+					// The longest prefix that ends with an elementwise epilogue (the group's result). Other results used
+					// outside the prefix are further results of the group if they are elementwise (computed again at its
+					// end, so that all results are written by its epilogues; reductions stay internal).
+					const std::unordered_set<size_t> members(group.begin(), group.end());
+					auto escapingUpTo = [&](size_t end) -> std::optional<std::vector<size_t>> {
 						std::unordered_map<const void*, size_t> inGroup;
 						for (size_t k = 0; k <= end; ++k)
 							for (const auto& a : sites[group[k]]->args)
 								++inGroup[a.get()];
+						std::vector<size_t> escaping;
 						for (size_t k = 0; k < end; ++k) {
 							const void* v = bindings[group[k]]->var.get();
 							auto it = uses.find(v);
-							if (it == uses.end() || it->second != inGroup[v])
-								return false;
+							if (it != uses.end() && it->second == inGroup[v])
+								continue;
+							if (sites[group[k]]->pattern > kInjective || reducedRow(*sites[group[k]]))
+								return std::nullopt;
+							// (its other uses follow the group, which is computed in place of its last member)
+							for (size_t j = group[k] + 1; j < group[end]; ++j)
+								if (!members.contains(j) && usesVar(bindings[j], v))
+									return std::nullopt;
+							escaping.push_back(k);
 						}
-						return true;
+						return escaping;
 					};
 					size_t end = group.size();
+					std::optional<std::vector<size_t>> escaping;
 					while (end-- > 0)
-						if (full[end] && internalUpTo(end))
+						if (full[end] && (escaping = escapingUpTo(end)))
 							break;
 					if (end >= group.size() || end < 2)
 						continue; // (one reduction and its epilogue: FuseOps fuses them already)
 					group.resize(end + 1);
 					for (size_t m : group)
 						taken[m] = true;
+					// (the per-row results first: the full-shape epilogue is the last block)
+					std::stable_sort(escaping->begin(), escaping->end(), [&](size_t a, size_t b) { return !full[a] && full[b]; });
+					escapingAt.emplace(group.back(), std::move(*escaping));
 					groupAt.emplace(group.back(), std::move(group));
 				}
 				if (groupAt.empty())
@@ -333,14 +348,18 @@ namespace mdl::backend::tvm {
 							result.push_back(bindings[i]);
 						continue;
 					}
-					result.push_back(fuse(bindings, it->second));
+					for (const auto& b : fuse(bindings, it->second, escapingAt.at(i)))
+						result.push_back(b);
 					++groups;
 				}
 				return relax::BindingBlock(relax::DataflowBlock(result));
 			}
 
 			/** @brief One primitive function of the members, called in place of the last one. */
-			relax::Binding fuse(const ffi::Array<relax::Binding>& bindings, const std::vector<size_t>& members) {
+			std::vector<relax::Binding> fuse(
+					const ffi::Array<relax::Binding>& bindings, const std::vector<size_t>& members,
+					const std::vector<size_t>& escaping
+			) {
 				std::unordered_set<const void*> internal;
 				for (size_t m : members)
 					internal.insert(bindings[m]->var.get());
@@ -375,7 +394,17 @@ namespace mdl::backend::tvm {
 				auto bb = relax::BlockBuilder::Create(std::nullopt);
 				bb->BeginDataflowBlock();
 				Expr last;
+				std::vector<Expr> defining(members.size()); // per member: the computation of its result
+				ffi::Array<Expr> results;
 				for (size_t k = 0; k < members.size(); ++k) {
+					if (k + 1 == members.size())
+						for (size_t e : escaping) { // (computed again: written by an epilogue)
+							const auto* c = defining[e].as<::tvm::CallNode>();
+							results.push_back(bb->EmitOutput(
+									::tvm::Call(c->ty, c->op, c->args, c->attrs, c->ty_args),
+									std::string(bindings[members[e]]->var->name)
+							));
+						}
 					const auto* vb = bindings[members[k]].as<relax::VarBindingNode>();
 					const auto* call = vb->value.as<::tvm::CallNode>();
 					Expr value;
@@ -392,7 +421,10 @@ namespace mdl::backend::tvm {
 						for (const auto& block : calleeSeq->blocks)
 							for (const auto& b : block->bindings) {
 								const auto* ib = b.as<relax::VarBindingNode>();
-								inner.Set(ib->var, bb->Emit(relax::Bind(ib->value, inner), std::string(ib->var->name)));
+								const Expr bound = relax::Bind(ib->value, inner);
+								if (ib->var.same_as(calleeSeq->body))
+									defining[k] = bound;
+								inner.Set(ib->var, bb->Emit(bound, std::string(ib->var->name)));
 							}
 						value = relax::Bind(calleeSeq->body, inner);
 					} else if (site(bindings[members[k]])->unitReshape) {
@@ -411,22 +443,46 @@ namespace mdl::backend::tvm {
 							fields.push_back(argument(a));
 						value = ::tvm::Call(call->ty, call->op, {call->args[0], relax::Tuple(fields)}, call->attrs, call->ty_args);
 					}
+					if (!defining[k].defined())
+						defining[k] = value;
 					if (k + 1 < members.size()) {
 						remap.Set(vb->var, bb->Emit(value, std::string(vb->var->name)));
 					} else {
 						last = bb->EmitOutput(value, std::string(vb->var->name));
 					}
 				}
+				results.push_back(last);
 				const auto block = bb->EndBlock();
-				const Expr body = bb->Normalize(relax::SeqExpr({block}, last));
+				const Expr body = bb->Normalize(relax::SeqExpr({block}, results.size() == 1 ? last : Expr(relax::Tuple(results))));
 				ffi::Map<ffi::String, ffi::Any> attrs;
 				attrs.Set(relax::attr::kPrimitive, true);
 				const relax::Function function(params, body, std::nullopt, true, ::tvm::DictAttrs(attrs));
 				const auto gv = builder->AddFunction(function, "fused_rows");
 				const auto& lastBinding = bindings[members.back()];
-				return relax::VarBinding(
-						lastBinding->var, ::tvm::Call(relax::GetType(lastBinding->var), gv, args, ::tvm::Attrs(), {})
-				);
+				if (escaping.empty())
+					return {relax::VarBinding(
+							lastBinding->var, ::tvm::Call(relax::GetType(lastBinding->var), gv, args, ::tvm::Attrs(), {})
+					)};
+				ffi::Array<::tvm::Type> types;
+				std::vector<::tvm::Var> vars;
+				for (size_t e : escaping)
+					vars.push_back(bindings[members[e]]->var);
+				vars.push_back(lastBinding->var);
+				for (const auto& v : vars)
+					types.push_back(relax::GetType(v));
+				const ::tvm::TupleType tupleType(types);
+				const ::tvm::Var tuple(relax::DataflowVar("fused_rows", tupleType));
+				std::vector<relax::Binding> out{relax::VarBinding(tuple, ::tvm::Call(tupleType, gv, args, ::tvm::Attrs(), {}))};
+				for (size_t k = 0; k < vars.size(); ++k)
+					out.push_back(relax::VarBinding(vars[k], ::tvm::TupleGetItem(tuple, static_cast<int>(k))));
+				return out;
+			}
+
+			static bool usesVar(const relax::Binding& b, const void* v) {
+				for (const auto& u : FreeVarsOf(b))
+					if (u.get() == v)
+						return true;
+				return false;
 			}
 
 			static ffi::Array<::tvm::Var> FreeVarsOf(const relax::Binding& b) {

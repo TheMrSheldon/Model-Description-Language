@@ -189,12 +189,18 @@ namespace mdl::backend::tvm {
 			auto x = Wildcard(), gamma = Wildcard(), beta = Wildcard();
 			auto n1 = Wildcard(), n2 = Wildcard(), eps = Wildcard();
 			auto sumX = IsOp("relax.sum")(x);
-			auto mu = IsOp("relax.reshape")(IsOp("relax.divide")(sumX, n1), Wildcard());
+			auto meanX = IsOp("relax.divide")(sumX, n1);
+			auto mu = IsOp("relax.reshape")(meanX, Wildcard());
 			auto xc = IsOp("relax.subtract")(x, mu);
-			auto sumSq = IsOp("relax.sum")(IsOp("relax.multiply")(xc, xc));
-			auto var = IsOp("relax.reshape")(IsOp("relax.divide")(sumSq, n2), Wildcard());
-			auto s = IsOp("relax.rsqrt")(IsOp("relax.add")(var, eps));
-			DFPattern pattern = IsOp("relax.add")(IsOp("relax.multiply")(IsOp("relax.multiply")(xc, s), gamma), beta);
+			auto sq = IsOp("relax.multiply")(xc, xc);
+			auto sumSq = IsOp("relax.sum")(sq);
+			auto meanSq = IsOp("relax.divide")(sumSq, n2);
+			auto var = IsOp("relax.reshape")(meanSq, Wildcard());
+			auto varEps = IsOp("relax.add")(var, eps);
+			auto s = IsOp("relax.rsqrt")(varEps);
+			auto xhat = IsOp("relax.multiply")(xc, s);
+			auto scaled = IsOp("relax.multiply")(xhat, gamma);
+			DFPattern pattern = IsOp("relax.add")(scaled, beta);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
 				const Expr& in = m.at(x);
@@ -204,6 +210,13 @@ namespace mdl::backend::tvm {
 					!lastDimEquals(in, *n) || !near(at(n2), *n) || !epsilon || !isVectorOverLastDim(m.at(gamma), in) ||
 					!isVectorOverLastDim(m.at(beta), in))
 					return call;
+				// Not if the intermediate values are used elsewhere (e.g. saved for the gradient): the normalization would
+				// be computed twice (row fusion fuses the decomposed form into one kernel instead).
+				if (patternUses(m.at(xc)) > 2)
+					return call;
+				for (const auto& p : {sumX, meanX, mu, sq, sumSq, meanSq, var, varEps, s, xhat, scaled})
+					if (patternUses(m.at(p)) > 1)
+						return call;
 				static const auto layerNorm = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.layer_norm");
 				return layerNorm(in, m.at(gamma), m.at(beta), Array<int64_t>{-1}, *epsilon, true, true).cast<Expr>();
 			};

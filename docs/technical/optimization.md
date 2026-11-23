@@ -21,6 +21,7 @@ shape occurs.
 | Relax | Context pruning | `details/contexts.cpp` |
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
 | Relax | Producer–consumer fusion (TVM FuseOps/FuseTIR) | TVM |
+| Relax | Row fusion | `details/fuse_rows.cpp` |
 | Relax | Sibling fusion | `details/fuse_siblings.cpp` |
 | TIR | Flattening of injective kernels | `details/flatten_injective.cpp` |
 | TIR | Schedule rules (per target) | `targets/` |
@@ -145,8 +146,38 @@ Typical siblings:
 - a recomputed forward value and its derivative, e.g. `gelu(h)` for a weight gradient and `gelu_backward(h, dy)`;
 - several elementwise results from the same activations, e.g. in normalization gradients.
 
-Not covered yet: sibling *reductions* that read the same input, such as the row sums and column sums of LayerNorm
-backward. Merging those is the planned next step.
+Reductions are handled by row fusion (below), not by sibling fusion.
+
+### Row fusion
+
+FuseOps puts at most one reduction into a group. A normalization or its gradient therefore becomes many kernels that
+read the same rows again and again. For example, LayerNorm backward,
+`dx = rstd·(g − mean(g) − x̂·mean(g·x̂))`, took five kernels.
+
+`fuseRows` runs between FuseOps and FuseTIR. It groups the fused calls that work on the same rows:
+
+- a reduction over the trailing dimensions L of `[rows…, L…]`, with result `[rows…]`;
+- further reductions over the same rows that read the group's inputs or results;
+- per-row computations on the results (shape `[rows…]`, up to unit dimensions);
+- full-shape elementwise computations of shape `[rows…, L…]`, e.g. `x − mean` between the mean and the variance.
+
+A group is the longest prefix that ends with a full-shape epilogue:
+
+- **Escaping results:** intermediate results used outside the group become further results, if they are elementwise.
+  Reductions stay internal. Each escaping result is computed again at the group's end, so all results are written by
+  trailing epilogues.
+- **Unit-dimension reshapes:** TVM's reshape kernel divides by symbolic sizes and is opaque. Inside a group it is
+  replaced by an elementwise kernel that maps the indices directly.
+
+FuseTIR then produces one kernel per group. On GPUs, the RowReduction rule schedules it with a warp per row: all
+reductions first, then the epilogues, whose loops are merged so that they share the row loop.
+
+### Patterns must not duplicate work
+
+A pattern that replaces a subgraph by one operation (e.g. `layer_norm`) checks that the subgraph's intermediate values
+have no other users (`patternUses`). In training, the mean, `x − mean`, `rstd` and `x̂` are saved for the backward
+pass. Replacing only the output with `layer_norm` would compute the normalization twice. There, the decomposed form
+stays, and row fusion turns it into one kernel that writes the output and the saved values.
 
 ## TIR level
 
