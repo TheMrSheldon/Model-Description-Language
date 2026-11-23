@@ -1111,7 +1111,9 @@ namespace mdl {
 					path.names = names;
 				const bool package = files.size() > 1 || std::filesystem::path{files.front()}.stem() != part->getText();
 				for (const auto& file : files) {
-					path.targets.push_back(canonical(file).string());
+					// (the name translateFile gives the file: not canonical, a symbolic link in the path stays, so that
+					// the uses of its definitions match the import, e.g. for -Wunused)
+					path.targets.push_back(std::filesystem::absolute(file).string());
 					auto doc = analysis::fileDocumentation(
 							options.readFile && options.readFile(file) ? *options.readFile(file) : read(file)
 					);
