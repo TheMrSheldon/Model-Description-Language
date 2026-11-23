@@ -21,6 +21,7 @@ current stream through the Python binding. Temporary buffers are offsets in one 
 | Attention fusion | `src/mdl/passes/attention.cpp` | softmax(QKᵀ·s + bias)·V → `ATTENTION*` builtins (target-independent) |
 | Kernel selection | `details/kernel_match.cpp`, `tvm.cpp` | Relax ops → package calls, in rounds; context pruning afterwards |
 | Legalization | `details/legalize.cpp`, `Target::overrideLegalizations` | remaining ops → TIR; the CUDA target overrides `mdl.scatter_add_rows` |
+| Row fusion | `details/fuse_rows.cpp` | reductions over the same rows, per-row values and full-shape elementwise ops → one group, possibly with several results (target-independent; before FuseTIR) |
 | Sibling fusion | `details/fuse_siblings.cpp` | independent elementwise kernels with the same result shape that read a common input → one kernel with several results (target-independent) |
 | Flattening | `details/flatten_injective.cpp` | injective kernels → one flat loop (target-independent) |
 | Scheduling | `targets/cuda.cpp` `CUDATarget::schedule` | schedule rules, first match wins (below) |
@@ -50,12 +51,15 @@ uncoalesced.
 
 ### RowReduction (`row_reduction.{hpp,cpp}`)
 
-Sums, maxima, softmax and normalizations (LayerNorm forward, log-softmax): one or more reductions over the innermost
-dimension(s), followed by an elementwise epilogue over the same row.
+Sums, maxima, softmax and normalizations (LayerNorm forward and backward, log-softmax): one or more reductions over
+the innermost dimension(s), followed by elementwise epilogues over the same rows. Row fusion produces such kernels.
 
 - One **warp per row**. The 32 lanes stride over the row and combine their partials with warp shuffles.
 - A single reduction packs `kRowsPerBlock = 4` rows into a block. With several reductions (e.g. mean, then
   variance), each row gets its own block.
+- **Several epilogues** (several results, e.g. a normalization's output and the values saved for its gradient):
+  their loop nests are merged into the last one's (`Merge`). Full-shape epilogues share all loops; per-row results
+  share only the row loops and are written outside the column loop.
 - The rule applies to rows of symbolic length, or of static length up to `kMaxRowLength = 4096`, and needs at least
   `kMinRows = 64` rows.
 
@@ -171,7 +175,8 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 
 ## Known gaps (see TODO.md)
 
-- LayerNorm backward splits into many elementwise and reduction kernels. Inductor fuses it into a few. This is the
-  largest non-GEMM cost in BERT training.
+- Column sums of the same input (bias and LayerNorm-parameter gradients) are separate kernels, each reading the
+  input again.
+- The attention head transpose in training (~4 ms per BERT-base step at 64×128).
 - CUDA graphs and a caller-provided workspace.
 - Unpadding of suffix-masked regions.
