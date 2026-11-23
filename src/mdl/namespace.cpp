@@ -51,8 +51,6 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_sum_like", FunctionIDs::COLLAPSE_SUM_LIKE, {{"like", tensor}}, true},
 			{"__builtin_broadcast_like", FunctionIDs::BROADCAST_LIKE, {{"like", tensor}}, true},
 			{"__builtin_stop_gradient", FunctionIDs::STOP_GRADIENT},
-			{"__builtin_sum_all", FunctionIDs::SUM_ALL},
-			{"__builtin_mean_all", FunctionIDs::MEAN_ALL},
 			{"__builtin_one_hot_like", FunctionIDs::ONE_HOT_LIKE, {{"like", tensor}}, true, intTensor},
 			{"__builtin_where", FunctionIDs::WHERE, {{"a", tensor}, {"b", tensor}}, true, boolTensor},
 			{"__builtin_select",

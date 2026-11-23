@@ -7,6 +7,7 @@ antlr_target(mdlparser ${CMAKE_CURRENT_LIST_DIR}/mdl.g4 LEXER PARSER VISITOR LIS
 
 add_library(mdl_frontend STATIC
 	analysis/index.cpp
+	analysis/unused.cpp
 	computegraph/datatype.cpp
 	computegraph/graph.cpp
 	computegraph/node.cpp
@@ -55,6 +56,7 @@ add_library(mdl
 	argvals.cpp
 	backends/tvm/tvm.cpp
 	backends/tvm/details/aot.cpp
+	backends/tvm/details/kernel_match.cpp
 	backends/tvm/details/legalize.cpp
 	backends/tvm/details/pattern_registry.cpp
 	backends/tvm/details/patterns.cpp
@@ -63,6 +65,9 @@ add_library(mdl
 	bindings/generator.cpp
 	compiler.cpp
 	exports.cpp
+	kernels/discovery.cpp
+	kernels/expr.cpp
+	kernels/package.cpp
 	passes/autodiff.cpp
 	passes/masking.cpp
 	logging.cpp
@@ -74,6 +79,9 @@ target_link_libraries(mdl PUBLIC
 	spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>
 	yaml-cpp::yaml-cpp
 )
+# The kernel packages built by this project, when running from the build tree (see kernels::kernelDirs).
+# (The packages of the source tree's kernels/ are generated there, with their libraries; see kernels/CMakeLists.txt.)
+target_compile_definitions(mdl PRIVATE MDL_DEFAULT_KERNELS_DIR="${CMAKE_BINARY_DIR}/mdl-kernels")
 # tvm_compiler uses directory-scoped include_directories internally, which do not propagate to consumers.
 target_include_directories(mdl PUBLIC ${tvm_SOURCE_DIR}/include ${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/include)
 
@@ -88,4 +96,4 @@ if(MDL_ENABLE_IREE)
 	message(STATUS "[mdl] IREE backend enabled (iree-compile subprocess)")
 endif()
 
-add_subdirectory(runtime) # mdl_runtime, mdl_kernels
+add_subdirectory(runtime) # mdl_runtime, mdl_profile

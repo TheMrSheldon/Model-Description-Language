@@ -1,4 +1,5 @@
 #include "./semantic_tokens.hpp"
+#include "./utf8.hpp"
 
 #include <mdlLexer.h>
 #include <mdlParser.h>
@@ -25,9 +26,10 @@ namespace {
 		Method,
 		Decorator,
 		Axis,
-		Keyword, ///< (only in doc comments: the commands)
-		Label,	 ///< (only in doc comments: targets of `\ref`, `\see`, keys of `\cite`)
-		String,	 ///< (only in doc comments: math)
+		Keyword,   ///< (only in doc comments: the commands)
+		Label,	   ///< (only in doc comments: targets of `\ref`, `\see`, keys of `\cite`)
+		String,	   ///< (only in doc comments: math)
+		Discarded, ///< `_`: a discarded value (loop variable, declaration, einops axis)
 	};
 	enum Modifier : unsigned { Declaration = 1, Readonly = 2, DefaultLibrary = 4, Documentation = 8 };
 
@@ -68,8 +70,8 @@ namespace {
 
 		/** @brief Declares @p t in the innermost scope (and emits it as a declaration if @p emitIt). */
 		void declare(antlr4::Token* t, unsigned type, bool emitIt = true, unsigned modifiers = 0) {
-			if (t == nullptr)
-				return;
+			if (t == nullptr || t->getText() == "_")
+				return; // `_` is not bound (and is emitted with its terminal, see visit)
 			scopes.back()[t->getText()] = {type, modifiers};
 			if (emitIt)
 				emit(t, type, modifiers | Declaration);
@@ -96,8 +98,11 @@ namespace {
 		void visit(antlr4::tree::ParseTree* tree) {
 			if (tree == nullptr)
 				return;
-			if (dynamic_cast<antlr4::tree::TerminalNode*>(tree))
+			if (auto* terminal = dynamic_cast<antlr4::tree::TerminalNode*>(tree)) {
+				if (terminal->getSymbol()->getText() == "_")
+					emit(terminal->getSymbol(), Discarded); // a discarded value: not a variable
 				return; // keywords, literals, operators: lexical (the editor's grammar colors them)
+			}
 			if (auto* ctx = dynamic_cast<mdlParser::Import_stmtContext*>(tree)) {
 				for (auto* part : ctx->path)
 					emit(part, Namespace);
@@ -269,9 +274,7 @@ namespace {
 		if (!(text.starts_with("/**") || text.starts_with("/*!") || text.starts_with("///") || text.starts_with("//!")))
 			return;
 		// Positions: line and code-point column of each byte offset.
-		auto points = [](std::string_view v) {
-			return static_cast<size_t>(std::count_if(v.begin(), v.end(), [](char c) { return (c & 0xC0) != 0x80; }));
-		};
+		auto points = mdls::utf8::codePoints;
 		auto position = [&](size_t offset) {
 			const size_t lineStart = text.rfind('\n', offset == 0 ? 0 : offset - 1);
 			const size_t newlines = std::count(text.begin(), text.begin() + offset, '\n');
@@ -352,7 +355,7 @@ namespace {
 const std::vector<std::string>& mdls::semanticTokenTypes() {
 	static const std::vector<std::string> types{
 			"namespace", "type",   "class",		"struct", "typeParameter", "parameter", "variable", "property",
-			"function",	 "method", "decorator", "axis",	  "keyword",	   "label",		"string",
+			"function",	 "method", "decorator", "axis",	  "keyword",	   "label",		"string",	"discarded",
 	};
 	return types;
 }
@@ -363,7 +366,8 @@ const std::vector<std::string>& mdls::semanticTokenModifiers() {
 }
 
 std::vector<mdls::SemanticToken> mdls::semanticTokens(std::string_view text) {
-	antlr4::ANTLRInputStream input{std::string{text}};
+	antlr4::ANTLRInputStream input;
+	input.load(std::string{text}, /*lenient=*/true); // (like the parser, see mdl::invalidUtf8)
 	mdlLexer lexer{&input};
 	lexer.removeErrorListeners();
 	antlr4::CommonTokenStream stream{&lexer};

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <vector>
@@ -68,6 +69,12 @@ namespace mdl {
 
 	/** @brief Prints `Encountered N error(s) and M warning(s)` (nothing if both are 0). */
 	void printDiagnosticSummary(std::ostream& os, size_t errors, size_t warnings);
+
+	/**
+	 * @brief An error at the first byte of @p text that is not valid UTF-8, if any (source files are UTF-8). Columns
+	 * are counted as the parser decodes leniently (each invalid byte is one replacement character).
+	 */
+	std::optional<Diagnostic> invalidUtf8(std::string_view text, const std::string& file);
 } // namespace mdl
 
 #endif

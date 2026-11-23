@@ -161,6 +161,18 @@ namespace mdl::analysis {
 	/** @brief The documentation of the parameter @p name (`@param name ...` or `@tparam`) in @p comment (Markdown). */
 	std::string docParameter(std::string_view comment, std::string_view name);
 
+	/** @brief A definition that is never used (see unusedDefinitions). */
+	struct Unused {
+		SourceRange range; ///< of its name (of an import: its path)
+		std::string message;
+	};
+
+	/**
+	 * @brief The definitions of @p file that are never used: local variables, loop variables, parameters, members of
+	 * modules, and imports whose files define nothing that the file uses. Names starting with `_` are exempt.
+	 */
+	std::vector<Unused> unusedDefinitions(const SemanticIndex& index, const std::string& file);
+
 	/** @brief The `@file` doc comment of the source @p text (before its first definition) as Markdown, if any. */
 	std::string fileDocumentation(std::string_view text);
 } // namespace mdl::analysis

@@ -1,4 +1,5 @@
 #include "./protocol.hpp"
+#include "./utf8.hpp"
 
 #include <cctype>
 #include <cstdint>
@@ -107,26 +108,12 @@ std::string_view mdls::LineIndex::line(size_t line) const {
 	return line < lines.size() ? std::string_view{lines[line]} : std::string_view{};
 }
 
-namespace {
-	/** @brief The length of the UTF-8 sequence starting with @p c (1 for invalid bytes). */
-	size_t sequenceLength(unsigned char c) {
-		if (c >= 0xF0)
-			return 4;
-		if (c >= 0xE0)
-			return 3;
-		if (c >= 0xC0)
-			return 2;
-		return 1;
-	}
-} // namespace
-
 size_t mdls::LineIndex::toUtf16(size_t line, size_t column) const {
 	const std::string_view text = this->line(line);
 	size_t units = 0, points = 0;
 	for (size_t i = 0; i < text.size() && points < column; ++points) {
-		const size_t n = sequenceLength(static_cast<unsigned char>(text[i]));
-		units += n == 4 ? 2 : 1;
-		i += n;
+		units += utf8::utf16Units(text.substr(i));
+		i += utf8::sequenceLength(text.substr(i));
 	}
 	return units + (column > points ? column - points : 0); // beyond the end: one unit per code point
 }
@@ -135,9 +122,8 @@ size_t mdls::LineIndex::fromUtf16(size_t line, size_t column) const {
 	const std::string_view text = this->line(line);
 	size_t units = 0, points = 0;
 	for (size_t i = 0; i < text.size() && units < column; ++points) {
-		const size_t n = sequenceLength(static_cast<unsigned char>(text[i]));
-		units += n == 4 ? 2 : 1;
-		i += n;
+		units += utf8::utf16Units(text.substr(i));
+		i += utf8::sequenceLength(text.substr(i));
 	}
 	return points + (column > units ? column - units : 0);
 }

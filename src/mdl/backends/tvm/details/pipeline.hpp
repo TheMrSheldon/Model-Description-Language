@@ -19,7 +19,17 @@ namespace mdl::backend::tvm {
 	::tvm::Target makeTarget(const mdl::CompileOptions& opts);
 
 	/**
-	 * @brief Runs the Relax passes: backend patterns, legalization (see legalize.hpp), fusion, and memory planning.
+	 * @brief The Relax module at the matching boundary of kernel packages (see docs/kernels.md): constants folded and the
+	 * backend's canonical forms recognized (relax.nn.* operators, mdl.matmul with folded permutations), before
+	 * legalization.
+	 */
+	::tvm::IRModule canonicalize(::tvm::IRModule mod, const ::tvm::Target& target);
+
+	/** @brief The Relax passes after the matching boundary: legalization, fusion, and memory planning. */
+	::tvm::IRModule lowerRelax(::tvm::IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts);
+
+	/**
+	 * @brief Runs the Relax passes: canonicalize, then lowerRelax.
 	 * @return the module in the form expected by lowerToAOT.
 	 */
 	::tvm::IRModule runRelaxPipeline(::tvm::IRModule mod, const ::tvm::Target& target, const mdl::CompileOptions& opts);

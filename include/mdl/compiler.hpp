@@ -3,6 +3,8 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,10 +18,27 @@ namespace mdl {
 		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
 	};
 
-	/** Which kernels the backend may call for recognized subgraphs (matmul, softmax, layer norm, ...). */
+	/** Whether the backend calls optimized kernels of kernel packages (e.g. oneDNN, see docs/kernels.md). */
 	enum class Kernels {
-		OneDnn, ///< Vendor kernels of the mdl_kernels library (oneDNN); the model must be linked against mdl_kernels
-		Tvm,	///< Only TVM-generated kernels; the model has no dependency on mdl_kernels
+		Packages, ///< The selected implementations of the kernel packages (the rest is TVM-generated)
+		None,	  ///< Only TVM-generated kernels; the model depends on no kernel package
+	};
+
+	/** @brief A library of a kernel package that must be linked (see docs/kernels.md). */
+	struct LinkedArtifact {
+		std::string package, id;
+		std::filesystem::path path;
+		std::string kind; ///< static-library, shared-library
+		std::vector<std::string>
+				dependencies; ///< `kind:name`, e.g. `system-library:m`, `runtime:openmp`, `artifact:dnnl`
+	};
+
+	/** @brief An implementation of a kernel package that the compiler used (see docs/kernels.md). */
+	struct SelectedKernel {
+		std::string function; ///< the compiled function's symbol
+		std::string package, version, implementation, symbol;
+		std::filesystem::path manifest;		   ///< the package's package.yml
+		std::vector<LinkedArtifact> artifacts; ///< the implementation's artifact, then those it depends on
 	};
 
 	struct CompileOptions {
@@ -36,7 +55,7 @@ namespace mdl {
 		Backend backend = Backend::Tvm;
 
 		/** Kernels that the backend may call. */
-		Kernels kernels = Kernels::OneDnn;
+		Kernels kernels = Kernels::Packages;
 
 		/**
 		 * Number of dimensions that `...` stands for in the signatures of compiled functions (e.g. 2 for `[B, S, D]`
@@ -53,8 +72,31 @@ namespace mdl {
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;
 
-		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/kernels.h). */
+		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/profile.h). */
 		bool profile = false;
+
+		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/kernels.md and kernels::kernelDirs). */
+		std::vector<std::filesystem::path> kernelDirs;
+
+		/** @brief Kernel packages that may be used (`--kernel-package`; all if empty) and those that may not. */
+		std::vector<std::string> kernelPackages, noKernelPackages;
+
+		/** @brief Whether kernel packages are used at all (`--no-kernel-packages`; e.g. when the build links none). */
+		bool useKernelPackages = true;
+
+		/** @brief If set, receives the implementations of kernel packages that the compiled code calls. */
+		std::vector<SelectedKernel>* selectedKernels = nullptr;
+
+		/** @brief The source file (its project's `.mdl/kernels` is a kernel directory), if known. */
+		std::optional<std::filesystem::path> source;
+
+		/**
+		 * @brief Inspection of kernel packages (`mdl-kernels`): the compiler stops at the matching boundary and writes to
+		 * inspectOut instead of an output file: the selected implementations (brief), also every candidate with the
+		 * verdicts of its constraints (explain), or the Relax module at the boundary (dump).
+		 */
+		enum class KernelInspection { none, brief, explain, dump } inspectKernels = KernelInspection::none;
+		std::ostream* inspectOut = nullptr;
 
 		/** Directory for intermediate debug artifacts (IR dumps); empty to disable. */
 		std::filesystem::path dumpDir;

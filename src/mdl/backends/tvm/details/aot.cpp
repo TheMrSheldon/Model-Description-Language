@@ -1,16 +1,17 @@
 #include "./aot.hpp"
+#include "./tvm_compat.hpp"
 
 #include <tvm/ir/function.h>
 #include <tvm/relax/expr.h>
-#include <tvm/relax/struct_info.h>
+#include <tvm/relax/type.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/type.h>
 
 #include <algorithm>
 #include <cstring>
@@ -22,25 +23,28 @@
 
 namespace mdl::backend::tvm {
 
+	using ::tvm::Expr;
 	using ::tvm::GlobalVar;
 	using ::tvm::IntImm;
 	using ::tvm::IRModule;
 	using ::tvm::PrimExpr;
+	using ::tvm::PrimVar;
+	using ::tvm::StringImm;
 	using ::tvm::ffi::Array;
 	namespace relax = ::tvm::relax;
 	namespace tirx = ::tvm::tirx;
-	using DataType = ::tvm::DataType;
+	using DataType = ::tvm::PrimType;
 
 	namespace {
 		/** @brief The TIR representation of a Relax value. */
 		struct Value {
 			enum class Kind { None, Tensor, Prim, Shape, Tuple } kind = Kind::None;
-			tirx::Buffer buffer;
+			tirx::BufferVar buffer;
 			PrimExpr prim;
 			Array<PrimExpr> shape;
 			std::vector<Value> fields;
 
-			static Value tensor(tirx::Buffer b) { return Value{.kind = Kind::Tensor, .buffer = std::move(b)}; }
+			static Value tensor(tirx::BufferVar b) { return Value{.kind = Kind::Tensor, .buffer = std::move(b)}; }
 			static Value primitive(PrimExpr p) { return Value{.kind = Kind::Prim, .prim = std::move(p)}; }
 			static Value shapeOf(Array<PrimExpr> s) { return Value{.kind = Kind::Shape, .shape = std::move(s)}; }
 		};
@@ -49,8 +53,44 @@ namespace mdl::backend::tvm {
 			throw std::runtime_error("mdl AOT lowering: unsupported " + what);
 		}
 
-		const relax::TensorStructInfoNode* tensorInfo(const relax::StructInfo& sinfo) {
-			return sinfo.as<relax::TensorStructInfoNode>();
+		const relax::TensorTypeNode* tensorInfo(const ::tvm::Type& type) { return type.as<relax::TensorTypeNode>(); }
+
+		/** @brief A zero of type @p dtype. */
+		PrimExpr zero(DataType dtype) { return ::tvm::prim::MakeConst(dtype, 0); }
+
+		/**
+		 * @brief The element type marker of tvm_stack_make_array for @p dtype: a zero of that type; bfloat16 is marked by
+		 * a uint16 zero, as TVM's bfloat16 legalization would change a bfloat16 value (restored by
+		 * restoreBF16ArrayTypes, pipeline.cpp; MDL tensors are never uint16).
+		 */
+		PrimExpr typeMarker(DataType dtype) { return zero(isBFloat16(dtype) ? DataType::UInt(16) : dtype); }
+
+		/**
+		 * @brief A buffer of @p dtype and @p shape at @p elemOffset (in elements) of the memory it is declared over (see
+		 * tirx::DeclBuffer).
+		 */
+		tirx::BufferVar bufferOf(const std::string& name, DataType dtype, Array<PrimExpr> shape, PrimExpr elemOffset) {
+			return tirx::BufferVar(
+					name, tirx::BufferType("", dtype, std::move(shape), {}, std::move(elemOffset), 0, 0)
+			);
+		}
+
+		Expr cpackedCall(const Array<Expr>& args) {
+			return ::tvm::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), args);
+		}
+
+		/** @brief A DLTensor (stack-allocated by the caller) for @p data with the shape and element type of @p buffer. */
+		Expr makeArray(const Expr& data, const tirx::BufferVar& buffer, const Array<PrimExpr>& shape) {
+			Array<Expr> dims;
+			for (const auto& d : shape)
+				dims.push_back(::tvm::prim::cast(DataType::Int(64), d));
+			return ::tvm::Call(
+					::tvm::PointerType::VoidPointerTy(), tirx::builtin::tvm_stack_make_array(),
+					{data,
+					 ::tvm::Call(::tvm::PointerType(DataType::Int(64)), tirx::builtin::tvm_stack_make_shape(), dims),
+					 IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), static_cast<int>(shape.size())),
+					 typeMarker(buffer->dtype), IntImm(DataType::Int(64), 0)}
+			);
 		}
 
 		/** @brief Builds the entry PrimFunc of one Relax function. */
@@ -68,13 +108,12 @@ namespace mdl::backend::tvm {
 					beginContext(packing->dims);
 				for (size_t p = 0; p < func->params.size(); ++p) {
 					const auto& param = func->params[p];
-					const auto* info = tensorInfo(relax::GetStructInfo(param));
+					const auto* info = tensorInfo(relax::GetType(param));
 					if (info == nullptr || !info->GetShape().defined())
-						unsupported("parameter " + std::string(param->name_hint()) + " (not a tensor of known shape)");
+						unsupported("parameter " + std::string(param->name) + " (not a tensor of known shape)");
 					const bool packed = packing != nullptr && p < packing->params.size() && packing->params[p];
-					values[param.get()] = Value::tensor(
-							packed ? packedView(*info, param->name_hint()) : addBufferParam(param->name_hint(), *info)
-					);
+					values[param.get()] =
+							Value::tensor(packed ? packedView(*info, param->name) : addBufferParam(param->name, *info));
 				}
 				const auto* seq = func->body.as<relax::SeqExprNode>();
 				if (seq == nullptr)
@@ -86,10 +125,10 @@ namespace mdl::backend::tvm {
 					for (const auto& binding : block->bindings)
 						if (const auto* vb = binding.as<relax::VarBindingNode>())
 							bindingOf[vb->var.get()] = vb->value;
-				std::vector<relax::Expr> returned;
+				std::vector<Expr> returned;
 				collectReturned(seq->body, returned);
 				for (size_t i = 0; i < returned.size(); ++i) {
-					const auto* info = tensorInfo(relax::GetStructInfo(returned[i]));
+					const auto* info = tensorInfo(relax::GetType(returned[i]));
 					if (info == nullptr || !info->GetShape().defined())
 						unsupported("return value (not a tensor of known shape)");
 					const bool packed = packing != nullptr && i < packing->outputs.size() && packing->outputs[i];
@@ -101,10 +140,10 @@ namespace mdl::backend::tvm {
 					if (accumulated.back())
 						continue; // computed into a temporary and then added to the output buffer
 					// Follow aliases (`output = alloc`) to the allocation that can write into the output directly.
-					const auto* var = returned[i].as<relax::VarNode>();
+					const auto* var = returned[i].as<::tvm::VarNode>();
 					while (var != nullptr) {
 						auto it = bindingOf.find(var);
-						const auto* alias = it == bindingOf.end() ? nullptr : it->second.as<relax::VarNode>();
+						const auto* alias = it == bindingOf.end() ? nullptr : it->second.as<::tvm::VarNode>();
 						if (alias == nullptr)
 							break;
 						var = alias;
@@ -134,12 +173,14 @@ namespace mdl::backend::tvm {
 				const std::string bodySymbol = headerDims.empty() ? symbol : symbol + "_impl";
 				auto attrs = ::tvm::DictAttrs(
 						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(bodySymbol)},
-						 {tirx::attr::kNoAlias, ::tvm::Bool(true)},
-						 {kAOTEntryAttr, ::tvm::Bool(true)}}
+						 {tirx::attr::kNoAlias, true},
+						 {kAOTEntryAttr, true}}
 				);
 				auto body = tirx::PrimFunc(
-						params, stmts.empty() ? tirx::Stmt(tirx::Evaluate(0)) : tirx::SeqStmt::Flatten(stmts),
-						::tvm::VoidType(), bufferMap, attrs
+						params,
+						stmts.empty() ? tirx::Stmt(tirx::Evaluate(IntImm(DataType::Int(32), 0)))
+									  : tirx::SeqStmt::Flatten(stmts),
+						::tvm::VoidType(), attrs
 				);
 				functions.emplace_back(bodySymbol, body);
 				if (!headerDims.empty())
@@ -157,67 +198,51 @@ namespace mdl::backend::tvm {
 			tirx::PrimFunc
 			wrapForHeaderDims(const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol) {
 				// Fresh variables for the outer function (its buffers have the same shapes as the inner ones).
-				::tvm::ffi::Map<tirx::Var, PrimExpr> rename;
-				auto fresh = [&](const tirx::Var& v) -> tirx::Var {
+				::tvm::ffi::Map<::tvm::Var, PrimExpr> rename;
+				auto fresh = [&](const ::tvm::Var& v) -> PrimVar {
 					if (auto it = rename.find(v); it != rename.end())
-						return ::tvm::Downcast<tirx::Var>((*it).second);
-					tirx::Var copy(v->name_hint, v->dtype);
+						return (*it).second.as_or_throw<PrimVar>();
+					PrimVar copy(v->name, v->ty.as_or_throw<DataType>());
 					rename.Set(v, copy);
 					return copy;
 				};
-				Array<tirx::Var> outerParams;
-				::tvm::ffi::Map<tirx::Var, tirx::Buffer> outerBuffers;
-				Array<PrimExpr> callArgs{tirx::StringImm(innerSymbol)};
-				tirx::Buffer outerContext;
+				Array<::tvm::Var> outerParams;
+				Array<Expr> callArgs{StringImm(innerSymbol)};
+				std::optional<tirx::BufferVar> outerContext;
 				for (const auto& p : inner->params) {
-					auto buffer = inner->buffer_map.Get(p);
-					if (!buffer) { // a dimension from the header
+					if (p->ty.as<tirx::BufferTypeNode>() == nullptr) { // a dimension from the header
 						callArgs.push_back(fresh(p));
 						continue;
 					}
-					Array<PrimExpr> shape;
-					for (const auto& d : buffer.value()->shape) {
+					const tirx::BufferVar buffer = tirx::GetBufferVar(p.get());
+					for (const auto& d : buffer->shape)
 						for (const auto& v : tirx::UndefinedVars(d))
 							fresh(v);
-						shape.push_back(tirx::Substitute(d, rename));
-					}
-					auto handle = tirx::Var(p->name_hint, DataType::Handle());
-					auto outer = tirx::decl_buffer(shape, buffer.value()->dtype, buffer.value()->name);
-					outerParams.push_back(handle);
-					outerBuffers.Set(handle, outer);
-					if (p.same_as(contextHandle))
+					auto shape = substitute(buffer->shape, rename);
+					auto outer = tirx::decl_buffer(shape, buffer->dtype, buffer.name());
+					outerParams.push_back(outer);
+					if (p.same_as(context))
 						outerContext = outer;
-					Array<PrimExpr> dims;
-					for (const auto& d : shape)
-						dims.push_back(::tvm::cast(DataType::Int(64), d));
-					callArgs.push_back(tirx::Call(
-							DataType::Handle(), tirx::builtin::tvm_stack_make_array(),
-							{outer->data, tirx::Call(DataType::Handle(), tirx::builtin::tvm_stack_make_shape(), dims),
-							 IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), static_cast<int>(shape.size())),
-							 tirx::make_zero(outer->dtype), IntImm(DataType::Int(64), 0)}
-					));
+					callArgs.push_back(makeArray(outer.data(), outer, shape));
 				}
-				auto words = tirx::Buffer(
-						outerContext->data, DataType::Int(64), {::tvm::floordiv(outerContext->shape[0], 8)}, {},
-						IntImm(DataType::Int(64), 0), "ctx_words", 0, 0, tirx::BufferType::kDefault
+				auto words = bufferOf(
+						"ctx_words", DataType::Int(64), {::tvm::floordiv(outerContext.value()->shape[0], 8)},
+						IntImm(DataType::Int(64), 0)
 				);
-				std::vector<tirx::Stmt> body{tirx::DeclBuffer(words)};
+				std::vector<tirx::Stmt> body{tirx::DeclBuffer(words, outerContext->data())};
 				for (const auto& [slot, dim] : headerDims) {
 					PrimExpr value = tirx::BufferLoad(words, {IntImm(DataType::Int(64), slot)});
-					if (dim.dtype() != DataType::Int(64))
-						value = ::tvm::cast(dim.dtype(), value);
+					if (dim.ty() != DataType::Int(64))
+						value = ::tvm::prim::cast(dim.ty(), value);
 					body.push_back(tirx::Bind(fresh(dim), value));
 				}
-				body.push_back(tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs)
-				));
+				body.push_back(tirx::Evaluate(cpackedCall(callArgs)));
 				auto attrs = ::tvm::DictAttrs(
 						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)},
-						 {tirx::attr::kNoAlias, ::tvm::Bool(true)},
-						 {kAOTEntryAttr, ::tvm::Bool(true)}}
+						 {tirx::attr::kNoAlias, true},
+						 {kAOTEntryAttr, true}}
 				);
-				return tirx::PrimFunc(
-						outerParams, tirx::SeqStmt::Flatten(body), ::tvm::VoidType(), outerBuffers, attrs
-				);
+				return tirx::PrimFunc(outerParams, tirx::SeqStmt::Flatten(body), ::tvm::VoidType(), attrs);
 			}
 
 			/** @brief The size of the context buffer in bytes (valid after build with packing). */
@@ -227,63 +252,55 @@ namespace mdl::backend::tvm {
 			const IRModule& mod;
 			const std::unordered_map<const ::tvm::GlobalVarNode*, std::string>& symbols;
 			bool profile;
-			Array<tirx::Var> params;
-			::tvm::ffi::Map<tirx::Var, tirx::Buffer> bufferMap;
-			std::vector<tirx::Buffer> outputs;
+			Array<::tvm::Var> params; ///< buffers and scalar dimensions
+			std::vector<tirx::BufferVar> outputs;
 			std::vector<bool> accumulated;
 			std::vector<tirx::Stmt> stmts;
-			std::unordered_map<const relax::VarNode*, Value> values;
-			std::unordered_map<const relax::VarNode*, relax::Expr> bindingOf;
-			std::unordered_map<const relax::VarNode*, tirx::Buffer> outputOf;
+			std::unordered_map<const ::tvm::VarNode*, Value> values;
+			std::unordered_map<const ::tvm::VarNode*, Expr> bindingOf;
+			std::unordered_map<const ::tvm::VarNode*, tirx::BufferVar> outputOf;
 			int counter = 0;
-			tirx::Buffer context; ///< the context buffer (uint8), if the function has packed tensors
-			tirx::Var contextHandle;
+			tirx::BufferVar context; ///< the context buffer (uint8), if the function has packed tensors
 			PrimExpr contextSize = IntImm(DataType::Int(64), 0); ///< bytes used so far
 
 			static PrimExpr alignTo64(PrimExpr bytes) { return ::tvm::floordiv(bytes + 63, 64) * 64; }
 
 			enum class Role { Producer, Consumer };
 			static constexpr int64_t kHeaderBytes = 64; ///< the runtime dimensions as int64 (at most 8)
-			Array<tirx::Var> contextDims;
-			tirx::Buffer header;
-			std::vector<const tirx::VarNode*> boundByParams; ///< dimension variables of the (non-packed) parameters
+			Array<PrimVar> contextDims;
+			tirx::BufferVar header;
+			std::vector<const ::tvm::VarNode*> boundByParams; ///< dimension variables of the (non-packed) parameters
 
-			void beginContext(const Array<tirx::Var>& dims) {
-				contextHandle = tirx::Var("ctx_handle", DataType::Handle());
-				context = tirx::decl_buffer({tirx::Var("ctx_bytes", DataType::Int(64))}, DataType::UInt(8), "ctx");
+			void beginContext(const Array<PrimVar>& dims) {
+				context = tirx::decl_buffer({PrimVar("ctx_bytes", DataType::Int(64))}, DataType::UInt(8), "ctx");
 				contextDims = dims;
 				// The context memory is only accessed as int64 words (one element type, as TIR's storage rewriting
 				// requires): the header (the runtime dimensions) and the addresses of the packed tensors, which follow it.
-				header = tirx::Buffer(
-						context->data, DataType::Int(64), {::tvm::floordiv(context->shape[0], 8)}, {},
-						IntImm(DataType::Int(64), 0), "ctx_words", 0, 0, tirx::BufferType::kDefault
+				header = bufferOf(
+						"ctx_words", DataType::Int(64), {::tvm::floordiv(context->shape[0], 8)},
+						IntImm(DataType::Int(64), 0)
 				);
-				stmts.push_back(tirx::DeclBuffer(header));
+				stmts.push_back(tirx::DeclBuffer(header, context.data()));
 				contextSize = IntImm(DataType::Int(64), kHeaderBytes);
 			}
 
 			std::vector<tirx::Stmt> contextStmts; ///< the declarations of the packed tensors (after the prologue)
-			std::vector<std::pair<int64_t, tirx::Var>> headerDims; ///< (header slot, dimension) read by the outer entry
+			std::vector<std::pair<int64_t, PrimVar>> headerDims; ///< (header slot, dimension) read by the outer entry
 
 			/** @brief Places the next packed tensor in the context buffer (its own pointer to its 64-byte aligned offset). */
-			tirx::Buffer packedView(const relax::TensorStructInfoNode& info, const std::string& name) {
+			tirx::BufferVar packedView(const relax::TensorTypeNode& info, const std::string& name) {
 				const PrimExpr offset = alignTo64(contextSize);
-				PrimExpr bytes = IntImm(DataType::Int(64), info.dtype.bytes());
+				const DataType dtype = info.dtype.value();
+				PrimExpr bytes = IntImm(DataType::Int(64), (dtype.bits() * dtype.lanes() + 7) / 8);
 				for (const auto& d : info.GetShape().value())
-					bytes = bytes * ::tvm::cast(DataType::Int(64), d);
+					bytes = bytes * ::tvm::prim::cast(DataType::Int(64), d);
 				contextSize = offset + bytes;
-				tirx::Var data(name + "_data", ::tvm::PointerType(::tvm::PrimType(info.dtype)));
-				contextStmts.push_back(tirx::Bind(
-						data, tirx::Call(
-									  DataType::Handle(), tirx::builtin::address_of(),
-									  {tirx::BufferLoad(header, {::tvm::floordiv(offset, 8)})}
-							  )
-				));
-				auto buffer = tirx::Buffer(
-						data, info.dtype, info.GetShape().value(), {}, IntImm(DataType::Int(64), 0), name, 0, 0,
-						tirx::BufferType::kDefault
+				auto buffer = bufferOf(name, dtype, info.GetShape().value(), IntImm(DataType::Int(64), 0));
+				auto data = ::tvm::Call(
+						::tvm::PointerType(dtype), tirx::builtin::address_of(),
+						{tirx::BufferLoad(header, {::tvm::floordiv(offset, 8)})}
 				);
-				contextStmts.push_back(tirx::DeclBuffer(buffer));
+				contextStmts.push_back(tirx::DeclBuffer(buffer, data));
 				return buffer;
 			}
 
@@ -293,14 +310,14 @@ namespace mdl::backend::tvm {
 			 */
 			void endContext(Role role) {
 				contextSize = alignTo64(contextSize);
-				params.push_back(contextHandle);
-				bufferMap.Set(contextHandle, context);
+				params.push_back(context);
 				std::vector<tirx::Stmt> prologue;
 				for (size_t k = 0; k < contextDims.size(); ++k) {
-					const tirx::Var& dim = contextDims[k];
+					const PrimVar& dim = contextDims[k];
 					const PrimExpr slot = IntImm(DataType::Int(64), static_cast<int64_t>(k));
 					if (role == Role::Producer) {
-						prologue.push_back(tirx::BufferStore(header, ::tvm::cast(DataType::Int(64), dim), {slot}));
+						prologue.push_back(tirx::BufferStore(header, ::tvm::prim::cast(DataType::Int(64), dim), {slot})
+						);
 					} else if (std::find(boundByParams.begin(), boundByParams.end(), dim.get()) ==
 							   boundByParams.end()) {
 						// Not determined by another argument (e.g. the sequence length when only [batch, classes]
@@ -312,8 +329,8 @@ namespace mdl::backend::tvm {
 					}
 				}
 				prologue.push_back(tirx::AssertStmt(
-						context->shape[0] >= contextSize, tirx::StringImm("ValueError"),
-						{tirx::StringImm("the context buffer is too small for these dimensions")}
+						context->shape[0] >= contextSize, StringImm("ValueError"),
+						{StringImm("the context buffer is too small for these dimensions")}
 				));
 				// After the declaration of the context memory (the first statement), before everything that uses the
 				// dimensions: the dimensions, the size check, then the packed tensors.
@@ -321,24 +338,22 @@ namespace mdl::backend::tvm {
 				stmts.insert(stmts.begin() + 1, prologue.begin(), prologue.end());
 			}
 
-			tirx::Buffer addBufferParam(const std::string& name, const relax::TensorStructInfoNode& info) {
-				auto handle = tirx::Var(name + "_handle", DataType::Handle());
-				auto buffer = tirx::decl_buffer(info.GetShape().value(), info.dtype, name);
+			tirx::BufferVar addBufferParam(const std::string& name, const relax::TensorTypeNode& info) {
+				auto buffer = tirx::decl_buffer(info.GetShape().value(), info.dtype.value(), name);
 				for (const auto& d : info.GetShape().value())
-					if (const auto* v = d.as<tirx::VarNode>())
+					if (const auto* v = d.as<::tvm::VarNode>())
 						boundByParams.push_back(v);
-				params.push_back(handle);
-				bufferMap.Set(handle, buffer);
+				params.push_back(buffer);
 				return buffer;
 			}
 
-			void collectReturned(const relax::Expr& e, std::vector<relax::Expr>& out) {
+			void collectReturned(const Expr& e, std::vector<Expr>& out) {
 				if (const auto* tuple = e.as<relax::TupleNode>()) {
 					for (const auto& field : tuple->fields)
 						collectReturned(field, out);
 					return;
 				}
-				if (const auto* var = e.as<relax::VarNode>()) {
+				if (const auto* var = e.as<::tvm::VarNode>()) {
 					if (auto it = bindingOf.find(var); it != bindingOf.end() && it->second.as<relax::TupleNode>()) {
 						collectReturned(it->second, out);
 						return;
@@ -349,15 +364,17 @@ namespace mdl::backend::tvm {
 
 			std::string freshName(const std::string& base) { return base + "_" + std::to_string(counter++); }
 
-			Value evaluate(const relax::Expr& e) {
-				if (const auto* var = e.as<relax::VarNode>()) {
+			Value evaluate(const Expr& e) {
+				if (const auto* var = e.as<::tvm::VarNode>()) {
 					auto it = values.find(var);
-					if (it == values.end())
-						unsupported("use of undefined variable " + std::string(var->name_hint()));
-					return it->second;
+					if (it != values.end())
+						return it->second;
+					if (auto prim = scalarValue(e)) // a symbolic dimension (e.g. of the parameters' shapes)
+						return Value::primitive(*prim);
+					unsupported("use of undefined variable " + std::string(var->name));
 				}
-				if (const auto* pv = e.as<relax::PrimValueNode>())
-					return Value::primitive(pv->value);
+				if (auto prim = scalarValue(e))
+					return Value::primitive(*prim);
 				if (const auto* se = e.as<relax::ShapeExprNode>())
 					return Value::shapeOf(se->values);
 				if (const auto* tuple = e.as<relax::TupleNode>()) {
@@ -372,14 +389,13 @@ namespace mdl::backend::tvm {
 						unsupported("tuple access");
 					return tuple.fields[get->index];
 				}
-				if (const auto* c = e.as<relax::ConstantNode>())
+				if (auto c = tensorConstant(e))
 					return Value::tensor(materializeConstant(*c));
 				unsupported("expression " + std::string(e->GetTypeKey()));
 			}
 
 			/** @brief Small constants (e.g. scalars that were not inlined) are written into a workspace buffer. */
-			tirx::Buffer materializeConstant(const relax::ConstantNode& c) {
-				const auto& data = c.data;
+			tirx::BufferVar materializeConstant(const ::tvm::runtime::Tensor& data) {
 				const int64_t n = data.Shape().Product();
 				const DataType dtype(data->dtype);
 				const bool f32 = dtype == DataType::Float(32), i32 = dtype == DataType::Int(32);
@@ -407,25 +423,23 @@ namespace mdl::backend::tvm {
 					shape.push_back(IntImm(DataType::Int(64), d));
 				auto buffer = tirx::decl_buffer(shape, dtype, freshName("const"), "global.workspace");
 				stmts.push_back(tirx::AllocBuffer(buffer));
-				auto flat = tirx::decl_buffer({IntImm(DataType::Int(64), n)}, dtype, freshName("const_flat"));
-				flat.CopyOnWrite()->data = buffer->data;
-				stmts.push_back(tirx::DeclBuffer(flat));
-				for (int64_t i = 0; i < n; ++i) {
-					stmts.push_back(tirx::BufferStore(flat, element(i), {IntImm(DataType::Int(64), i)}));
-				}
-				return buffer;
-			}
-
-			tirx::Buffer view(const tirx::Buffer& base, Array<PrimExpr> shape, DataType dtype, PrimExpr elemOffset) {
-				auto buffer = tirx::Buffer(
-						base->data, dtype, std::move(shape), {}, std::move(elemOffset), freshName("view"), 0, 0,
-						tirx::BufferType::kDefault
+				auto flat = bufferOf(
+						freshName("const_flat"), dtype, {IntImm(DataType::Int(64), n)}, IntImm(DataType::Int(64), 0)
 				);
-				stmts.push_back(tirx::DeclBuffer(buffer));
+				stmts.push_back(tirx::DeclBuffer(flat, buffer.data()));
+				for (int64_t i = 0; i < n; ++i)
+					stmts.push_back(tirx::BufferStore(flat, element(i), {IntImm(DataType::Int(64), i)}));
 				return buffer;
 			}
 
-			tirx::Buffer allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
+			tirx::BufferVar
+			view(const tirx::BufferVar& base, Array<PrimExpr> shape, DataType dtype, PrimExpr elemOffset) {
+				auto buffer = bufferOf(freshName("view"), dtype, std::move(shape), std::move(elemOffset));
+				stmts.push_back(tirx::DeclBuffer(buffer, base.data()));
+				return buffer;
+			}
+
+			tirx::BufferVar allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
 				// Workspace scope: allocated with TVMBackendAllocWorkspace even if small. (Small "global" allocations
 				// become stack allocations, which are not aligned as the kernels assume.)
 				auto buffer = tirx::decl_buffer(std::move(shape), dtype, freshName(name), "global.workspace");
@@ -433,13 +447,19 @@ namespace mdl::backend::tvm {
 				return buffer;
 			}
 
-			void copy(const tirx::Buffer& src, const tirx::Buffer& dst) {
+			/** @brief The number of elements of @p buffer. */
+			static PrimExpr numElements(const tirx::BufferVar& buffer) {
 				PrimExpr n = IntImm(DataType::Int(64), 1);
-				for (const auto& d : dst->shape)
-					n = n * ::tvm::cast(DataType::Int(64), d);
+				for (const auto& d : buffer->shape)
+					n = n * ::tvm::prim::cast(DataType::Int(64), d);
+				return n;
+			}
+
+			void copy(const tirx::BufferVar& src, const tirx::BufferVar& dst) {
+				PrimExpr n = numElements(dst);
 				auto flatSrc = view(src, {n}, src->dtype, src->elem_offset);
 				auto flatDst = view(dst, {n}, dst->dtype, dst->elem_offset);
-				auto i = tirx::Var("i", DataType::Int(64));
+				PrimVar i("i", DataType::Int(64));
 				stmts.push_back(tirx::For(
 						i, IntImm(DataType::Int(64), 0), n, tirx::ForKind::kSerial,
 						tirx::BufferStore(flatDst, tirx::BufferLoad(flatSrc, {i}), {i})
@@ -447,49 +467,35 @@ namespace mdl::backend::tvm {
 			}
 
 			/** @brief dst += src (elementwise, same shapes). */
-			void accumulate(const tirx::Buffer& src, const tirx::Buffer& dst) {
-				PrimExpr n = IntImm(DataType::Int(64), 1);
-				for (const auto& d : dst->shape)
-					n = n * ::tvm::cast(DataType::Int(64), d);
+			void accumulate(const tirx::BufferVar& src, const tirx::BufferVar& dst) {
+				PrimExpr n = numElements(dst);
 				auto flatSrc = view(src, {n}, src->dtype, src->elem_offset);
 				auto flatDst = view(dst, {n}, dst->dtype, dst->elem_offset);
-				auto i = tirx::Var("i", DataType::Int(64));
+				PrimVar i("i", DataType::Int(64));
 				stmts.push_back(tirx::For(
 						i, IntImm(DataType::Int(64), 0), n, tirx::ForKind::kSerial,
 						tirx::BufferStore(flatDst, tirx::BufferLoad(flatDst, {i}) + tirx::BufferLoad(flatSrc, {i}), {i})
 				));
 			}
 
-			PrimExpr packedArg(const Value& v) {
+			Expr packedArg(const Value& v) {
 				switch (v.kind) {
 				case Value::Kind::Prim:
 					return v.prim;
 				case Value::Kind::Tensor: {
-					Array<PrimExpr> dims;
-					for (const auto& d : v.buffer->shape)
-						dims.push_back(::tvm::cast(DataType::Int(64), d));
-					auto shape = tirx::Call(DataType::Handle(), tirx::builtin::tvm_stack_make_shape(), dims);
 					// Kernels expect byte_offset 0: a view at an offset (e.g. into the context buffer) is passed as a
 					// pointer to its first element.
-					PrimExpr data = v.buffer->data;
-					if (!tirx::is_zero(v.buffer->elem_offset)) {
+					Expr data = v.buffer.data();
+					if (!::tvm::prim::is_zero(v.buffer->elem_offset)) {
 						Array<PrimExpr> origin;
 						for (const auto& d : v.buffer->shape)
-							origin.push_back(tirx::make_zero(d.dtype()));
-						data = tirx::Call(
-								DataType::Handle(), tirx::builtin::address_of(), {tirx::BufferLoad(v.buffer, origin)}
+							origin.push_back(zero(d.ty()));
+						data = ::tvm::Call(
+								::tvm::PointerType(v.buffer->dtype), tirx::builtin::address_of(),
+								{tirx::BufferLoad(v.buffer, origin)}
 						);
 					}
-					// The element type is given by the type of a zero; bfloat16 is marked by a uint16 zero, as TVM's
-					// bfloat16 legalization would change a bfloat16 value (restored by bf16Storage, pipeline.cpp).
-					const PrimExpr dtypeOf = v.buffer->dtype.is_bfloat16() ? PrimExpr(IntImm(DataType::UInt(16), 0))
-																		   : tirx::make_zero(v.buffer->dtype);
-					return tirx::Call(
-							DataType::Handle(), tirx::builtin::tvm_stack_make_array(),
-							{data, shape, IntImm(DataType::Int(32), 0),
-							 IntImm(DataType::Int(32), static_cast<int>(v.buffer->shape.size())), dtypeOf,
-							 IntImm(DataType::Int(64), 0)}
-					);
+					return makeArray(data, v.buffer, v.buffer->shape);
 				}
 				default:
 					unsupported("kernel argument");
@@ -500,52 +506,112 @@ namespace mdl::backend::tvm {
 				auto it = symbols.find(gv.get());
 				if (it == symbols.end())
 					unsupported("call of " + std::string(gv->name_hint) + " (not a PrimFunc)");
-				Array<PrimExpr> callArgs{tirx::StringImm(it->second)};
+				Array<Expr> callArgs{StringImm(it->second)};
 				for (const auto& arg : args) {
 					if (arg.kind == Value::Kind::Shape) { // unpacked symbolic variables (call_tir_dyn)
 						for (const auto& d : arg.shape)
-							callArgs.push_back(::tvm::cast(DataType::Int(64), d));
+							callArgs.push_back(::tvm::prim::cast(DataType::Int(64), d));
 					} else {
 						callArgs.push_back(packedArg(arg));
 					}
 				}
 				auto hook = [&](const char* fn) {
-					return tirx::Evaluate(tirx::Call(
-							DataType::Int(32), tirx::builtin::call_extern(),
-							{tirx::StringImm(fn), tirx::StringImm(it->second)}
+					return tirx::Evaluate(::tvm::Call(
+							DataType::Int(32), tirx::builtin::call_extern(), {StringImm(fn), StringImm(it->second)}
 					));
 				};
 				if (profile)
 					stmts.push_back(hook("mdl_profile_begin"));
-				stmts.push_back(
-						tirx::Evaluate(tirx::Call(DataType::Int(32), tirx::builtin::tvm_call_cpacked(), callArgs))
-				);
+				stmts.push_back(tirx::Evaluate(cpackedCall(callArgs)));
 				if (profile)
 					stmts.push_back(hook("mdl_profile_end"));
 			}
 
-			static DataType dtypeArg(const relax::Expr& e) {
-				const auto* imm = e.as<relax::DataTypeImmNode>();
-				if (imm == nullptr)
+			static DataType dtypeArg(const Expr& e) {
+				const auto* imm = e.as<::tvm::GenericConstNode>();
+				auto dtype = imm == nullptr ? std::nullopt : imm->value.try_cast<DLDataType>();
+				if (!dtype)
 					unsupported("dtype argument");
-				return imm->value;
+				return DataType(*dtype);
 			}
 
-			Array<PrimExpr> shapeArg(const relax::Expr& e) {
+			Array<PrimExpr> shapeArg(const Expr& e) {
 				Value v = evaluate(e);
 				if (v.kind != Value::Kind::Shape)
 					unsupported("shape argument");
 				return v.shape;
 			}
 
+			static int64_t bytesOf(DataType dtype) { return (dtype.bits() * dtype.lanes() + 7) / 8; }
+
+			/**
+			 * @brief `var = if cond: a else: b` (a runtime guard): both branches compute into the same buffer (the
+			 * output, if @p var is returned); a branch's allocations are local to it.
+			 */
+			void translateIf(const ::tvm::VarNode* var, const relax::IfNode& branch) {
+				Value cond = evaluate(branch.cond);
+				if (cond.kind != Value::Kind::Prim)
+					unsupported("condition (not a scalar)");
+				const auto* info = tensorInfo(relax::GetType(::tvm::ffi::GetRef<::tvm::Var>(var)));
+				if (info == nullptr || !info->GetShape().defined())
+					unsupported("if (the result is not a tensor of known shape)");
+				tirx::BufferVar result;
+				if (auto out = outputOf.find(var); out != outputOf.end())
+					result = out->second;
+				else
+					result = allocate(info->GetShape().value(), info->dtype.value(), "result");
+				auto lower = [&](const Expr& e) {
+					const auto* seq = e.as<relax::SeqExprNode>();
+					if (seq == nullptr)
+						unsupported("if branch (expected a SeqExpr)");
+					std::vector<tirx::Stmt> outer = std::move(stmts);
+					stmts.clear();
+					for (const auto& block : seq->blocks)
+						for (const auto& b : block->bindings)
+							if (const auto* vb = b.as<relax::VarBindingNode>())
+								bindingOf[vb->var.get()] = vb->value;
+					// The branch's result: computed into the result buffer directly if it is an allocation.
+					const auto* resultVar = seq->body.as<::tvm::VarNode>();
+					while (resultVar != nullptr) {
+						auto it = bindingOf.find(resultVar);
+						const auto* alias = it == bindingOf.end() ? nullptr : it->second.as<::tvm::VarNode>();
+						if (alias == nullptr)
+							break;
+						resultVar = alias;
+					}
+					if (resultVar != nullptr)
+						outputOf.emplace(resultVar, result);
+					for (const auto& block : seq->blocks)
+						for (const auto& b : block->bindings)
+							translate(b);
+					Value v = evaluate(seq->body);
+					if (v.kind != Value::Kind::Tensor)
+						unsupported("if branch result (not a tensor)");
+					if (!v.buffer.same_as(result))
+						copy(v.buffer, result);
+					std::vector<tirx::Stmt> inner = std::move(stmts);
+					stmts = std::move(outer);
+					return inner.empty() ? tirx::Stmt(tirx::Evaluate(IntImm(DataType::Int(32), 0)))
+										 : tirx::SeqStmt::Flatten(inner);
+				};
+				auto thenStmt = lower(branch.true_branch);
+				auto elseStmt = lower(branch.false_branch);
+				stmts.push_back(tirx::IfThenElse(cond.prim, thenStmt, elseStmt));
+				values[var] = Value::tensor(result);
+			}
+
 			void translate(const relax::Binding& binding) {
-				const relax::VarNode* var = binding->var.get();
+				const ::tvm::VarNode* var = binding->var.get();
 				if (const auto* mc = binding.as<relax::MatchCastNode>()) {
 					values[var] = evaluate(mc->value);
 					return;
 				}
-				const relax::Expr& value = binding.as<relax::VarBindingNode>()->value;
-				const auto* call = value.as<relax::CallNode>();
+				const Expr& value = binding.as<relax::VarBindingNode>()->value;
+				if (const auto* branch = value.as<relax::IfNode>()) {
+					translateIf(var, *branch);
+					return;
+				}
+				const auto* call = value.as<::tvm::CallNode>();
 				if (call == nullptr) {
 					values[var] = evaluate(value);
 					return;
@@ -566,9 +632,9 @@ namespace mdl::backend::tvm {
 					callKernel(::tvm::ffi::GetRef<GlobalVar>(gv), args);
 				} else if (call->op.same_as(callTirDyn)) {
 					std::vector<Value> args;
-					for (const auto& arg : ::tvm::Downcast<relax::Tuple>(call->args[1])->fields)
+					for (const auto& arg : call->args[1].as_or_throw<relax::Tuple>()->fields)
 						args.push_back(evaluate(arg));
-					callKernel(::tvm::Downcast<GlobalVar>(call->args[0]), args);
+					callKernel(call->args[0].as_or_throw<GlobalVar>(), args);
 				} else if (call->op.same_as(builtinAlloc)) {
 					if (auto out = outputOf.find(var); out != outputOf.end())
 						values[var] = Value::tensor(out->second); // returned tensor: compute into the output buffer
@@ -579,8 +645,11 @@ namespace mdl::backend::tvm {
 					// Storage of `size` bytes; allocated as elements of the storage dtype.
 					Array<PrimExpr> size = shapeArg(call->args[0]);
 					DataType dtype = dtypeArg(call->args[3]);
-					PrimExpr bytes = ::tvm::cast(DataType::Int(64), size[0]);
-					PrimExpr elems = ::tvm::floordiv(bytes + (dtype.bytes() - 1), dtype.bytes());
+					PrimExpr bytes = ::tvm::prim::cast(DataType::Int(64), size[0]);
+					PrimExpr elems = ::tvm::floordiv(
+							bytes + IntImm(DataType::Int(64), bytesOf(dtype) - 1),
+							IntImm(DataType::Int(64), bytesOf(dtype))
+					);
 					values[var] = Value::tensor(allocate({elems}, dtype, "storage"));
 				} else if (call->op.same_as(allocTensor)) {
 					Value storage = evaluate(call->args[0]);
@@ -588,7 +657,8 @@ namespace mdl::backend::tvm {
 					if (storage.kind != Value::Kind::Tensor || storage.buffer->dtype != dtype)
 						unsupported("alloc_tensor on storage of another dtype");
 					PrimExpr offset = ::tvm::floordiv(
-							::tvm::cast(DataType::Int(64), evaluate(call->args[1]).prim), dtype.bytes()
+							::tvm::prim::cast(DataType::Int(64), evaluate(call->args[1]).prim),
+							IntImm(DataType::Int(64), bytesOf(dtype))
 					);
 					values[var] = Value::tensor(view(storage.buffer, shapeArg(call->args[2]), dtype, offset));
 				} else if (call->op.same_as(reshape)) {
@@ -601,7 +671,7 @@ namespace mdl::backend::tvm {
 				} else if (call->op.same_as(killStorage) || call->op.same_as(killTensor)) {
 					// Lifetimes are handled by the workspace allocations.
 				} else {
-					unsupported("operation " + std::string(::tvm::Downcast<::tvm::Op>(call->op)->name));
+					unsupported("operation " + std::string(call->op.as_or_throw<::tvm::Op>()->name));
 				}
 			}
 		};
@@ -610,19 +680,20 @@ namespace mdl::backend::tvm {
 	namespace {
 		/** @brief `size(dims...) -> bytes`: the size of a context buffer for the given dimensions of `...`. */
 		tirx::PrimFunc
-		contextSizeFunction(const PrimExpr& bytes, const Array<tirx::Var>& dims, const std::string& symbol) {
+		contextSizeFunction(const PrimExpr& bytes, const Array<PrimVar>& dims, const std::string& symbol) {
 			for (const auto& var : tirx::UndefinedVars(bytes))
-				if (std::find_if(dims.begin(), dims.end(), [&](const tirx::Var& d) { return d.same_as(var); }) ==
+				if (std::find_if(dims.begin(), dims.end(), [&](const PrimVar& d) { return d.same_as(var); }) ==
 					dims.end())
 					unsupported(
-							"context buffer layout (its size depends on " + std::string(var->name_hint) +
+							"context buffer layout (its size depends on " + std::string(var->name) +
 							", which is not a dimension of `...`)"
 					);
-			auto attrs = ::tvm::DictAttrs(
-					{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)}, {kAOTEntryAttr, ::tvm::Bool(true)}}
-			);
-			auto body = tirx::Evaluate(tirx::Call(DataType::Int(64), tirx::builtin::ret(), {bytes}));
-			return tirx::PrimFunc(dims, body, ::tvm::PrimType(DataType::Int(64)), {}, attrs);
+			auto attrs =
+					::tvm::DictAttrs({{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)}, {kAOTEntryAttr, true}});
+			Array<::tvm::Var> params;
+			for (const auto& d : dims)
+				params.push_back(d);
+			return tirx::PrimFunc(params, tirx::Return(bytes), DataType::Int(64), attrs);
 		}
 	} // namespace
 

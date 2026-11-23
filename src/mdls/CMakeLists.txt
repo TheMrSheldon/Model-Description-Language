@@ -11,7 +11,6 @@ add_library(mdls_lib STATIC
 	tokens.cpp
 	partial.cpp
 	models.cpp
-	unused.cpp
 	structure.cpp
 	signature.cpp
 	hints.cpp

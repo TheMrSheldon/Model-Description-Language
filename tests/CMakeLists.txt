@@ -36,6 +36,7 @@ endif()
 add_executable(tests
     mdl/computegraph/einops.cpp
     mdl/backends/tvm_patterns.cpp
+    mdl/kernels/packages.cpp
     mdl/passes/autodiff.cpp
     mdl/passes/masking.cpp
     mdl/runtime/safetensors.cpp
@@ -44,6 +45,44 @@ target_link_libraries(tests PRIVATE Catch2::Catch2WithMain mdl mdl_runtime)
 target_include_directories(tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_features(tests PRIVATE cxx_std_23)
 add_test(NAME unit_tests COMMAND tests)
+target_compile_definitions(tests PRIVATE MDL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
+# mdl-kernels list: valid packages (exit 0), a broken package (exit 1, with its problems).
+set(_kernels "${CMAKE_CURRENT_LIST_DIR}/kernels")
+add_test(NAME mdl_kernels_list COMMAND mdl-kernels --kernels-dir "${_kernels}/valid" list)
+set_tests_properties(mdl_kernels_list PROPERTIES PASS_REGULAR_EXPRESSION "cubin, device sm_80.*scaled_add 1.0")
+add_test(NAME mdl_kernels_list_problems COMMAND mdl-kernels --kernels-dir "${_kernels}/broken" list)
+set_tests_properties(mdl_kernels_list_problems PROPERTIES WILL_FAIL TRUE)
+add_subdirectory(kernels/e2e)
+
+# mdl-kernels check/dump: the selection among competing implementations (tests/kernels/matching), the verdicts, and the
+# Relax module at the matching boundary.
+set(_model "${_kernels}/models/scaled_add.dlm")
+add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}" --kernel-package competing)
+set_tests_properties(mdl_kernels_check PROPERTIES PASS_REGULAR_EXPRESSION
+	"M__forward: competing/scaled-add-aligned at v4 \\(with a runtime guard\\).*M__other: competing/add-f32.*20 candidate\\(s\\), 5 selected")
+add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}" --kernel-package competing)
+set_tests_properties(mdl_kernels_explain PROPERTIES PASS_REGULAR_EXPRESSION
+	"guard    where \\$x.shape\\[0\\] % 16 == 0 \\(checked at runtime: B % 16 == 0\\).*overlaps competing/scaled-add-aligned.*selected with a runtime guard.*it is float32.*the constant is 2 \\(it is 3\\)")
+# mdl-kernels deps/link-args: the packages' link requirements (CMake IMPORTED targets), and linker arguments from the
+# kernel report of the end-to-end test.
+add_test(NAME mdl_kernels_deps COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" deps --kernel-package competing)
+set_tests_properties(mdl_kernels_deps PROPERTIES PASS_REGULAR_EXPRESSION
+	"add_library\\(mdl_kernel_artifact_competing_host STATIC IMPORTED\\).*MDL_KERNEL_PACKAGE_BUILD_competing IMPORTED")
+add_test(NAME mdl_kernels_deps_unknown COMMAND mdl-kernels deps --kernel-package nonexistent)
+set_tests_properties(mdl_kernels_deps_unknown PROPERTIES WILL_FAIL TRUE)
+add_test(NAME mdl_kernels_link_args COMMAND mdl-kernels link-args "${CMAKE_CURRENT_BINARY_DIR}/kernels/e2e/kernel-report.json")
+set_tests_properties(mdl_kernels_link_args PROPERTIES PASS_REGULAR_EXPRESSION "scaled_add_c")
+# check reads the argument values like mdlc (-a, --build): quantized weights select the quantized oneDNN kernel.
+if(TARGET mdl_kernel_package_onednn)
+	set(_quantized "${CMAKE_CURRENT_LIST_DIR}/../examples/09_quantization")
+	add_test(NAME mdl_kernels_check_build COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
+		"${_quantized}/model.dlm" -a "${_quantized}/model.yml" --build mixed --kernel-package onednn)
+	set_tests_properties(mdl_kernels_check_build PROPERTIES PASS_REGULAR_EXPRESSION
+		"onednn/matmul-quantized-f32.*2 selected")
+endif()
+add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
+set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")
 
 # The build settings of argument-value files (mdlc --arg-vals, see docs/build-config.md): the command line takes
 # precedence, unknown keys and builds are errors.

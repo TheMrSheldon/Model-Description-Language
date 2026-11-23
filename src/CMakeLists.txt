@@ -20,10 +20,11 @@ if (NOT BUILD_SHARED_LIBS)
 endif()
 # The C runtime of antlr4_runtime (Visual C++ only): static (/MT) if the project uses the static runtime (release builds
 # of the tools, -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded), else /MD.
+# (A cache variable: ANTLR's option() would ignore a normal variable; its default is ON.)
 if(CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "^MultiThreaded(Debug)?$")
-	set(ANTLR4_WITH_STATIC_CRT ON)
+	set(WITH_STATIC_CRT ON CACHE BOOL "" FORCE)
 else()
-	set(ANTLR4_WITH_STATIC_CRT OFF)
+	set(WITH_STATIC_CRT OFF CACHE BOOL "" FORCE)
 endif()
 set(ANTLR_BUILD_CPP_TESTS OFF)
 FetchContent_Declare(
@@ -54,14 +55,16 @@ CPMAddPackage(URI "gh:CLIUtils/CLI11@2.4.2" EXCLUDE_FROM_ALL YES)
 ##########################################################################################
 if(MDL_ENABLE_COMPILER)
 	# TVM
-	# - Vendor kernels (GEMM, softmax, layer norm, ...) are provided by oneDNN through the mdl_kernels library, so TVM's
+	# - Optimized kernels (GEMM, softmax, layer norm, ...) come from kernel packages (oneDNN: kernels/onednn), so TVM's
 	#   BLAS contrib is not needed.
 	# - TVM's parallel loops use OpenMP so that TVM-generated kernels and oneDNN share one thread pool (no
 	#   oversubscription).
-	# - Pinned to 0.24: TVM 0.25+ replaces Relax StructInfo by a new type system and removes TIR buffer maps, which
-	#   requires porting the whole backend (planned as a separate upgrade).
+	# - Pinned to v0.27.0.post1 (= v0.27.0 + one CUDA fix) by commit, so that the exact revision is reproducible.
 	CPMAddPackage(
-		URI "gh:apache/tvm@0.24.0"
+		NAME tvm
+		VERSION 0.27.0
+		GITHUB_REPOSITORY apache/tvm
+		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
 		OPTIONS "USE_LLVM ON" "USE_CUDA OFF" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
@@ -77,7 +80,7 @@ endif()
 ##########################################################################################
 # Libraries and commands
 ##########################################################################################
-add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_kernels (compiler)
+add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_profile (compiler)
 add_subdirectory(mdls)     # mdls_lib (the language server)
 add_subdirectory(commands) # mdl-format, mdls; mdlc, mdl-info (compiler)
 

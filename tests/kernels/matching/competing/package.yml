@@ -1,0 +1,71 @@
+# Implementations that compete for the same places (tests of the selection; nothing is executed).
+schema: 1
+package: competing
+version: "1.0"
+
+artifacts:
+  host:
+    kind: static-library
+    path: lib/libcompeting.placeholder
+    platform: { os: linux, arch: x86_64 }
+
+patterns:
+  scaled-add:   # 2 * x + y (two bindings)
+    op: relax.add
+    args:
+      - op: relax.multiply
+        args: [{ capture: x }, { const: 2.0 }]
+      - { capture: y }
+  add:          # a + b (one binding)
+    op: relax.add
+    args: [{ capture: a }, { capture: b }]
+
+implementations:
+  add-f32:
+    pattern: add
+    artifacts: [host]
+    priority: 10
+    symbol: add_f32
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $a.data }
+        - { type: pointer, access: read, value: $b.data }
+    applicability:
+      dtype: { a: float32, b: float32 }
+  scaled-add-f32:   # the same priority as add-f32 but a larger region: wins
+    pattern: scaled-add
+    artifacts: [host]
+    priority: 10
+    symbol: scaled_add_f32
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $y.data }
+    applicability:
+      dtype: { x: float32, y: float32 }
+  scaled-add-aligned:   # higher priority; the batch size is symbolic: selected with a runtime guard
+    pattern: scaled-add
+    artifacts: [host]
+    priority: 20
+    symbol: scaled_add_aligned
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $y.data }
+    applicability:
+      where: ["$x.shape[0] % 16 == 0"]
+  scaled-add-f16:   # the wrong element type
+    pattern: scaled-add
+    artifacts: [host]
+    priority: 30
+    symbol: scaled_add_f16
+    signature:
+      arguments:
+        - { type: pointer, access: write, value: $out.data }
+        - { type: pointer, access: read, value: $x.data }
+        - { type: pointer, access: read, value: $y.data }
+    applicability:
+      dtype: { x: float16 }

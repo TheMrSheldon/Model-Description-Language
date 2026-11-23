@@ -406,10 +406,12 @@ void mdls::Server::analyze(Document& document) {
 		};
 		if (!d.flag.empty())
 			diagnostic["code"] = d.flag;
+		if (d.flag == "unused" && d.severity == mdl::Severity::warning) { // shown faded, not as a warning
+			diagnostic["severity"] = 4;
+			diagnostic["tags"] = json::array({1});
+		}
 		diagnostics.push_back(std::move(diagnostic));
 	}
-	for (auto& unused : unusedDiagnostics(document, *result.index))
-		diagnostics.push_back(std::move(unused));
 	notify("textDocument/publishDiagnostics",
 		   {{"uri", document.uri}, {"version", document.version}, {"diagnostics", diagnostics}});
 }

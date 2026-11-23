@@ -1,11 +1,10 @@
-#ifndef MDL_RUNTIME_KERNELS_H
-#define MDL_RUNTIME_KERNELS_H
+#ifndef MDL_ONEDNN_H
+#define MDL_ONEDNN_H
 
 /**
  * @file
- * @brief C ABI of the vendor kernels (library `mdl_kernels`) that compiled models call into.
- * @details The TVM backend emits `call_extern` calls to these symbols when it recognizes a matching subgraph (see the
- * backend's pattern registry and legalizers). All tensors are dense and row-major. Every kernel exists for float32
+ * @brief C ABI of the oneDNN kernels (library `mdl_onednn`) of the kernel package `onednn` (see package.yml.in).
+ * @details Compiled models call these symbols where the package's implementations are selected (see docs/kernels.md). All tensors are dense and row-major. Every kernel exists for float32
  * (`_f32`, `float*`), bfloat16 (`_bf16`) and float16 (`_f16`; both `uint16_t*` bit patterns); the scalar arguments are
  * float32 in all variants. 16-bit kernels compute in float32 internally where oneDNN supports the type, and otherwise
  * convert to float32 (e.g. float16 on CPUs without float16 arithmetic). Every function returns 0 on success and a
@@ -63,13 +62,6 @@ MDL_MATMUL_Q_DECLARE(bf16, uint16_t)
 MDL_MATMUL_Q_DECLARE(f16, uint16_t)
 #undef MDL_MATMUL_Q_DECLARE
 
-/**
- * @brief Profiling hooks: models compiled with `mdlc --profile` call these around every kernel call. The times are
- * summed per kernel kind and printed to stderr at program exit.
- */
-int mdl_profile_begin(const char* kernel);
-int mdl_profile_end(const char* kernel);
-
 /** @brief Softmax over the last axis of a [outer, axis] tensor (in-place allowed). */
 int mdl_softmax_f32(float* dst, const float* src, int64_t outer, int64_t axis);
 int mdl_softmax_bf16(uint16_t* dst, const uint16_t* src, int64_t outer, int64_t axis);
@@ -103,6 +95,23 @@ int mdl_layer_norm_f16(
 		int64_t channels, float eps
 );
 
+/**
+ * @brief The gradient of a layer normalization over the last axis with respect to its input: dx = rsqrt(var) * (g -
+ * mean(g) - xhat * mean(g * xhat)) with g = dy * gamma, for [rows, channels] tensors dy and xhat (the normalized
+ * input) and var [rows] (the variance plus epsilon).
+ */
+int mdl_layer_norm_backward_f32(
+		float* dx, const float* dy, const float* gamma, const float* xhat, const float* var, int64_t rows,
+		int64_t channels
+);
+int mdl_layer_norm_backward_bf16(
+		uint16_t* dx, const uint16_t* dy, const uint16_t* gamma, const uint16_t* xhat, const uint16_t* var,
+		int64_t rows, int64_t channels
+);
+int mdl_layer_norm_backward_f16(
+		uint16_t* dx, const uint16_t* dy, const uint16_t* gamma, const uint16_t* xhat, const uint16_t* var,
+		int64_t rows, int64_t channels
+);
 #ifdef __cplusplus
 }
 #endif

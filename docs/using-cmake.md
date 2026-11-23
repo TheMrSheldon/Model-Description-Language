@@ -28,7 +28,8 @@ Options:
 | `SOURCE <file>` | The model (required). |
 | `CONFIG <file>` | Hyperparameter values (`mdlc --arg-vals`). |
 | `SHARED` | Build a shared library (e.g., to load it from Python via `tvm_ffi.load_module`). |
-| `KERNELS onednn\|tvm` | Use the oneDNN kernels of `mdl_kernels` (default when available) or TVM-generated kernels only. |
+| `KERNELS packages\|none` | Use the kernel packages, including oneDNN (default), or TVM-generated kernels only. |
+| `KERNEL_PACKAGES <name>...` | Kernel packages the model may use; they are linked (see [kernels.md](kernels.md)). |
 | `IMPORT_DIRS <dir>...` | Additional search paths for `import`. |
 | `BINDINGS <type>...` | Additional bindings (e.g. `python-torch`), generated next to the object file. |
 | `OPTIONS <option>...` | Additional `mdlc` options. |

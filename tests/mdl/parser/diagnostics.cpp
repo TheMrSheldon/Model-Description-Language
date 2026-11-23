@@ -1,5 +1,6 @@
 // The diagnostics of the frontend as data (parser::analyze): messages, ranges, severities, hints, and flags.
 #include <mdl/parser.hpp>
+#include <set>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -95,7 +96,7 @@ TEST_CASE("code elaborated several times reports an error once", "[parser][diagn
 			float[..., 2] forward(x: float[..., 2]) => a(x);
 		})");
 	REQUIRE_FALSE(result.ok);
-	CHECK(result.diagnostics.size() == 1);
+	CHECK(std::ranges::count_if(result.diagnostics, [](const auto& d) { return d.flag != "unused"; }) == 1);
 }
 
 TEST_CASE("analyze keeps the compilation unit when there are errors", "[parser][diagnostics]") {
@@ -107,7 +108,7 @@ TEST_CASE("analyze keeps the compilation unit when there are errors", "[parser][
 	// parse() fails on the same code (and prints the diagnostic to a sink if one is given).
 	size_t reported = 0;
 	parser::ParseOptions options;
-	options.diagnostics = [&](const Diagnostic&) { ++reported; };
+	options.diagnostics = [&](const Diagnostic& d) { reported += d.flag != "unused"; };
 	std::istringstream source{"float[...] bad(x: float[...]) => y;"};
 	CHECK_FALSE(parser::parse(source, "<test>", options).has_value());
 	CHECK(reported == 1);
@@ -244,4 +245,162 @@ TEST_CASE("an integer tensor index selects rows", "[parser][diagnostics]") {
 	auto removed =
 			analyzeSource("module M[] { t: float[3, 4] float[..., 4] f(ids: int[...]) => __builtin_take(t, ids); }");
 	CHECK_FALSE(removed.ok); // the builtin's name is gone: indexing is the way to select rows
+}
+
+TEST_CASE("the compiler reports the same diagnostics as the tools", "[parser][diagnostics]") {
+	// A generic module that is never instantiated (checked with symbolic values) and an unused variable.
+	const std::string source = R"(module Inner[n: uint] { W: float[n, n] float[n] forward(x: float[n]) => W @ x; }
+module M[bias: bool] {
+    @conditional(bias)
+    inner: Inner[4]
+    float[4] forward(x: float[4]) { auto unused = x; return inner(x); }
+})";
+	std::set<std::string> flags;
+	parser::ParseOptions options;
+	options.diagnostics = [&](const Diagnostic& d) { flags.insert(d.flag); };
+	std::istringstream stream{source};
+	CHECK(parser::parse(stream, "<test>", options).has_value()); // warnings only
+	CHECK(flags == std::set<std::string>{"permits-illegal-instantiation", "unused"});
+
+	options.unused = parser::DiagnosticLevel::ignored;
+	options.permitsIllegalInstantiation = parser::DiagnosticLevel::error;
+	flags.clear();
+	std::istringstream again{source};
+	CHECK_FALSE(parser::parse(again, "<test>", options).has_value());
+	CHECK(flags == std::set<std::string>{"permits-illegal-instantiation"});
+}
+
+namespace {
+	std::vector<std::string> errorsOf(const std::string& code) {
+		std::vector<std::string> errors;
+		for (const auto& d : analyzeSource(code).diagnostics)
+			if (d.severity == Severity::error)
+				errors.push_back(d.message);
+		return errors;
+	}
+} // namespace
+
+TEST_CASE("`_` is a discarded value", "[parser][diagnostics]") {
+	// Discarding: loop variables and declarations.
+	CHECK(errorsOf(R"(
+		module Layer[] { W: float[4, 4] float[4] forward(x: float[4]) => x @ W; }
+		module M[] {
+			layers: [Layer[] for _ in 0..2]
+			float[4] f(x: float[4]) {
+				auto h = x;
+				for (_ in 0..2) { h = h + 1.0; }
+				auto a, _ = split(h);
+				auto _ = a;
+				return layers[1](a);
+			}
+		}
+		(float[4], float[4]) split(x: float[4]) { return x, x; })")
+				  .empty());
+	// It has no value, type, or members.
+	const std::string use = "`_` is a discarded value: it has no value, type, or members";
+	CHECK(errorsOf("float[4] f(x: float[4]) { for (_ in 0..2) { x = x + _; } return x; }") ==
+		  std::vector<std::string>{use});
+	CHECK(errorsOf("float[4] f(x: float[4]) { auto _ = x; return _.T(); }") == std::vector<std::string>{use});
+	CHECK(errorsOf("float[4] f(x: float[4]) { float[4] _ = x; return x; }") ==
+		  std::vector<std::string>{"`_` discards a value: it has no type (write `auto _ = ...;`)"});
+}
+
+TEST_CASE("weights, submodules, hyperparameters, and loop variables are read-only", "[parser][diagnostics]") {
+	const std::string module = R"(
+		module Lin[n: uint] { W: float[n, n] float[n] forward(x: float[n]) => x @ W; }
+		module M[n: uint] {
+			W: float[n, n]
+			lin: Lin[n]
+			float[n] f(x: float[n]) { BODY return x; }
+		})";
+	auto body = [&](const std::string& code) {
+		std::string m = module;
+		return errorsOf(m.replace(m.find("BODY"), 4, code));
+	};
+	CHECK(body("W = W * 2.0;") == std::vector<std::string>{"W is a member of the module and cannot be assigned"});
+	CHECK(body("lin = lin;") == std::vector<std::string>{"lin is a member of the module and cannot be assigned"});
+	CHECK(body("n = 3;") == std::vector<std::string>{"n is a hyperparameter and cannot be assigned"});
+	CHECK(body("for (i in 0..2) { i = 1; }") == std::vector<std::string>{"i is a loop variable and cannot be assigned"}
+	);
+	CHECK(body("x = x @ W;").empty());				 // parameters and variables are rebound
+	CHECK(body("auto W = x; W = W + 1.0;").empty()); // a local variable hides the member
+}
+
+TEST_CASE("definitions that hide others are reported (-Wshadow)", "[parser][diagnostics]") {
+	auto result = analyzeSource(R"(module M[n: uint] {
+    W: float[n, n]
+    float[n] f(x: float[n], n: float[n]) {
+        auto W = x;
+        for (i in 0..2) {
+            auto x = W;
+            for (i in 0..2) { W = x; }
+        }
+        return W;
+    }
+}
+float[4] relu(x: float[4]) => x;
+float[4] g(x: float[4]) { auto relu = x; return relu; })");
+	std::vector<std::string> shadows;
+	for (const auto& d : result.diagnostics)
+		if (d.flag == "shadow")
+			shadows.push_back(d.message);
+	CHECK(shadows == std::vector<std::string>{
+							 "n shadows the hyperparameter n (line 1)", "W shadows the member W (line 2)",
+							 "x shadows the parameter x (line 3)", "i shadows the loop variable i (line 5)"
+					 }); // (not: hiding the function relu)
+
+	parser::ParseOptions options;
+	options.shadow = parser::DiagnosticLevel::ignored;
+	for (const auto& d : analyzeSource("module M[] { W: float[4] float[4] f(W: float[4]) => W; }", options).diagnostics)
+		CHECK(d.flag != "shadow");
+}
+
+TEST_CASE("sizes computed from hyperparameter values are compared as numbers", "[parser][diagnostics]") {
+	// In the instance M[4, 8], lin is L[32] (its value folded), so lin(x) is float[..., 32], while the parameter of f
+	// is float[..., 4 * 8]: equal sizes.
+	auto result = analyzeSource(R"(module L[n: uint] {
+    W: float[n, n]
+    float[..., n] forward(x: float[..., n]) => x @ W;
+}
+module M[h: uint, k: uint] {
+    lin: L[h * k]
+    float[..., h * k] f(x: float[..., h * k]) => x;
+    float[..., h * k] g(x: float[..., h * k]) => f(lin(x));
+}
+module N[] {
+    m: M[4, 8]
+    float[..., 32] run(x: float[..., 32]) => m.g(x);
+})");
+	size_t possible = 0;
+	for (const auto& d : result.diagnostics)
+		possible += d.flag == "permits-illegal-instantiation";
+	CHECK(possible == 0);
+}
+
+TEST_CASE("einops patterns are checked against the sizes of the tensor", "[parser][diagnostics]") {
+	auto errors = [](const std::string& code) {
+		std::vector<std::string> messages;
+		for (const auto& d : analyzeSource(code).diagnostics)
+			if (d.severity == Severity::error)
+				messages.push_back(d.message);
+		return messages;
+	};
+	CHECK(errors("float[4, 2] f(x: float[6]) => x[(a b) -> a b | a=4, b=2];") ==
+		  std::vector<std::string>{"einops error: The group (a b) has size 8, but the dimension has size 6"});
+	CHECK(errors("float[4] f(x: float[6]) => x[a -> a | a=4];") ==
+		  std::vector<std::string>{"einops error: The axis a has size 4, but the dimension has size 6"});
+	CHECK(errors("float[4, 2] f(x: float[8]) => x[(a b) -> a b | a=4, b=2];").empty());
+	CHECK(errors("float[4, 2] f(x: float[8]) => x[(a 2) -> a 2];").empty());
+	// In an instance, the error is reported once in the module and once where it is instantiated; uses of the failed
+	// instance cause no further errors (and the arguments still count as used).
+	auto result = analyzeSource(R"(module M[n: uint] { float[4, 2] f(x: float[n]) => x[(a b) -> a b | a=4, b=2]; }
+module N[] { m: M[6] float[4, 2] g(x: float[6]) => m.f(x); })");
+	std::vector<std::string> messages;
+	for (const auto& d : result.diagnostics)
+		messages.push_back(d.message);
+	CHECK(messages == std::vector<std::string>{
+							  "einops error: The group (a b) has size 8, but the dimension has size 6",
+							  "M[6] has an error: einops error: The group (a b) has size 8, but the dimension has size 6 "
+							  "(<test>:1:51)",
+					  });
 }

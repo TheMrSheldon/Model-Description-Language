@@ -26,7 +26,7 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 ```
 - `--arg-vals` sets the hyperparameters (here `FFN: {indim: 8, outdim: 3}`).
 - `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`, `json` (metadata).
-- `--kernels onednn|tvm` selects the kernels for recognized operations (oneDNN via `mdl_kernels`, or TVM-generated only).
+- `--kernels packages|none` selects whether optimized kernels of kernel packages (e.g. oneDNN, see `docs/kernels.md`) are used, or TVM-generated kernels only.
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
   `--ellipsis-rank NAME=K` gives the input `NAME` only the leading `K` of them (e.g. `labels=1`: labels `[batch]` next
   to token ids `[batch, seq]`). Outputs get their shapes from shape inference (e.g. pooled `[batch, dim]`).
@@ -51,8 +51,8 @@ mdlc model.dlm -a model.yml --build train -o model_train.o --binding cpp=model_t
 ```
 
 The object file exports one function per member function (`__tvm_ffi_<Module>__<function>`, TVM FFI calling
-convention: inputs, weights, preallocated outputs). Link it against `mdl_runtime` (TVM runtime) and, with the oneDNN
-kernels, `mdl_kernels`.
+convention: inputs, weights, preallocated outputs). Link it against `mdl_runtime` (TVM runtime) and the libraries of
+the kernel packages it uses (`mdlc --kernel-report`, `mdl-kernels link-args`; e.g. `mdl_onednn` for oneDNN).
 
 ## Gradients
 ```bash
@@ -72,7 +72,7 @@ float loss(ids: int[..., seq], labels: int[...]) => cross_entropy(forward(ids), 
 ```
 `int` tensors (token ids, labels) are passed as int32 (`mdl::runtime::IntTensor`); they get no gradients. `std` provides
 `Embedding` (a lookup table; its gradient adds the selected rows), `cross_entropy`, `one_hot_like`, `mse`, `logsumexp`,
-and `sum_all`/`mean_all`. See [examples/05_classification](examples/05_classification/).
+and `sum_flat`/`mean_flat`. See [examples/05_classification](examples/05_classification/).
 
 **The caller computes the objective** (e.g. the trainer) and provides the cotangent `dL/d_output`:
 - `forward(x) -> output` also saves the values the backward pass needs in a context buffer `ctx`,

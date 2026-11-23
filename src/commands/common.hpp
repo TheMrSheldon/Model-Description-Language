@@ -25,7 +25,7 @@ struct LoggerConf final {
 	}
 };
 
-void setupLoggerArgs(CLI::App& app, LoggerConf& conf) {
+inline void setupLoggerArgs(CLI::App& app, LoggerConf& conf) {
 	app.add_flag(
 			"-v,--verbose", conf.verbosity,
 			"Sets the logger's verbosity. Passing it multiple times increases verbosity."

@@ -1,7 +1,7 @@
 // Kernel profiling for models compiled with `mdlc --profile`: the generated entry functions call
 // mdl_profile_begin/end around every kernel call. The times are summed per kernel kind (the kernel name without its
 // numeric suffix) and printed to stderr when the program exits.
-#include <mdl/runtime/kernels.h>
+#include <mdl/runtime/profile.h>
 
 #include <algorithm>
 #include <cctype>
@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,11 @@ namespace {
 		std::string s = name;
 		if (auto k = s.find("_k_"); k != std::string::npos)
 			s = s.substr(k + 3);
+		// TVM numbers kernels of the same kind (`add1`, `mdl_matmul_f321`); an element type suffix (`_f32`, `_bf16`)
+		// is part of the name.
+		static const std::regex typed{R"((.*_(f|bf|i|u)(8|16|32|64))[0-9]*)"};
+		if (std::smatch m; std::regex_match(s, m, typed))
+			return m[1];
 		while (!s.empty() && std::isdigit(static_cast<unsigned char>(s.back())))
 			s.pop_back();
 		return s;

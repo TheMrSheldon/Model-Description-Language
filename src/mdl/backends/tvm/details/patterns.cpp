@@ -1,12 +1,13 @@
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
+#include "./tvm_compat.hpp"
 #include <cstring>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/relax/attrs/manipulate.h>
 #include <tvm/relax/attrs/statistical.h>
 #include <tvm/relax/dataflow_pattern.h>
-#include <tvm/relax/struct_info.h>
+#include <tvm/relax/type.h>
+#include <tvm/sym/analyzer.h>
 
 #include <cmath>
 #include <optional>
@@ -17,6 +18,12 @@ namespace mdl::backend::tvm {
 	using ::tvm::ffi::Array;
 	using ::tvm::ffi::Map;
 	using namespace ::tvm::relax;
+	using ::tvm::Call;
+	using ::tvm::CallNode;
+	using ::tvm::Expr;
+	using ::tvm::Type;
+	using ::tvm::Var;
+	using ::tvm::VarNode;
 
 	namespace {
 		using Bindings = Map<Var, Expr>;
@@ -32,38 +39,6 @@ namespace mdl::backend::tvm {
 			return e;
 		}
 
-		/** @brief The value of a scalar constant (0-d / single-element float constant or PrimValue). */
-		std::optional<double> scalarConstant(const Expr& e) {
-			if (const auto* c = e.as<ConstantNode>()) {
-				const auto& data = c->data;
-				if (data.Shape().Product() != 1 || (data->dtype.code != kDLFloat && data->dtype.code != kDLBfloat))
-					return std::nullopt;
-				if (data->dtype.code == kDLBfloat && data->dtype.bits == 16) {
-					const uint32_t bits = static_cast<uint32_t>(static_cast<const uint16_t*>(data->data)[0]) << 16;
-					float value;
-					std::memcpy(&value, &bits, sizeof(value));
-					return value;
-				}
-				if (data->dtype.bits == 16) {
-					_Float16 half;
-					std::memcpy(&half, data->data, sizeof(half));
-					return static_cast<double>(half);
-				}
-				if (data->dtype.bits == 32)
-					return static_cast<const float*>(data->data)[0];
-				if (data->dtype.bits == 64)
-					return static_cast<const double*>(data->data)[0];
-				return std::nullopt;
-			}
-			if (const auto* pv = e.as<PrimValueNode>()) {
-				if (const auto* f = pv->value.as<::tvm::FloatImmNode>())
-					return f->value;
-				if (const auto* i = pv->value.as<::tvm::IntImmNode>())
-					return static_cast<double>(i->value);
-			}
-			return std::nullopt;
-		}
-
 		bool near(std::optional<double> value, double expected) {
 			return value && std::abs(*value - expected) <= 1e-6 * std::max(1.0, std::abs(expected));
 		}
@@ -71,21 +46,14 @@ namespace mdl::backend::tvm {
 		/** @brief Whether @p e is a scalar constant equal to @p expected within the precision of its type. */
 		bool near(const Expr& e, double expected) {
 			auto value = scalarConstant(e);
-			const auto* c = e.as<ConstantNode>();
-			const bool half = c != nullptr && c->data->dtype.bits == 16; // float16: 11, bfloat16: 8 significant bits
-			const double tolerance = half ? (c->data->dtype.code == kDLBfloat ? 4e-3 : 5e-4) : 1e-6;
+			const auto c = tensorConstant(e);
+			const bool half = c && (*c)->dtype.bits == 16; // float16: 11, bfloat16: 8 significant bits
+			const double tolerance = half ? ((*c)->dtype.code == kDLBfloat ? 4e-3 : 5e-4) : 1e-6;
 			return value && std::abs(*value - expected) <= tolerance * std::max(1.0, std::abs(expected));
 		}
 
-		std::optional<Array<PrimExpr>> shapeOf(const Expr& e) {
-			const auto* info = GetStructInfoAs<TensorStructInfoNode>(e);
-			if (info == nullptr || !info->GetShape().defined())
-				return std::nullopt;
-			return info->GetShape().value();
-		}
-
 		size_t rankOf(const Expr& e) {
-			auto shape = shapeOf(e);
+			auto shape = knownShape(e);
 			return shape ? shape->size() : 0;
 		}
 
@@ -96,7 +64,7 @@ namespace mdl::backend::tvm {
 			if (attrs == nullptr || attrs->keepdims != keepdims || !attrs->axis.defined() ||
 				attrs->axis.value().size() != 1)
 				return false;
-			int64_t axis = attrs->axis.value()[0]->value;
+			int64_t axis = attrs->axis.value()[0];
 			return axis == -1 || axis == static_cast<int64_t>(rankOf(c->args[0])) - 1;
 		}
 
@@ -116,7 +84,7 @@ namespace mdl::backend::tvm {
 				return false;
 			for (size_t i = 0; i < rank; ++i) {
 				size_t expected = (i + 2 < rank) ? i : (i + 2 == rank ? rank - 1 : rank - 2);
-				int64_t axis = axes[i]->value;
+				int64_t axis = axes[i];
 				if (axis < 0)
 					axis += static_cast<int64_t>(rank);
 				if (axis != static_cast<int64_t>(expected))
@@ -127,7 +95,7 @@ namespace mdl::backend::tvm {
 
 		/** @brief Whether the last dimension of @p e equals @p n. */
 		bool lastDimEquals(const Expr& e, double n) {
-			auto shape = shapeOf(e);
+			auto shape = knownShape(e);
 			if (!shape || shape->empty())
 				return false;
 			const auto* imm = shape->back().as<::tvm::IntImmNode>();
@@ -136,27 +104,37 @@ namespace mdl::backend::tvm {
 
 		/** @brief Whether @p e is a 1-D tensor whose length equals the last dimension of @p of. */
 		bool isVectorOverLastDim(const Expr& e, const Expr& of) {
-			auto shape = shapeOf(e), ofShape = shapeOf(of);
+			auto shape = knownShape(e), ofShape = knownShape(of);
 			if (!shape || !ofShape || shape->size() != 1 || ofShape->empty())
 				return false;
-			return ::tvm::arith::Analyzer().CanProveEqual((*shape)[0], ofShape->back());
+			return ::tvm::sym::Analyzer()->CanProveEqual((*shape)[0], ofShape->back());
 		}
 
 		Expr callOp(const char* name, Array<Expr> args, ::tvm::Attrs attrs = {}) {
-			return Call(::tvm::Op::Get(name), args, attrs);
+			return Call(Type::Missing(), ::tvm::Op::Get(name), args, attrs);
 		}
 
 		// ── softmax: exp(x - max(x)) / sum(exp(x - max(x))) ────────────────────────────────────────────────
 
 		PatternEntry makeSoftmax() {
+			// The reductions keep the last axis: with keepdims, or (as MDL emits them) without and restored by a
+			// reshape to [..., 1].
 			auto x = Wildcard();
 			auto maxX = IsOp("relax.max")(x);
-			auto e = IsOp("relax.exp")(IsOp("relax.subtract")(x, maxX));
+			auto maxKept = IsOp("relax.reshape")(maxX, Wildcard());
+			auto e = IsOp("relax.exp")(IsOp("relax.subtract")(x, maxX | maxKept));
 			auto sumE = IsOp("relax.sum")(e);
-			DFPattern pattern = IsOp("relax.divide")(e, sumE);
+			auto sumKept = IsOp("relax.reshape")(sumE, Wildcard());
+			DFPattern pattern = IsOp("relax.divide")(e, sumE | sumKept);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
-				if (!reducesLastAxis(at(maxX), true) || !reducesLastAxis(at(sumE), true))
+				auto kept = [&](const DFPattern& reduction, const DFPattern& reshape) {
+					if (!m.count(reshape))
+						return reducesLastAxis(at(reduction), true);
+					return reducesLastAxis(at(reduction), false) && rankOf(m.at(reshape)) == rankOf(m.at(x)) &&
+						   lastDimEquals(m.at(reshape), 1);
+				};
+				if (!kept(maxX, maxKept) || !kept(sumE, sumKept))
 					return call;
 				static const auto softmax = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.softmax");
 				return softmax(m.at(x), -1).cast<Expr>();
@@ -227,8 +205,7 @@ namespace mdl::backend::tvm {
 					!isVectorOverLastDim(m.at(beta), in))
 					return call;
 				static const auto layerNorm = ::tvm::ffi::Function::GetGlobalRequired("relax.op.nn.layer_norm");
-				return layerNorm(in, m.at(gamma), m.at(beta), Array<::tvm::Integer>{-1}, *epsilon, true, true)
-						.cast<Expr>();
+				return layerNorm(in, m.at(gamma), m.at(beta), Array<int64_t>{-1}, *epsilon, true, true).cast<Expr>();
 			};
 			return {"layer_norm", pattern, rewriter};
 		}
@@ -308,11 +285,11 @@ namespace mdl::backend::tvm {
 				const auto* mm = productCall.as<CallNode>();
 				auto alpha = scalarConstant(mm->args[6]);
 				// Only without bias: (a @ b + bias) / c != alpha * (a @ b) + bias.
-				if (!divisor || *divisor == 0.0 || !alpha || mm->args[2].as<PrimValueNode>() == nullptr)
+				if (!divisor || *divisor == 0.0 || !alpha || !scalarValue(mm->args[2]))
 					return call;
 				auto args = mm->args;
-				args.Set(6, ::tvm::relax::PrimValue(::tvm::FloatImm(::tvm::DataType::Float(64), *alpha / *divisor)));
-				return Call(mm->op, args, mm->attrs, mm->sinfo_args);
+				args.Set(6, ::tvm::FloatImm(::tvm::PrimType::Float(64), *alpha / *divisor));
+				return Call(Type::Missing(), mm->op, args, mm->attrs, mm->ty_args);
 			};
 			return {"matmul scale", pattern, rewriter};
 		}

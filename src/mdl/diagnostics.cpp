@@ -14,6 +14,9 @@
 #include <cstddef>
 #include <format>
 #include <string>
+#include <string_view>
+
+#include <support/Utf8.h>
 
 /**
  * @brief Get the width of the terminal in characters
@@ -182,4 +185,36 @@ void mdl::printDiagnosticSummary(std::ostream& os, size_t errors, size_t warning
 	if (warnings > 0)
 		os << termcolor::yellow << warnings << " warning(s)" << termcolor::reset;
 	os << std::endl;
+}
+
+std::optional<mdl::Diagnostic> mdl::invalidUtf8(std::string_view text, const std::string& file) {
+	if (text.starts_with("\xEF\xBB\xBF"))
+		text.remove_prefix(3); // the byte order mark (skipped by the parser)
+	size_t line = 1, column = 0, lineStart = 0;
+	for (size_t i = 0; i < text.size();) {
+		const auto [point, length] = antlrcpp::Utf8::decode(text.substr(i));
+		if (point == 0xFFFD && text.substr(i, 3) != "\xEF\xBF\xBD") { // (not an encoded replacement character)
+			const auto end = text.find('\n', i);
+			const std::string lineText = antlrcpp::Utf8::lenientEncode(antlrcpp::Utf8::lenientDecode(
+					text.substr(lineStart, end == std::string_view::npos ? end : end - lineStart)
+			));
+			return Diagnostic{
+					.file = file,
+					.range = {{line, column}, {line, column + 1}},
+					.message = std::format(
+							"Invalid UTF-8 (byte 0x{:02X}): source files must be UTF-8",
+							static_cast<unsigned char>(text[i])
+					),
+					.context = {{.number = line, .text = lineText, .markBegin = column, .markWidth = 1}},
+			};
+		}
+		if (point == U'\n') {
+			++line;
+			column = 0;
+			lineStart = i + 1;
+		} else
+			++column;
+		i += length;
+	}
+	return std::nullopt;
 }

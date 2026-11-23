@@ -9,6 +9,7 @@ include(FeatureSummary)
 option(MDL_BUILD_TESTS "Build the tests" OFF)
 add_feature_info(tests MDL_BUILD_TESTS "Build the MDL tests")
 option(MDL_BUILD_EXAMPLES "Build the examples" OFF)
+option(MDL_BENCHMARKS "Build the benchmarks of scripts/benchmark.sh (with the examples)" OFF)
 add_feature_info(examples MDL_BUILD_EXAMPLES "Build the MDL examples")
 
 
@@ -92,6 +93,9 @@ add_subdirectory(src)
 ##########################################################################################
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(MDL)
+if(MDL_ENABLE_COMPILER)
+	add_subdirectory(kernels) # the kernel packages of the project (e.g. oneDNN), see docs/kernels.md
+endif()
 if (MDL_BUILD_TESTS OR MDL_BUILD_EXAMPLES)
 	enable_testing()  # before add_subdirectory(examples) so that the examples' tests are registered
 endif()

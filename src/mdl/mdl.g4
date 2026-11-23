@@ -26,7 +26,7 @@ type
       : masked='masked'? typename=IDENT ('[' (type_arg (',' type_arg)*)? ']')?   # TypeSpec
       | 'struct' '{' vardecl* '}'                               # AnonType
       // Array of `element` for var = lo, ..., hi-1 (e.g. a stack of modules)
-      | '[' element=type 'for' var=IDENT 'in' lo=expr '..' hi=expr ']' # ComprehensionType
+      | '[' element=type 'for' var=(IDENT | '_') 'in' lo=expr '..' hi=expr ']' # ComprehensionType
       // A compile-time array of `size` values (e.g. a hyperparameter `ch: array[uint; 5]`); not a tensor
       | 'array' '[' element=type ';' size=expr ']'          # ArrayType
       ;
@@ -77,7 +77,7 @@ index_item
       ;
 
 einops
-      : einops_spec_full '->' einops_spec_full ('|' (keyvalue (',' keyvalue)*)?)?
+      : einops_spec_full '->' einops_spec_full? ('|' (keyvalue (',' keyvalue)*)?)? // (no output axes: a scalar)
       ;
 
 einops_spec_full
@@ -100,6 +100,8 @@ keyvalue
 expr
       // Primary Expressions
       : IDENT                                              # VarAccessExpression
+      // `_` discards a value (`auto a, _ = f(x);`, `for (_ in ...)`); using it is an error
+      | '_'                                                # DiscardExpression
       | constant                                           # ConstantExpression
       | '(' expr ')'                                       # ParenExpression
       // A compile-time array (e.g. a hyperparameter value `[64, 128, 256]`)
@@ -122,14 +124,14 @@ statement
       : expr ';'                                           # ExpressionStatement
       // Without initializer (only with a tensor type `T[n, ...]`): a tensor whose n slots `name[i]` are assigned one by
       // one (e.g. per layer in a loop); every slot must be assigned before the tensor (or the slot) is used.
-      | (type | 'auto') names+=IDENT (',' names+=IDENT)* ('=' expr)? ';' # DeclarationStatement
+      | (type | 'auto') names+=(IDENT | '_') (',' names+=(IDENT | '_'))* ('=' expr)? ';' # DeclarationStatement
       | 'return' values+=expr (',' values+=expr)* ';'       # ReturnStatement
       // Rebinds a variable of an enclosing scope (e.g. the state carried through a loop)
       | name=IDENT '=' expr ';'                             # AssignStatement
       // Assigns a slot of a tensor declared without initializer (a compile-time index)
       | name=IDENT '[' index=expr ']' '=' value=expr ';'      # SlotAssignStatement
       // Compile-time loop: the body is expanded for var = lo, ..., hi-1
-      | 'for' '(' var=IDENT 'in' lo=expr '..' hi=expr ')' '{' statement* '}' # ForStatement
+      | 'for' '(' var=(IDENT | '_') 'in' lo=expr '..' hi=expr ')' '{' statement* '}' # ForStatement
       ;
 
 

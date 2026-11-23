@@ -89,8 +89,6 @@ namespace mdl {
 		std::string instanceError;
 		/** @brief The error listener of the file that is currently translated. */
 		PrettyErrorListener* errorlistener = nullptr;
-		/** @brief Whether modules with hyperparameters are checked with symbolic values (see analyzeGeneric()). */
-		bool checkGenericModules = false;
 		/** @brief Whether a module is being elaborated with symbolic hyperparameter values. */
 		bool symbolicMode = false;
 		/** @brief A member with `@conditional(c)` and a symbolic `c` (see checkConditionalMember). */
@@ -291,8 +289,42 @@ namespace mdl {
 				antlr4::ParserRuleContext* docCtx, SourceRange scope, std::set<std::string> types = {},
 				const std::string& container = {}
 		) {
-			if (auto id = define(name, kind, detail, docCtx, scope, std::move(types), container))
+			if (auto id = define(name, kind, detail, docCtx, scope, std::move(types), container)) {
+				reportShadowing(name, kind);
 				currentNamespace().setSymbol(name->getText(), *id);
+			}
+		}
+
+		/** @brief Reports a local definition @p name that hides one of an enclosing scope (`-Wshadow`). */
+		void reportShadowing(antlr4::Token* name, analysis::SymbolKind kind) {
+			using K = analysis::SymbolKind;
+			auto local = [](K k) {
+				return k == K::variable || k == K::parameter || k == K::loopVariable || k == K::templateParameter;
+			};
+			if (options.shadow == parser::DiagnosticLevel::ignored || !local(kind) || errorlistener == nullptr)
+				return;
+			auto outer = currentNamespace().outerSymbol(name->getText());
+			if (!outer)
+				return;
+			const auto& hidden = index()->symbols()[*outer];
+			const char* what = hidden.kind == K::variable			 ? "the variable"
+							   : hidden.kind == K::parameter		 ? "the parameter"
+							   : hidden.kind == K::loopVariable		 ? "the loop variable"
+							   : hidden.kind == K::templateParameter ? "the template parameter"
+							   : hidden.kind == K::member			 ? "the member"
+							   : hidden.kind == K::hyperparameter	 ? "the hyperparameter"
+																	 : nullptr;
+			if (what == nullptr)
+				return; // functions, modules, structs: not reported
+			const bool error = options.shadow == parser::DiagnosticLevel::error;
+			errorlistener->semanticError(
+					error ? PrettyErrorListener::ErrorLevel::Error : PrettyErrorListener::ErrorLevel::Warning,
+					tokenContext(name), name->getLine(), name->getCharPositionInLine(),
+					std::format(
+							"{} shadows {} {} (line {})", name->getText(), what, hidden.name, hidden.range.begin.line
+					),
+					"", "shadow"
+			);
 		}
 
 		/** @brief Records a use of @p name (bound in the current namespace) with the value @p value. */
@@ -609,7 +641,6 @@ namespace mdl {
 
 	public:
 		/** @brief Also check the modules with hyperparameters of the main file symbolically (see analyzeGeneric()). */
-		void setCheckGenericModules(bool check) { checkGenericModules = check; }
 
 		TranslatingVisitor(parser::FrontendState& state, parser::ParseOptions options)
 				: state(state), options(std::move(options)) {
@@ -646,7 +677,15 @@ namespace mdl {
 			// can be expanded later.
 			auto& file = *state.files.emplace_back(std::make_unique<ParsedFile>());
 			file.errors = std::make_unique<PrettyErrorListener>(sourcename, state.sink);
-			file.input = std::make_unique<antlr4::ANTLRInputStream>(stream);
+			// Invalid UTF-8 is an error; the file is still decoded (leniently: replacement characters) and analyzed.
+			const std::string text{std::istreambuf_iterator<char>{stream}, {}};
+			if (auto invalid = invalidUtf8(text, sourcename))
+				file.errors->semanticError(
+						PrettyErrorListener::ErrorLevel::Error, invalid->context, invalid->range.begin.line,
+						invalid->range.begin.column, invalid->message
+				);
+			file.input = std::make_unique<antlr4::ANTLRInputStream>();
+			file.input->load(text, /*lenient=*/true);
 			file.lexer = std::make_unique<antlr4::mdlLexer>(file.input.get());
 			file.tokens = std::make_unique<antlr4::CommonTokenStream>(file.lexer.get());
 			file.parser = std::make_unique<antlr4::mdlParser>(file.tokens.get());
@@ -662,8 +701,11 @@ namespace mdl {
 			const size_t errorsBefore = file.errors->getNumErrors();
 			auto* program = file.parser->program();
 			// A tree with syntax errors has missing children (null contexts): only report the syntax errors.
-			if (file.parser->getNumberOfSyntaxErrors() == 0)
+			if (file.parser->getNumberOfSyntaxErrors() == 0) {
 				program->accept(this);
+				if (main)
+					reportUnused(sourcename, *file.input);
+			}
 			errorlistener = outerErrors;
 			currentDir = std::move(outerDir);
 			recordDefinitions = outerRecord;
@@ -671,6 +713,37 @@ namespace mdl {
 			if (state.printing)
 				printDiagnosticSummary(std::cerr, file.errors->getNumErrors(), file.errors->getNumWarnings());
 			numErrors += file.errors->getNumErrors() - errorsBefore;
+		}
+
+		/** @brief Reports the definitions of the file @p sourcename that are never used (`-Wunused`). */
+		void reportUnused(const std::string& sourcename, antlr4::CharStream& input) {
+			if (index() == nullptr || options.unused == parser::DiagnosticLevel::ignored)
+				return;
+			const auto level = options.unused == parser::DiagnosticLevel::error
+									   ? PrettyErrorListener::ErrorLevel::Error
+									   : PrettyErrorListener::ErrorLevel::Warning;
+			const std::string text = input.toString();
+			for (const auto& u : analysis::unusedDefinitions(*index(), sourcename)) {
+				// The source line (the index's lines count from 1).
+				size_t start = 0;
+				for (size_t line = 1; line < u.range.begin.line && start != std::string::npos; ++line)
+					if ((start = text.find('\n', start)) != std::string::npos)
+						++start;
+				if (start == std::string::npos)
+					continue;
+				const std::string line = text.substr(start, text.find('\n', start) - start);
+				const size_t width = u.range.end.line == u.range.begin.line && u.range.end.column > u.range.begin.column
+											 ? u.range.end.column - u.range.begin.column
+											 : 1;
+				errorlistener->semanticError(
+						level,
+						{{.number = u.range.begin.line,
+						  .text = line,
+						  .markBegin = u.range.begin.column,
+						  .markWidth = width}},
+						u.range.begin.line, u.range.begin.column, u.message, "", "unused"
+				);
+			}
 		}
 
 		void translateFile(const std::filesystem::path& file, bool main) {
@@ -719,7 +792,7 @@ namespace mdl {
 			std::vector<ModuleType> generic;
 			for (auto&& def : ctx->module_def()) {
 				auto [name, m] = std::any_cast<std::pair<std::string, ModuleType>>(def->accept(this));
-				if (checkGenericModules && recordDefinitions && !m.instantiated && !m.typeargs.empty())
+				if (recordDefinitions && !m.instantiated && !m.typeargs.empty())
 					generic.push_back(m);
 				record(std::move(name), std::move(m));
 			}
@@ -1546,12 +1619,14 @@ namespace mdl {
 				}
 				for (int i = lo.value_or(0); lo && hi && i < *hi; ++i) {
 					pushNamespace();
-					currentNamespace().put(comp->var->getText(), Object{&graph().addConstNode(Atomic{i})});
-					defineHere(
-							comp->var, analysis::SymbolKind::loopVariable,
-							comp->var->getText() + " in " + sourceText(comp->lo) + ".." + sourceText(comp->hi), nullptr,
-							rangeOf(comp), {"int"}
-					);
+					if (!isDiscard(comp->var)) {
+						currentNamespace().put(comp->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+						defineHere(
+								comp->var, analysis::SymbolKind::loopVariable,
+								comp->var->getText() + " in " + sourceText(comp->lo) + ".." + sourceText(comp->hi),
+								nullptr, rangeOf(comp), {"int"}
+						);
+					}
 					auto dtype = std::any_cast<DataType>(comp->element->accept(this));
 					popNamespace();
 					array.elements.push_back(Object{&addVariable(vname + "." + std::to_string(i), dtype)});
@@ -2208,6 +2283,39 @@ namespace mdl {
 			return result;
 		}
 
+		/**
+		 * @brief The member @p name (a weight, a submodule, an array of them, or a struct-typed weight) of the submodule
+		 * @p receiver of type @p bmt, e.g. `proj.W`: the weight of the caller's scope that the submodule's functions
+		 * use (`proj.W`, see Computegraph::addModuleInvocationNode). std::nullopt if there is no such member.
+		 */
+		std::optional<Object>
+		submoduleMember(const Node& receiver, const BoundModuleType& bmt, const std::string& name) {
+			const auto* instance = std::get_if<ParameterNode>(&receiver);
+			if (instance == nullptr || !bmt.hyperparamValues.empty())
+				return std::nullopt; // (instances have their types expanded: no hyperparameters to substitute)
+			const std::string prefix = instance->name + ".";
+			auto weight = [&](const std::string& path, DataType type) -> const Node& {
+				return graph().getOrAddParameterNode(scope, prefix + path, std::move(type));
+			};
+			ArrayInstance array; // the elements `name.0`, `name.1`, ... of an array of members
+			for (const auto& [path, w] : bmt.definition.variables) {
+				const auto& type = w.get().type;
+				if (path == name) {
+					if (const auto* agg = std::get_if<AggregateType>(&type))
+						return makeAggregateObject(*agg, prefix + path, [&](DataType t, std::string p) -> const Node& {
+							return graph().getOrAddParameterNode(scope, p, std::move(t));
+						});
+					return Object{&weight(path, type)};
+				}
+				if (path.starts_with(name + ".") && path.find('.', name.size() + 1) == std::string::npos)
+					array.elements.push_back(Object{&weight(path, type)});
+			}
+			if (array.elements.empty())
+				return std::nullopt;
+			array.representative = symbolicMode && array.elements.size() == 1;
+			return Object{std::move(array)};
+		}
+
 		std::any accessExpression(mdlParser::AccessExpressionContext* ctx, std::optional<Object>& base) {
 			/** \todo this function needs refactoring; e.g., merge the handling of AggregateInstance, ModuleInstance, TensorType, ... to simple getMember lookups **/
 			auto baseObj = asObject(ctx->expr()->accept(this));
@@ -2238,7 +2346,7 @@ namespace mdl {
 				return mem.value().get();
 			} else if (auto* nodePtr =
 							   std::get_if<const Node*>(&baseObj)) { // Module function access: node of BoundModuleType.
-				if (std::holds_alternative<mdl::ErrorNode>(**nodePtr)) {
+				if (isErroneous(**nodePtr)) {
 					// Don't show too many errors; if we have <error node>.IDENT, we will just propagate the error.
 					return &graph().addErrorNode();
 				} else if (auto* bmt = std::get_if<BoundModuleType>(&mdl::getDataType(**nodePtr))) {
@@ -2247,10 +2355,15 @@ namespace mdl {
 					auto& funcs = bmt->definition.functions;
 					auto it = funcs.find(memberName);
 					if (it == funcs.end()) {
+						if (auto member = submoduleMember(**nodePtr, *bmt, memberName))
+							return *member;
 						errorlistener->semanticError(
 								PrettyErrorListener::ErrorLevel::Error, memberTok, memberTok->getLine(),
 								memberTok->getCharPositionInLine(),
-								std::format("No function '{}' in module", memberName)
+								std::format(
+										"No member '{}' in {}", memberName,
+										bmt->definition.instanceName.empty() ? "module" : bmt->definition.instanceName
+								)
 						);
 						return &graph().addErrorNode();
 					}
@@ -2366,7 +2479,9 @@ namespace mdl {
 
 			auto* einopsCtx = ctx->einops();
 			auto lhs = parseEinopsSpec(einopsCtx->einops_spec_full(0));
-			auto rhs = parseEinopsSpec(einopsCtx->einops_spec_full(1));
+			// (Without output axes, e.g. `[1 -> ]`, the result is a scalar.)
+			auto rhs = einopsCtx->einops_spec_full().size() > 1 ? parseEinopsSpec(einopsCtx->einops_spec_full(1))
+																: mdl::einops::Spec{};
 
 			// Collect key=value bindings.
 			std::map<std::string, const Node*> bindings;
@@ -2593,25 +2708,39 @@ namespace mdl {
 			return result;
 		}
 
+		/** @brief Whether @p node is an error (already reported): an error node, or a value of erroneous type. */
+		static bool isErroneous(const Node& node) {
+			if (std::holds_alternative<ErrorNode>(node))
+				return true;
+			const auto* p = std::get_if<PrimitiveType>(&getDataType(node));
+			return p != nullptr && *p == PrimitiveType::error;
+		}
+
 		std::any methodcallExpression(mdlParser::MethodcallExpressionContext* ctx) {
 			if (auto converted = conversion(ctx))
 				return *converted;
+			// After an error in the callee (already reported), the arguments are still checked (and their uses
+			// recorded, e.g. for -Wunused).
+			auto failed = [&]() -> std::any {
+				for (auto* arg : ctx->args)
+					arg->accept(this);
+				return static_cast<const Node*>(&graph().addErrorNode());
+			};
 			// `instance.member(...)`: the member function is inlined for the instance (its weights), like
 			// `instance(...)`. Without this, the function would reference the module's unqualified weights.
 			const Node* receiver = nullptr;
 			if (auto* access = dynamic_cast<mdlParser::AccessExpressionContext*>(ctx->func)) {
 				auto baseObj = asObject(access->expr()->accept(this), access->expr()->start);
 				if (auto* base = std::get_if<const Node*>(&baseObj)) {
-					if (std::holds_alternative<ErrorNode>(**base))
-						return &graph().addErrorNode(); // already reported
+					if (isErroneous(**base))
+						return failed(); // already reported
 					if (std::holds_alternative<BoundModuleType>(mdl::getDataType(**base)))
 						receiver = *base;
 				}
 			}
 			auto calleeObj = asObject(ctx->func->accept(this), ctx->func->start);
-			if (std::holds_alternative<const Node*>(calleeObj) &&
-				std::holds_alternative<ErrorNode>(*std::get<const Node*>(calleeObj)))
-				return &graph().addErrorNode();
+			if (std::holds_alternative<const Node*>(calleeObj) && isErroneous(*std::get<const Node*>(calleeObj)))
+				return failed();
 
 			// Evaluate argument expressions.
 			std::vector<std::reference_wrapper<const Node>> args;
@@ -2920,7 +3049,28 @@ namespace mdl {
 			return std::nullopt;
 		}
 
+		/** @brief Whether @p name is `_`: a discarded value (not bound, no type, no members). */
+		static bool isDiscard(const antlr4::Token* name) { return name != nullptr && name->getText() == "_"; }
+
+		virtual std::any visitDiscardExpression(mdlParser::DiscardExpressionContext* ctx) override {
+			auto* tok = ctx->start;
+			errorlistener->semanticError(
+					PrettyErrorListener::ErrorLevel::Error, tok, tok->getLine(), tok->getCharPositionInLine(),
+					"`_` is a discarded value: it has no value, type, or members"
+			);
+			return static_cast<const Node*>(&graph().addErrorNode());
+		}
+
 		virtual std::any visitDeclarationStatement(mdlParser::DeclarationStatementContext* ctx) override {
+			for (auto* name : ctx->names)
+				if (isDiscard(name) && (ctx->type() != nullptr || ctx->expr() == nullptr)) {
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, name, name->getLine(),
+							name->getCharPositionInLine(),
+							"`_` discards a value: it has no type (write `auto _ = ...;`)"
+					);
+					return std::nullopt;
+				}
 			if (ctx->expr() == nullptr) { // a tensor whose slots are assigned one by one
 				auto* tok = ctx->names[0];
 				if (ctx->type() == nullptr) {
@@ -2970,6 +3120,8 @@ namespace mdl {
 			}
 			/** \todo check datatype with ctx->type() **/
 			auto value = ctx->expr()->accept(this);
+			if (ctx->names.size() == 1 && isDiscard(ctx->names[0]))
+				return std::nullopt; // evaluated (and checked), then discarded
 			if (ctx->names.size() == 1) {
 				const auto& object = currentNamespace().put(
 						ctx->names[0]->getText(), asObject(std::move(value), ctx->expr()->start)
@@ -2998,6 +3150,8 @@ namespace mdl {
 				nodes.assign(ctx->names.size(), &graph().addErrorNode());
 			}
 			for (size_t i = 0; i < nodes.size(); ++i) {
+				if (isDiscard(ctx->names[i]))
+					continue;
 				currentNamespace().put(ctx->names[i]->getText(), Object{nodes[i]});
 				defineHere(
 						ctx->names[i], analysis::SymbolKind::variable, sourceText(ctx), nullptr,
@@ -3008,6 +3162,24 @@ namespace mdl {
 		}
 
 		virtual std::any visitAssignStatement(mdlParser::AssignStatementContext* ctx) override {
+			// Weights, submodules, hyperparameters, and loop variables are read-only (only variables are rebound).
+			if (auto id = currentNamespace().symbol(ctx->name->getText()); id && index() != nullptr) {
+				const auto& s = index()->symbols()[*id];
+				const char* what = s.kind == analysis::SymbolKind::member			? "a member of the module"
+								   : s.kind == analysis::SymbolKind::hyperparameter ? "a hyperparameter"
+								   : s.kind == analysis::SymbolKind::loopVariable	? "a loop variable"
+																					: nullptr;
+				if (what != nullptr) {
+					ctx->expr()->accept(this); // (still checked)
+					errorlistener->semanticError(
+							PrettyErrorListener::ErrorLevel::Error, ctx->name, ctx->name->getLine(),
+							ctx->name->getCharPositionInLine(),
+							std::format("{} is {} and cannot be assigned", ctx->name->getText(), what),
+							std::format("declare a variable: `auto {}2 = ...;`", ctx->name->getText())
+					);
+					return std::nullopt;
+				}
+			}
 			auto value = asObject(ctx->expr()->accept(this), ctx->expr()->start);
 			referenceHere(ctx->name, value);
 			if (!currentNamespace().assign(ctx->name->getText(), std::move(value)))
@@ -3091,12 +3263,14 @@ namespace mdl {
 				hi = *lo + 1; // symbolic analysis: one iteration stands for all
 			for (int i = *lo; i < *hi; ++i) {
 				pushNamespace();
-				currentNamespace().put(ctx->var->getText(), Object{&graph().addConstNode(Atomic{i})});
-				defineHere(
-						ctx->var, analysis::SymbolKind::loopVariable,
-						ctx->var->getText() + " in " + sourceText(ctx->lo) + ".." + sourceText(ctx->hi), nullptr,
-						rangeOf(ctx), {"int"}
-				);
+				if (!isDiscard(ctx->var)) {
+					currentNamespace().put(ctx->var->getText(), Object{&graph().addConstNode(Atomic{i})});
+					defineHere(
+							ctx->var, analysis::SymbolKind::loopVariable,
+							ctx->var->getText() + " in " + sourceText(ctx->lo) + ".." + sourceText(ctx->hi), nullptr,
+							rangeOf(ctx), {"int"}
+					);
+				}
 				for (auto* stmt : ctx->statement()) {
 					auto result = stmt->accept(this);
 					if (std::any_cast<MultiValue>(&result) != nullptr)
@@ -3263,9 +3437,15 @@ std::vector<std::filesystem::path> mdl::parser::defaultStdlibDirs() {
 }
 
 namespace {
-	/** @brief A frontend state whose diagnostics go to @p sink (stderr with a summary per file if empty). */
-	std::shared_ptr<mdl::parser::FrontendState> makeState(mdl::DiagnosticSink sink) {
+	/**
+	 * @brief A frontend state whose diagnostics go to @p sink (stderr with a summary per file if empty). The compiler
+	 * and tools run the same checks (also of generic modules, and of unused definitions, which need the index).
+	 */
+	std::shared_ptr<mdl::parser::FrontendState>
+	makeState(const mdl::parser::ParseOptions& options, mdl::DiagnosticSink sink) {
+		mdl::shapes::setDefaultFloat(options.defaultFloat);
 		auto state = std::make_shared<mdl::parser::FrontendState>();
+		state->index = std::make_unique<mdl::analysis::SemanticIndex>();
 		state->printing = !sink;
 		state->sink = [s = state.get(), forward = std::move(sink)](const mdl::Diagnostic& d) {
 			s->diagnostics.push_back(d);
@@ -3274,6 +3454,7 @@ namespace {
 			else
 				mdl::printDiagnostic(std::cerr, d);
 		};
+		state->visitor = std::make_unique<mdl::TranslatingVisitor>(*state, options);
 		return state;
 	}
 
@@ -3301,14 +3482,9 @@ namespace {
 
 	std::shared_ptr<mdl::parser::FrontendState> translateStream(
 			std::istream& stream, std::string_view sourcename, const mdl::parser::ParseOptions& options,
-			mdl::DiagnosticSink sink, bool analysis = false
+			mdl::DiagnosticSink sink
 	) {
-		mdl::shapes::setDefaultFloat(options.defaultFloat);
-		auto state = makeState(std::move(sink));
-		if (analysis)
-			state->index = std::make_unique<mdl::analysis::SemanticIndex>();
-		state->visitor = std::make_unique<mdl::TranslatingVisitor>(*state, options);
-		state->visitor->setCheckGenericModules(analysis);
+		auto state = makeState(options, std::move(sink));
 		state->visitor->translate(
 				stream, std::string{sourcename}, options.sourceDir.value_or(std::filesystem::current_path()),
 				/*main=*/true
@@ -3317,15 +3493,9 @@ namespace {
 	}
 
 	std::shared_ptr<mdl::parser::FrontendState> translatePath(
-			const std::filesystem::path& file, const mdl::parser::ParseOptions& options, mdl::DiagnosticSink sink,
-			bool analysis = false
+			const std::filesystem::path& file, const mdl::parser::ParseOptions& options, mdl::DiagnosticSink sink
 	) {
-		mdl::shapes::setDefaultFloat(options.defaultFloat);
-		auto state = makeState(std::move(sink));
-		if (analysis)
-			state->index = std::make_unique<mdl::analysis::SemanticIndex>();
-		state->visitor = std::make_unique<mdl::TranslatingVisitor>(*state, options);
-		state->visitor->setCheckGenericModules(analysis);
+		auto state = makeState(options, std::move(sink));
 		state->visitor->translateFile(file, /*main=*/true);
 		return state;
 	}
@@ -3347,11 +3517,11 @@ std::optional<mdl::CompilationUnit> mdl::parser::parse(const std::filesystem::pa
 
 mdl::parser::AnalysisResult
 mdl::parser::analyze(std::istream& stream, std::string_view sourcename, const ParseOptions& options) {
-	return finishAnalysis(translateStream(stream, sourcename, options, quiet(options), /*analysis=*/true));
+	return finishAnalysis(translateStream(stream, sourcename, options, quiet(options)));
 }
 
 mdl::parser::AnalysisResult mdl::parser::analyze(const std::filesystem::path& file, const ParseOptions& options) {
-	return finishAnalysis(translatePath(file, options, quiet(options), /*analysis=*/true));
+	return finishAnalysis(translatePath(file, options, quiet(options)));
 }
 
 mdl::Computegraph& mdl::CompilationUnit::graph() const { return state->graph; }

@@ -4,6 +4,7 @@
 
 #include <tvm/ir/module.h>
 #include <tvm/s_tir/schedule/schedule.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 
@@ -28,8 +29,11 @@ namespace mdl::backend::tvm {
 		/** @brief The constant extent of a loop, or -1 if symbolic. */
 		int64_t extentOf(const Schedule& sch, const LoopRV& loop) {
 			const auto* imm = sch->Get(loop)->extent.as<IntImmNode>();
-			return imm ? imm->value : -1;
+			return imm ? static_cast<int64_t>(imm->value) : -1;
 		}
+
+		/** @brief The split factor for vectorization. */
+		Optional<::tvm::PrimExpr> lanes() { return ::tvm::IntImm(::tvm::PrimType::Int(32), kVectorLanes); }
 
 		bool largeEnough(int64_t work) { return work < 0 || work >= kMinParallelWork; }
 
@@ -42,7 +46,7 @@ namespace mdl::backend::tvm {
 			const int64_t extent = extentOf(sch, fused);
 			if (extent >= 0 && extent < kVectorLanes)
 				return;
-			auto split = sch->Split(fused, {std::nullopt, ::tvm::Integer(kVectorLanes)});
+			auto split = sch->Split(fused, {std::nullopt, lanes()});
 			sch->Vectorize(split[1]);
 			if (largeEnough(extent))
 				sch->Parallel(split[0]);
@@ -63,7 +67,7 @@ namespace mdl::backend::tvm {
 			std::optional<LoopRV> outer;
 			const int64_t innerExtent = extentOf(sch, spatial.back());
 			if (innerExtent > 0 && innerExtent % kVectorLanes == 0) {
-				auto split = sch->Split(spatial.back(), {std::nullopt, ::tvm::Integer(kVectorLanes)});
+				auto split = sch->Split(spatial.back(), {std::nullopt, lanes()});
 				Array<LoopRV> order(spatial.begin(), spatial.end() - 1);
 				order.push_back(split[0]);
 				for (const auto& r : reduction)
@@ -125,7 +129,7 @@ namespace mdl::backend::tvm {
 				else
 					scheduleInjective(sch, block);
 			}
-			return ::tvm::Downcast<tirx::PrimFunc>(sch->mod()->Lookup("main"));
+			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
 		}
 	} // namespace
 
@@ -134,9 +138,9 @@ namespace mdl::backend::tvm {
 		std::vector<std::pair<::tvm::GlobalVar, tirx::PrimFunc>> updates;
 		for (const auto& [gv, func] : mod->functions) {
 			const auto* prim = func.as<tirx::PrimFuncNode>();
-			if (prim == nullptr || !prim->body->IsInstance<tirx::SBlockRealizeNode>())
+			if (prim == nullptr || !prim->body->IsInstance<::tvm::s_tir::SBlockRealizeNode>())
 				continue;
-			if (auto pattern = prim->GetAttr<::tvm::Integer>("op_pattern"); pattern && pattern.value()->value == 8)
+			if (auto pattern = prim->GetAttr<int64_t>("op_pattern"); pattern && *pattern == 8)
 				continue; // extern kernel
 			try {
 				updates.emplace_back(gv, schedule(::tvm::ffi::GetRef<tirx::PrimFunc>(prim)));

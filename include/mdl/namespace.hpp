@@ -91,6 +91,11 @@ namespace mdl {
 			return parent != nullptr ? parent->symbol(name) : std::nullopt;
 		}
 
+		/** @brief The definition of @p name in the enclosing namespaces (the one that a definition here hides). */
+		std::optional<size_t> outerSymbol(std::string_view name) const {
+			return parent != nullptr ? parent->symbol(name) : std::nullopt;
+		}
+
 		/** @brief The namespace (this or a parent) that defines @p name, if any. */
 		const Namespace* definedIn(std::string_view name) const {
 			if (definesLocally(name))
