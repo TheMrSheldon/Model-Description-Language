@@ -12,9 +12,10 @@
 namespace mdl::backend::tvm::gpu {
 
 	/**
-	 * @brief A reduction over the leading dimensions of its input, whose innermost (contiguous) dimension is not reduced,
-	 * e.g. `out[n] = sum over m of x[m, n]`, optionally followed by an elementwise epilogue (e.g. a conversion, or the
-	 * accumulation into a gradient): in two passes. The rows are split into chunks of kChunk (rfactor): the partial sums
+	 * @brief Reductions over the leading dimensions of their inputs, whose innermost (contiguous) dimension is not
+	 * reduced, e.g. `out[n] = sum over m of x[m, n]` (several over the same columns, e.g. the gradients of a
+	 * normalization's bias and scale, which read dy once), optionally followed by elementwise epilogues per column (e.g.
+	 * a conversion, or the accumulation into a gradient): in two passes, the reductions' loops merged. The rows are split into chunks of kChunk (rfactor): the partial sums
 	 * [chunks, columns] have a thread per (chunk, column), with the threads of a warp on adjacent columns (coalesced
 	 * reads), and each thread sums its chunk; a second kernel sums the chunks per column in a register of the
 	 * reduction's type (e.g. float32) and applies the epilogue.
@@ -29,6 +30,7 @@ namespace mdl::backend::tvm::gpu {
 		static constexpr int64_t kVector = 4;		  ///< adjacent columns per thread of the first pass (vector loads)
 		static constexpr int64_t kThreads = 256;	  ///< threads of the second pass
 		static constexpr int64_t kMinRows = 256;	  ///< (fewer: DLight's rules)
+		static constexpr size_t kMaxReductions = 8;	  ///< in one kernel
 
 		std::optional<::tvm::s_tir::Schedule>
 		apply(const ::tvm::tirx::PrimFunc& func, const ::tvm::Target& target, bool tunable) const override;

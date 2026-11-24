@@ -72,7 +72,6 @@ add_library(mdl
 	backends/tvm/details/fusion/planner.cpp
 	backends/tvm/details/fusion/rules.cpp
 	backends/tvm/details/fusion/signature.cpp
-	backends/tvm/details/stack_sums.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp

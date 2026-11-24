@@ -68,19 +68,21 @@ DLight's GeneralReduction would use 1024 threads for a symbolic row of perhaps 1
 
 ## ColumnReduction (`column_reduction.{hpp,cpp}`)
 
-`out[n] = Σ_m x[m, n]`, optionally followed by an epilogue (a cast, or accumulation into a gradient). Bias and
-LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfactor):
+`out[n] = Σ_m x[m, n]`, several of them over the same columns (e.g. a normalization's `Σdy` and `Σ(dy·x̂)`, which
+then read `dy` once), each optionally followed by epilogues per column (a cast, or accumulation into a gradient).
+Bias and LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfactor):
 
 1. **First pass:** the rows are split into chunks of `kChunk = 64`. Each thread sums one chunk for `kVector = 4`
-   adjacent columns, using vector loads. A warp covers adjacent columns, so reads are coalesced. Blocks are
-   `8 × 32` (`kChunksPerBlock × warp`). The output is partial sums of shape `[chunks, columns]` in the reduction type,
-   e.g. f32.
-2. **Second pass:** 256 threads per block. Each thread sums the chunks of one column in a register (a local cache
-   write, not an initialized global buffer) and applies the epilogue.
+   adjacent columns, using vector loads, in registers, and stores its partial sums once. A warp covers adjacent
+   columns, so reads are coalesced. Blocks are `8 × 32` (`kChunksPerBlock × warp`). The output is partial sums of
+   shape `[chunks, columns]` in the reduction type, e.g. f32.
+2. **Second pass:** each thread sums the chunks of one column in a register and applies that reduction's epilogues.
 
-The rule needs at least `kMinRows = 256` rows; with fewer, DLight's rules take the kernel. The second pass's write-back
-is not predicated, so its thread count must divide a static number of columns: the largest power of two from 256
-down to 32 that does, or the number of columns itself if it is at most 256. Otherwise DLight takes the kernel.
+Each reduction is scheduled with its epilogues in its own loop nest; then the nests of all reductions are merged level
+by level (`Merge`), so that both passes are one kernel each. The rule needs at least `kMinRows = 256` rows; with
+fewer, DLight's rules take the kernel. The second pass's write-back is not predicated, so its thread count must
+divide a static number of columns: the largest power of two from 256 down to 32 that does, or the number of columns
+itself if it is at most 256. Otherwise DLight takes the kernel.
 
 ## Elementwise (`elementwise.{hpp,cpp}`)
 

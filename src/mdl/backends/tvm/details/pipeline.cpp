@@ -9,7 +9,6 @@
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
-#include "./stack_sums.hpp"
 
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
@@ -313,8 +312,6 @@ namespace mdl::backend::tvm {
 		mod = runPasses(
 				mod,
 				{
-						// Sums of tensors computed from a common one: one sum (reads it once).
-						stackSiblingSums(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
 						// Python in TVM 0.24 (constants were folded before the patterns).
 						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),

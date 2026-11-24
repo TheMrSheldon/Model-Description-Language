@@ -21,7 +21,6 @@ shape occurs.
 | Relax | Kernel selection (library calls) in rounds | `details/kernel_match.cpp`, `tvm.cpp` |
 | Relax | Context pruning, context layouts | `details/contexts.cpp` |
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
-| Relax | Stacked sibling sums | `details/stack_sums.cpp` |
 | Relax | Fusion planner: which kernel calls become one kernel | `details/fusion/` (then TVM FuseTIR) |
 | TIR | Merging results, flattening injective kernels | `details/flatten_injective.cpp` |
 | TIR | Schedule rules (per target) | `targets/` |
@@ -132,19 +131,6 @@ The hidden `previous` parameter aliases the output buffer (`EntrySignature::alia
 There is no separate gradient buffer and no copy, and no special case in the backend: it is pattern matching on the
 graph.
 
-## Stacked sibling sums
-
-Column sums to the same shape of tensors computed from a common one are rewritten as one sum over a stack:
-`collapse_sum_to(x_i, S)` becomes `collapse_sum_to(stack(x_1, …, x_k, axis=-1), S + [k])`, followed by a `take` per
-result. Example: a normalization's `Σdy` and `Σ(dy·x̂)`.
-
-- The inputs must share a tensor: one is the other's argument, or their elementwise producers have a common argument.
-- The stacked axis is innermost, so adjacent threads sum the k columns. The producers fuse into the reduction, which
-  then reads `dy` once.
-- Bindings that use an earlier result move after the group, which is safe because dataflow bindings are pure.
-
-(This is to be replaced by the planner forming column groups, once ColumnReduction schedules several sums.)
-
 ## Fusion planner
 
 The planner (`details/fusion/`, inspired by PyTorch Inductor's scheduler) decides which legalized kernel calls
@@ -165,8 +151,8 @@ FuseTIR then makes one PrimFunc per group. Target limits (row lengths, threads) 
 rule declines, and its fallback schedules the kernel.
 
 Results in BERT-base bf16 training on an A100: one kernel each for LayerNorm forward and backward, GELU and its
-gradient, the bias-gradient sums with their accumulation; 672 kernel launches per step (FuseOps and the earlier
-special passes: 816).
+gradient, the bias-gradient sums with their accumulation, and a normalization's `Σdy` and `Σ(dy·x̂)` (reading `dy`
+once); 600 kernel launches per step (FuseOps and the earlier special passes: 816).
 
 ## Patterns must not duplicate work
 
