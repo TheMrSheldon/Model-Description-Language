@@ -1,15 +1,16 @@
-# Optimization patterns
+\page dev_optimization Optimization patterns
+\tableofcontents
 
 This page describes the general optimizations mdlc applies between the compute graph and the generated code. None of
 them is specific to a model, and almost all of them are target-independent. Target-specific parts are noted.
-For the CUDA kernels themselves see [cuda_kernels.md](cuda_kernels.md); for kernel packages see
-[../kernels.md](../kernels.md).
+For the CUDA kernels themselves see \ref dev_cuda_kernels; for kernel packages see
+\ref spec_kernel_packages.
 
 The guiding rule is to recognize *structure* rather than specific models or layers. Each pass looks for a general
 shape in the graph (an elementwise chain, a reduction, operations reading the same tensor) and is safe whenever that
 shape occurs.
 
-## Overview
+# Overview
 
 | Stage | Pattern | Where |
 |---|---|---|
@@ -28,9 +29,9 @@ shape occurs.
 | TIR | Schedule rules (per target) | `targets/` |
 | AOT | Workspace arena, kernel CSE | `details/aot.cpp`, `details/pipeline.cpp` |
 
-## Graph level
+# Graph level
 
-### Attention fusion
+## Attention fusion
 
 `softmax(Q·Kᵀ·scale + bias) · V` is rewritten to an `ATTENTION` builtin.
 
@@ -44,16 +45,16 @@ log-sum-exp statistics (`ATTENTION_LSE`), not the S×S probabilities.
 If no kernel package implements the fused op for a target, the backend expands it back into matmul + softmax. The
 rewrite is therefore never a pessimization.
 
-### Element masks and suffix masks
+## Element masks and suffix masks
 
 The masking pass turns a masked function into an unmasked one with explicit fills. The kind is chosen at compile time
 (`--mask f=element|suffix`); the model code is the same for both.
 
 - **Element mask:** arbitrary booleans per element. The most general form.
 - **Suffix mask:** per-sequence lengths. The structure is known: everything after the length is masked. This allows
-  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding (see TODO).
+  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding.
 
-### Gradients: save or recompute
+## Gradients: save or recompute
 
 The forward pass of a training build stores *residuals* in a context buffer, and `forward_backward` reads them. Which
 values become residuals is decided in `autodiff.cpp`:
@@ -70,9 +71,9 @@ values become residuals is decided in `autodiff.cpp`:
 Recomputation can create *siblings*: a recomputed value and its derivative, both computed from the same saved input.
 Sibling fusion turns these into one kernel (below), so recomputing costs neither memory nor an extra memory pass.
 
-## Relax level
+# Relax level
 
-### Canonicalization, CSE and permutation folding
+## Canonicalization, CSE and permutation folding
 
 After translation, the module is normalized: constants folded, common subexpressions eliminated, scalar constants
 inlined. Permutations (transposes) next to matmuls and attention are folded into the operation's view arguments:
@@ -82,7 +83,7 @@ inlined. Permutations (transposes) next to matmuls and attention are folded into
 
 A transpose is therefore usually just strides, not a copy.
 
-### Kernel selection in rounds
+## Kernel selection in rounds
 
 Kernel packages declare patterns (`package.yml`) over the backend's ops. Matching runs in rounds. Each round:
 
@@ -99,14 +100,14 @@ An epilogue is part of the pattern, so the library computes it in the same call:
 
 Operations that no kernel package matches are left for TVM to generate code for.
 
-### Context pruning
+## Context pruning
 
 After selection, the context buffer between forward and backward is pruned to the values the backward pass still
 reads. For example, once attention and its gradient are library calls, only the statistics remain, not the
 probabilities. Unused context outputs are removed from the producer and unused parameters from the consumer
 (`pruneContexts`), followed by dead-code elimination (`afterPruning`).
 
-### Context layouts
+## Context layouts
 
 `permuteContexts` runs once before kernel selection. A tensor is saved in the layout its producer uses it in when:
 
@@ -121,7 +122,7 @@ pass passes it to the attention gradient, and the weight gradient reads it trans
 cuDNN write it in that layout through strides, and the attention gradient reads it through strides. The transpose
 kernel disappears in both passes. The tensor's size, and so the buffer layout, is unchanged.
 
-### In-place gradient accumulation
+## In-place gradient accumulation
 
 Gradient outputs are accumulated: `grad = previous + result`. The graph says this with an ordinary `add(previous, result)`.
 The hidden `previous` parameter aliases the output buffer (`EntrySignature::aliases`), so:
@@ -133,13 +134,13 @@ The hidden `previous` parameter aliases the output buffer (`EntrySignature::alia
 There is no separate gradient buffer and no copy, and no special case in the backend: it is pattern matching on the
 graph.
 
-### Producer–consumer fusion
+## Producer–consumer fusion
 
 TVM's FuseOps/FuseTIR fuse chains along data edges: elementwise ops into each other, and into the reductions they
 feed or follow (e.g. a cast into a sum). The resulting kernel's name lists the fused ops (e.g.
 `fused_rsqrt_multiply1`).
 
-### Sibling fusion
+## Sibling fusion
 
 FuseOps fuses only along producer–consumer edges. `fuseSiblings` merges independent `call_tir`s of injective kernels
 when all of these hold:
@@ -164,7 +165,7 @@ Typical siblings:
 
 Reductions are handled by row fusion (below), not by sibling fusion.
 
-### Stacked sibling sums
+## Stacked sibling sums
 
 Column sums to the same shape of tensors computed from a common one are rewritten as one sum over a stack:
 `collapse_sum_to(x_i, S)` becomes `collapse_sum_to(stack(x_1, …, x_k, axis=-1), S + [k])`, followed by a `take` per
@@ -175,7 +176,7 @@ result. Example: a normalization's `Σdy` and `Σ(dy·x̂)`.
   then reads `dy` once.
 - Bindings that use an earlier result move after the group, which is safe because dataflow bindings are pure.
 
-### Row fusion
+## Row fusion
 
 FuseOps puts at most one reduction into a group. A normalization or its gradient therefore becomes many kernels that
 read the same rows again and again. For example, LayerNorm backward,
@@ -199,7 +200,7 @@ A group is the longest prefix that ends with a full-shape epilogue:
 FuseTIR then produces one kernel per group. On GPUs, the RowReduction rule schedules it with a warp per row: all
 reductions first, then the epilogues, whose loops are merged so that they share the row loop.
 
-### Patterns must not duplicate work
+## Patterns must not duplicate work
 
 `applyPatterns` does not rewrite a match whose intermediate values have users outside the match
 (`sharesIntermediates`). Intermediate values are matched operations other than the root. The replacing operation
@@ -212,7 +213,7 @@ would compute the shared value again. This holds for every pattern:
 In such cases the decomposed form stays, and the fusion passes turn it into as few kernels as before. Inference, where
 nothing shares the intermediates, keeps the single operations.
 
-### Recomputing shared elementwise values
+## Recomputing shared elementwise values
 
 FuseOps does not duplicate a producer with several consumers, so a shared elementwise value (e.g. the `erf` above)
 would be written to memory and read back. Before row fusion, an elementwise value whose uses are all elementwise

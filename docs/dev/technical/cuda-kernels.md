@@ -1,7 +1,8 @@
-# CUDA kernels
+\page dev_cuda_kernels CUDA kernels
+\tableofcontents
 
 Technical notes on the kernels a model compiled with `--target 'cuda -arch=sm_XX'` runs, and how they are produced.
-For the kernel package format (manifests, patterns, expressions) see [../kernels.md](../kernels.md).
+For the kernel package format (manifests, patterns, expressions) see \ref spec_kernel_packages.
 
 A compiled model's GPU work comes from two sources:
 
@@ -14,7 +15,7 @@ A compiled model's GPU work comes from two sources:
 Every kernel runs on TVM's current stream (`TVMFFIEnvGetStream`). The caller controls that stream, e.g. torch's
 current stream through the Python binding. Temporary buffers are offsets in one workspace arena per call.
 
-## Pipeline overview (CUDA-relevant parts)
+# Pipeline overview (CUDA-relevant parts)
 
 | Stage | Where | What |
 |---|---|---|
@@ -29,7 +30,7 @@ current stream through the Python binding. Temporary buffers are offsets in one 
 
 Set `--dump-dir` to also write the generated CUDA source (`<model>.cu`).
 
-## Generated kernels: schedule rules
+# Generated kernels: schedule rules
 
 `CUDATarget::schedule` applies the rules below in this order, and the first rule that accepts a PrimFunc schedules
 it. If no rule fits a kernel, compilation fails with a diagnostic that names the kernel and prints its TIR. PrimFuncs
@@ -49,7 +50,7 @@ Our rules live in `src/mdl/backends/tvm/targets/gpu/`. They exist because DLight
 which breaks down for symbolic dimensions such as batch and sequence, and because DLight reads column reductions
 uncoalesced.
 
-### RowReduction (`row_reduction.{hpp,cpp}`)
+## RowReduction (`row_reduction.{hpp,cpp}`)
 
 Sums, maxima, softmax and normalizations (LayerNorm forward and backward, log-softmax): one or more reductions over
 the innermost dimension(s), followed by elementwise epilogues over the same rows. Row fusion produces such kernels.
@@ -65,7 +66,7 @@ the innermost dimension(s), followed by elementwise epilogues over the same rows
 
 DLight's GeneralReduction would use 1024 threads for a symbolic row of perhaps 128 elements.
 
-### ColumnReduction (`column_reduction.{hpp,cpp}`)
+## ColumnReduction (`column_reduction.{hpp,cpp}`)
 
 `out[n] = Σ_m x[m, n]`, optionally followed by an epilogue (a cast, or accumulation into a gradient). Bias and
 LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfactor):
@@ -81,7 +82,7 @@ The rule needs at least `kMinRows = 256` rows; with fewer, DLight's rules take t
 is not predicated, so its thread count must divide a static number of columns: the largest power of two from 256
 down to 32 that does, or the number of columns itself if it is at most 256. Otherwise DLight takes the kernel.
 
-### Elementwise (`elementwise.{hpp,cpp}`)
+## Elementwise (`elementwise.{hpp,cpp}`)
 
 Elementwise ops such as GELU, residual additions, casts, and `x[m, n] + b[n]`. It also takes copies that permute or
 broadcast only the *outer* dimensions, e.g. the attention head transpose `[heads, batch, seq, dim] → [batch, seq,
@@ -95,7 +96,7 @@ heads, dim]`.
 - The limit is 4 lanes because TVM's CUDA code generation cannot emit 8-lane 16-bit vectors (`make_ushort4` with 8
   arguments).
 
-### flattenInjective (`details/flatten_injective.{hpp,cpp}`)
+## flattenInjective (`details/flatten_injective.{hpp,cpp}`)
 
 This pass runs before scheduling and is not CUDA-specific. It rewrites injective kernels (elementwise ops, casts,
 reshape copies, broadcasts of trailing dimensions) into one loop over the result's flat index `n`:
@@ -109,7 +110,7 @@ iterators.
 Without this pass, splitting a fused loop over `[batch, seq, 3072]` with symbolic sizes costs several 64-bit
 divisions per element. Kernels with reductions, transposes, gathers or strided buffers are left unchanged.
 
-### Target-specific legalization: `mdl.scatter_add_rows` (`gpu/scatter_add_rows.{hpp,cpp}`)
+## Target-specific legalization: `mdl.scatter_add_rows` (`gpu/scatter_add_rows.{hpp,cpp}`)
 
 This is the gradient of an embedding lookup (gather). The CPU legalization is a sequential loop that cannot be
 scheduled on a GPU. The CUDA version is one PrimFunc, already scheduled, with two thread-bound loop nests that become
@@ -120,14 +121,14 @@ two launches:
 
 Repeated indices accumulate in arbitrary order, so the result is not bitwise deterministic.
 
-## Kernel packages
+# Kernel packages
 
 Packages are built from `kernels/<name>/` and selected by the manifest's `pattern` and constraints. CPU artifacts
 such as oneDNN are never selected for a CUDA target, and vice versa. Matching uses the artifact's `device-arch`.
 Strided-view helpers shared with the CPU packages are in `kernels/common/include/mdl_strided.hpp` (`forEachGemm`,
 `forEachBatch2`): they turn rank-generic strided views into batched GEMMs at call time.
 
-### cuBLAS: `kernels/cublas` (`mdl_cublas_matmul_{f32,bf16,f16}`)
+## cuBLAS: `kernels/cublas` (`mdl_cublas_matmul_{f32,bf16,f16}`)
 
 - **Pattern:** `matmul` (`mdl.matmul`, with permutations, an optional bias, an optional addend, alpha and
   quantization captures).
@@ -143,9 +144,9 @@ Strided-view helpers shared with the CPU packages are in `kernels/common/include
   scratch buffer, never into the output, because C may alias it. The fastest is cached.
 - **Per thread and device:** the cuBLAS and cuBLASLt handles and a 32 MiB cuBLASLt workspace.
 - Not used yet: the GELU / DGELU / BGRADB epilogues. GELU is only the tanh approximation, so it would need
-  `--fast-math`. Deferred; see TODO.
+  `--fast-math`. Deferred (see the open items below).
 
-### cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
+## cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
 
 Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cpp`).
 
@@ -169,18 +170,21 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 - **f32:** not covered. f32 attention is expanded into matmul + softmax kernels, the expansion fallback for unmatched
   ops.
 
-## Adding a CUDA kernel
+# Adding a CUDA kernel
 
-- **A new library call:** add an implementation to a package manifest (see [../kernels.md](../kernels.md)), with a
+- **A new library call:** add an implementation to a package manifest (see \ref spec_kernel_packages), with a
   strided-view ABI, `NULL` for absent optional operands, and TVM's stream.
 - **A new generated-kernel shape:** add a `GPUScheduleRule` under `targets/gpu/` and insert it into the rule list in
   `CUDATarget::schedule`, before the DLight rule it should pre-empt. Rules must cope with symbolic dimensions and
   return `std::nullopt` for anything they don't handle.
 - **An op that cannot be legalized generically:** register a handler in `CUDATarget::overrideLegalizations`.
 
-## Known gaps (see TODO.md)
+# Open items
 
-- The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on the A100 slice and is not
-  used; see TODO.md.
-- CUDA graphs and a caller-provided workspace.
-- Unpadding of suffix-masked regions.
+\todo The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on an A100 slice
+(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions. Likewise the
+GELU and DGELU epilogues (tanh approximation only: with `--fast-math`).
+
+\todo CUDA graphs and a caller-provided workspace.
+
+\todo Unpadding of suffix-masked regions.

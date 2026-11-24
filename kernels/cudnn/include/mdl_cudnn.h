@@ -5,7 +5,7 @@
  * @file
  * @brief C ABI of the cuDNN kernels (library `mdl_cudnn`) of the kernel package `cudnn` (see package.yml.in).
  * @details For tensors in CUDA device memory; compiled models call these symbols where the package's implementations are
- * selected (see docs/kernels.md). bfloat16 (`_bf16`) and float16 (`_f16`; both `uint16_t*` bit patterns). The kernels
+ * selected (see docs/dev/spec/kernel-packages.md). bfloat16 (`_bf16`) and float16 (`_f16`; both `uint16_t*` bit patterns). The kernels
  * run on TVM's current stream of the current device (TVMFFIEnvGetStream). Every function returns 0 on success and a
  * non-zero value on failure (e.g. a configuration that cuDNN does not support).
  */

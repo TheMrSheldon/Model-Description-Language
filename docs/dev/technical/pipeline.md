@@ -45,8 +45,9 @@ backend to recognize patterns (e.g. a softmax) in the graph.
 The graph is lowered to TVM's Relax. A canonicalization phase normalizes the graph into the forms that kernel packages
 target (see \ref spec_kernel_packages). Kernel selection then replaces matching regions by calls to optimized kernels
 (e.g. oneDNN); where a kernel's constraints can only be decided at runtime (e.g. a symbolic size), the region is
-guarded by a runtime check with the original computation as fallback. All remaining operations are legalized into TIR
-and scheduled by TVM, and the whole program is compiled ahead of time into one object file that exports a function per
+guarded by a runtime check with the original computation as fallback. All remaining operations are legalized into TIR,
+fused into kernels, and scheduled per target (see \ref dev_optimization and, for CUDA, \ref dev_cuda_kernels), and
+the whole program is compiled ahead of time into one object file that exports a function per
 compiled member function.
 
 \todo Memory planning, the calling convention, and the bindings.
