@@ -1,4 +1,4 @@
-// Reading and validating package manifests (package.yml, schema 1; see docs/kernels.md).
+// Reading and validating package manifests (package.yml, schema 1; see docs/dev/spec/kernel-packages.md).
 #include <mdl/kernels.hpp>
 #include <mdl/kernels/expr.hpp>
 

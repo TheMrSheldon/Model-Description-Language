@@ -19,7 +19,7 @@ module FFN[indim: uint, outdim: uint] {
 ```
 The `public` member functions of a compiled module are its entry points. Elementwise functions, reductions, and
 activations (`gelu`, `softmax`, ...) come from the prelude; other definitions are imported, e.g.
-`from std.nn import Linear;` (see [Imports and visibility](docs/language-spec.md#imports-and-visibility)).
+`from std.nn import Linear;` (see [Imports and visibility](docs/dev/spec/language.md#imports-and-visibility)).
 
 ## Compile
 ```bash
@@ -27,18 +27,18 @@ mdlc model.dlm --arg-vals model.yml -o model.o --binding cpp=model.hpp
 ```
 - `--arg-vals` sets the hyperparameters (here `FFN: {indim: 8, outdim: 3}`).
 - `--binding TYPE[=PATH]` generates bindings: `cpp` (C++ header), `python`, `python-torch`, `python-tensorflow`, `json` (metadata).
-- `--kernels packages|none` selects whether optimized kernels of kernel packages (e.g. oneDNN, see `docs/kernels.md`) are used, or TVM-generated kernels only.
+- `--kernels packages|none` selects whether optimized kernels of kernel packages (e.g. oneDNN, see `docs/dev/spec/kernel-packages.md`) are used, or TVM-generated kernels only.
 - `--ellipsis-rank N` sets how many dimensions `...` stands for in compiled signatures (e.g. 2 for `[batch, seq, ...]`).
   `--ellipsis-rank NAME=K` gives the input `NAME` only the leading `K` of them (e.g. `labels=1`: labels `[batch]` next
   to token ids `[batch, seq]`). Outputs get their shapes from shape inference (e.g. pooled `[batch, dim]`).
 - `--float f32|bf16|f16` sets the type that `float` stands for (see [Precision](#precision-and-quantization)).
 - `-i DIR` adds import search paths; the standard library (`std/`) is always available.
 
-The language is described in [docs/language-spec.md](docs/language-spec.md).
+The language is described in [docs/dev/spec/language.md](docs/dev/spec/language.md).
 
 ### Build configuration
 The argument-values file can also hold the build settings, with named builds for e.g. inference and training; options
-on the command line take precedence (see [docs/build-config.md](docs/build-config.md)):
+on the command line take precedence (see [docs/user/build-config.md](docs/user/build-config.md)):
 ```yaml
 args:
   FFN: { indim: 8, outdim: 3 }
@@ -151,14 +151,14 @@ mdlc model.dlm -a model.yml --quantize 'int4:128=encoder.**' -o model.o --bindin
 A weight `W` becomes `W.qweight`, `W.scales` (and `W.zeros`) in the ABI (the GPTQ/AWQ layout); quantized weights are
 frozen. With the oneDNN kernels, linear layers read the compressed weights directly, which speeds up calls with few
 tokens (BERT-base with 8 tokens: 10.2 → 5.4 ms in float32). `mdl::runtime::loadWeights` can quantize a float
-checkpoint while loading. See [docs/build-config.md](docs/build-config.md#quantization) and
+checkpoint while loading. See [docs/user/build-config.md](docs/user/build-config.md#quantization) and
 [examples/09_quantization](examples/09_quantization/).
 
 ## Editor tooling
 `mdl-format` formats `.dlm` files (like clang-format; style in `.mdl-format`), and `mdls` is a language server with
 diagnostics, hover (types and documentation), completion, go to definition, semantic highlighting (einops axes
 included), and formatting. Both build without the compiler's dependencies (`cmake --preset conf-tooling`), see
-[docs/tooling.md](docs/tooling.md).
+[docs/user/tooling.md](docs/user/tooling.md).
 
 ## CMake
 ```cmake
@@ -166,7 +166,7 @@ include(MDL)
 mdl_add_model(ffn SOURCE model.dlm CONFIG model.yml)   # model.o + model.hpp
 target_link_libraries(myexe PRIVATE ffn)
 ```
-See [docs/using-cmake.md](docs/using-cmake.md) and the [examples](examples/).
+See [docs/user/cmake.md](docs/user/cmake.md) and the [examples](examples/).
 
 ## Use from C++
 ```cpp
@@ -182,6 +182,12 @@ mdl::models::FFN::forward(x, weights, out);
 // The hyperparameters the model was compiled with, as a constexpr struct:
 static_assert(mdl::models::FFN::hyperparameters.outdim == 3);
 ```
+
+## Documentation
+The documentation (user guide, foundations of deep learning, specifications, technical documentation, and the API of
+the standard library) is published at <https://themrsheldon.github.io/Model-Description-Language/> (`latest/`,
+`nightly/`, or a version). Build it locally with `cmake --workflow --preset docs` (needs Doxygen, Graphviz, and
+BibTeX); see [docs/dev/technical/documentation.md](docs/dev/technical/documentation.md).
 
 ## Roadmap
 Open work is listed in [TODO.md](TODO.md).

@@ -682,13 +682,13 @@ void mdl::backends::tvm::compileToFile(
 	// 2. Relax passes, AOT lowering, TIR passes, and code generation.
 	auto target = backend::makeTarget(opts);
 	mod = backend::canonicalize(mod, target);
-	dump(mod, "relax-match"); // the matching boundary of kernel packages (see docs/kernels.md)
+	dump(mod, "relax-match"); // the matching boundary of kernel packages (see docs/dev/spec/kernel-packages.md)
 	using Inspection = mdl::CompileOptions::KernelInspection;
 	if (opts.inspectKernels == Inspection::dump) {
 		*opts.inspectOut << mod;
 		return;
 	}
-	// Kernel packages: match at the boundary, then call the selected implementations (see docs/kernels.md).
+	// Kernel packages: match at the boundary, then call the selected implementations (see docs/dev/spec/kernel-packages.md).
 	auto discovery = mdl::kernels::discover(mdl::kernels::kernelDirs(opts.kernelDirs, opts.source));
 	for (const auto& problem : discovery.problems)
 		logger->warn("kernel package skipped: {}", problem.str());

@@ -1,4 +1,4 @@
-# Kernel packages
+# Kernel packages {#spec_kernel_packages}
 
 Optimized kernels come from **kernel packages** in kernel directories. A package describes what it matches in the
 model, how to call its prebuilt implementation (a C function), and which binaries provide it for which platforms. The
@@ -79,6 +79,8 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
   `--no-kernel-packages` uses none.
 - `--kernel-report FILE` writes what the compiled code calls and what must be linked (the structured dependency
   information; integrations translate it):
+  <div class="lang-json">
+
   ```json
   { "schema": 1,
     "kernels": [ { "function": "M__forward", "package": "scaled_add_c", "version": "1.0",
@@ -87,6 +89,7 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
     "link": [ { "package": "scaled_add_c", "artifact": "host", "kind": "static-library", "path": ".../libscaled_add_c.a",
                 "hash": "fnv1a64:...", "dependencies": ["system-library:m"] } ] }
   ```
+  </div>
   `link` lists every library in link order (an artifact before the artifacts it depends on).
 - The depfile (`--depfile`) also lists the manifests and libraries of the used packages, so changing a package
   rebuilds the model.
@@ -107,6 +110,8 @@ is a runtime error naming the kernel. Everything else is compiled by TVM as befo
   targets (`mdl_kernel_package_<name>`) with their link dependencies (`--format json` for other tools).
 
 ## `package.yml`
+<div class="lang-yaml">
+
 ```yaml
 schema: 1                   # the format version (required)
 package: scaled_add         # the name (= the directory's name)
@@ -154,8 +159,11 @@ implementations:
       where: ["$x.shape == $y.shape"]
     guarantees: { numerics: { exact: true } }  # declared by the author, never derived by the compiler
 ```
+</div>
 Unknown keys, unknown schema versions, and references to unknown patterns or artifacts are errors (with the file and
 line). YAML anchors and merge keys work, e.g. for implementations that differ in the symbol and element type:
+<div class="lang-yaml">
+
 ```yaml
   softmax-f32: &softmax
     pattern: softmax
@@ -166,6 +174,7 @@ line). YAML anchors and merge keys work, e.g. for implementations that differ in
     symbol: mdl_softmax_bf16
     applicability: { dtype: { x: bfloat16 } }
 ```
+</div>
 
 ### Artifacts
 - `platform` states binary compatibility: `os` (linux, windows, darwin), `arch` (x86_64, aarch64), `abi` (gnu, msvc,

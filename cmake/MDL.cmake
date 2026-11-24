@@ -26,13 +26,13 @@ Compile MDL models into object files that can be linked into C++ programs.
 
     #include "<name>.hpp"
 
-  ``CONFIG``       hyperparameter values and build settings (``mdlc --arg-vals``, see docs/build-config.md).
+  ``CONFIG``       hyperparameter values and build settings (``mdlc --arg-vals``, see docs/user/build-config.md).
   ``BUILD``        use the build settings ``builds.<name>`` of ``CONFIG`` (``mdlc --build``).
   ``SHARED``       build a shared library (e.g., to load it from Python with ``tvm_ffi.load_module``) instead of a
                    static one.
   ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if it is built) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
                    names.)
-  ``KERNEL_PACKAGES`` kernel packages built with ``mdl_kernel_package`` that the model may use (see docs/kernels.md);
+  ``KERNEL_PACKAGES`` kernel packages built with ``mdl_kernel_package`` that the model may use (see docs/dev/spec/kernel-packages.md);
                    they are linked into ``<target>``. Without it, the model uses no kernel packages.
   ``IMPORT_DIRS``  additional search paths for ``import`` statements.
   ``BINDINGS``     additional binding types to generate next to the object file (e.g. ``python-torch``).
@@ -45,7 +45,7 @@ Compile MDL models into object files that can be linked into C++ programs.
 
     mdl_kernel_package(<name> MANIFEST <package.yml.in> SOURCES <source>... [LINK <library>...])
 
-  Builds the kernel package ``<name>`` (see docs/kernels.md) from ``SOURCES`` into ``MDL_KERNELS_BUILD_DIR/<name>``:
+  Builds the kernel package ``<name>`` (see docs/dev/spec/kernel-packages.md) from ``SOURCES`` into ``MDL_KERNELS_BUILD_DIR/<name>``:
   the library (target ``mdl_kernel_package_<name>``, linking ``LINK``) and the manifest, in which ``@MDL_KERNEL_ARTIFACT@``
   is the library's path and ``@MDL_KERNEL_OS@``, ``@MDL_KERNEL_ARCH@``, ``@MDL_KERNEL_ABI@`` the platform. With
   ``TARGETS <target>...`` instead of ``SOURCES``, the libraries are built by these targets and the manifest refers to

@@ -1,5 +1,5 @@
 # The tiny BERT of model_bert_tiny.yml with a classification head of 3 classes (data/bert_tiny_cls.safetensors), and
-# its builds (see docs/build-config.md): inference, training with the loss as objective, the logits as a PyTorch
+# its builds (see docs/user/build-config.md): inference, training with the loss as objective, the logits as a PyTorch
 # autograd function (examples/07_pytorch_training), and quantized inference.
 args:
   BertForSequenceClassification:

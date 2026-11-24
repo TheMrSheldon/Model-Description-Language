@@ -3,7 +3,7 @@
 
 /**
  * @file
- * @brief The visibility of a definition or member (see docs/language-spec.md, Visibility).
+ * @brief The visibility of a definition or member (see docs/dev/spec/language.md, Visibility).
  */
 
 namespace mdl {

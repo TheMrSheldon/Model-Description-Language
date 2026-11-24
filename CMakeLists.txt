@@ -11,6 +11,8 @@ add_feature_info(tests MDL_BUILD_TESTS "Build the MDL tests")
 option(MDL_BUILD_EXAMPLES "Build the examples" OFF)
 option(MDL_BENCHMARKS "Build the benchmarks of scripts/benchmark.sh (with the examples)" OFF)
 add_feature_info(examples MDL_BUILD_EXAMPLES "Build the MDL examples")
+option(MDL_BUILD_DOCS "Build the documentation (target mdl_docs; needs Doxygen, Graphviz, and BibTeX)" OFF)
+add_feature_info(docs MDL_BUILD_DOCS "Build the MDL documentation")
 
 
 ##########################################################################################
@@ -20,7 +22,7 @@ find_package(Git)
 
 if(GIT_EXECUTABLE)
 	execute_process(
-		COMMAND ${GIT_EXECUTABLE} describe --tags --dirty
+		COMMAND ${GIT_EXECUTABLE} describe --tags --dirty --match "v[0-9]*"
 		WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
 		OUTPUT_VARIABLE GIT_DESCRIBE_VERSION
 		RESULT_VARIABLE GIT_DESCRIBE_ERROR_CODE
@@ -36,7 +38,7 @@ if(GIT_EXECUTABLE)
 		message(WARNING "Could not extract version information from the latest tag, ${GIT_DESCRIBE_VERSION}")
 	endif()
 endif()
-if(NOT DEFINED MDL_VER_MAJOR OR NOT DEFINED MDL_VER_MINOR OR NOT DEFINED MDL_VER_PATCH)
+if("${MDL_VER_MAJOR}" STREQUAL "" OR "${MDL_VER_MINOR}" STREQUAL "" OR "${MDL_VER_PATCH}" STREQUAL "")
 	message(WARNING "I failed to read the current version from the latest git tag.")
 
 	set(MDL_VER_MAJOR "0" CACHE INTERNAL "")
@@ -94,7 +96,7 @@ add_subdirectory(src)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(MDL)
 if(MDL_ENABLE_COMPILER)
-	add_subdirectory(kernels) # the kernel packages of the project (e.g. oneDNN), see docs/kernels.md
+	add_subdirectory(kernels) # the kernel packages of the project (e.g. oneDNN), see docs/dev/spec/kernel-packages.md
 endif()
 if (MDL_BUILD_TESTS OR MDL_BUILD_EXAMPLES)
 	enable_testing()  # before add_subdirectory(examples) so that the examples' tests are registered
@@ -109,4 +111,12 @@ endif()
 ##########################################################################################
 if (MDL_BUILD_TESTS)
 	add_subdirectory(tests)
+endif()
+
+
+##########################################################################################
+# Documentation
+##########################################################################################
+if (MDL_BUILD_DOCS)
+	include(Docs) # cmake/Docs.cmake
 endif()

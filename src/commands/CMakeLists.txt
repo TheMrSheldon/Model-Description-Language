@@ -7,6 +7,7 @@ endfunction()
 
 mdl_add_command(mdl-format mdl-format.cpp mdl_format) # the formatter
 mdl_add_command(mdls mdls.cpp mdls_lib)               # the language server
+mdl_add_command(mdl-doc mdl-doc.cpp mdl_frontend)     # the API documentation of .dlm files (Doxygen pages)
 
 if(MDL_ENABLE_COMPILER)
 	mdl_add_command(mdlc mdlc.cpp mdl nlohmann_json::nlohmann_json) # the compiler

@@ -2,7 +2,7 @@
 
 /**
  * @file kernel_match.hpp
- * @brief Matching kernel packages against the Relax module at the matching boundary (see docs/kernels.md): candidate
+ * @brief Matching kernel packages against the Relax module at the matching boundary (see docs/dev/spec/kernel-packages.md): candidate
  * regions, the verdicts of their constraints, and the selection of non-overlapping implementations.
  */
 

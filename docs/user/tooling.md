@@ -1,4 +1,4 @@
-# Editor tooling: `mdl-format` and `mdls`
+# Editor tooling: mdl-format and mdls {#tooling}
 
 Besides the compiler (`mdlc`), the project builds two tools for editing `.dlm` files:
 
@@ -22,22 +22,28 @@ The version (`--version`, and `serverInfo` of `mdls`) comes from the latest git 
 without tags).
 
 ## Building only the tooling
+<div class="lang-bash">
+
 ```bash
 cmake --preset conf-tooling -B build-tooling      # MDL_ENABLE_COMPILER=OFF
 cmake --build build-tooling --parallel
 cmake --install build-tooling --prefix ~/.local --component tools   # bin/mdl-format, bin/mdls, share/mdl/std
 ```
+</div>
 Code generation of the parser needs Java at build time. An installed tool finds the standard library in
 `<prefix>/share/mdl/std`. Otherwise it looks in `MDL_STDLIB_PATH` (separated by `:`, `;` on Windows) and in the
 source tree's `std/`.
 
 ## `mdl-format`
+<div class="lang-bash">
+
 ```bash
 mdl-format model.dlm              # prints the formatted file
 mdl-format -i *.dlm               # formats in place
 mdl-format --check $(git ls-files '*.dlm')   # exit code 1 if a file is not formatted (CI)
 cat model.dlm | mdl-format --assume-filename model.dlm
 ```
+</div>
 It changes only whitespace:
 - **Indentation:** blocks are indented.
 - **Line breaks:**
@@ -55,6 +61,8 @@ contain exactly the input's tokens.
 
 The style comes from `--style-file`, else from the closest `.mdl-format` file in the source's directory or one of its
 parents, else the defaults:
+
+<div class="lang-yaml">
 
 ```yaml
 # .mdl-format
@@ -74,6 +82,7 @@ HyperparameterNaming: camelCase
 TemplateParameterNaming: any
 VariableNaming: camelCase           # local and loop variables
 ```
+</div>
 Unknown keys and values are errors.
 
 The naming conventions are checks, not changes: renaming a definition would need changes in every file that uses it.
@@ -97,7 +106,7 @@ Features:
   - Only definite mismatches are errors. Sizes that are different hyperparameters (`indim` vs `outdim`) could be
     equal in an instance: they are warnings, and errors with the `strict` option. Likewise a member with
     `@conditional(c)` used outside `c ? ... : ...`. Both are `permits-illegal-instantiation`: the module accepts
-    hyperparameter values for which it fails (see [Diagnostics](language-spec.md#diagnostics)).
+    hyperparameter values for which it fails (see [Diagnostics](../dev/spec/language.md#diagnostics)).
   - An instance that has an error only for its values (e.g. `Test2[.bias=false]` using a member that `bias` removes)
     is also an error where it is created.
 - **Semantic tokens:** what needs the parse tree: modules, structs, functions and methods, hyperparameters, members,
@@ -177,18 +186,24 @@ it): documents that import a changed file are re-analyzed.
 
 Initialization options (from the editor), the same as `mdlc`'s; they can be changed later with
 `workspace/didChangeConfiguration` (`{"mdl": {...}}` or flat), which re-analyzes the open documents:
+<div class="lang-json">
+
 ```json
 { "importDirs": ["path/to/lib"], "float": "bf16", "strict": true }
 ```
+</div>
 With `strict`, sizes that may differ (e.g. two hyperparameters where equal sizes are needed) are errors instead of
 warnings.
 
 ### Using it from an editor without an extension
 Any LSP client can run it, e.g. Neovim:
+<div class="lang-lua">
+
 ```lua
 vim.filetype.add({ extension = { dlm = "mdl" } })
 vim.lsp.start({ name = "mdls", cmd = { "mdls" }, root_dir = vim.fs.root(0, { ".git" }) })
 ```
+</div>
 A VS Code extension (a TextMate grammar for basic highlighting plus this server) is planned in a separate repository.
 
 ## Library structure

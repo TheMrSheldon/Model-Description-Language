@@ -1,8 +1,8 @@
 {
-    "version": 3,
+    "version": 6,
     "cmakeMinimumRequired": {
         "major": 3,
-        "minor": 24,
+        "minor": 25,
         "patch": 0
     },
     "configurePresets": [
@@ -41,6 +41,19 @@
             }
         },
         {
+            "name": "conf-docs",
+            "description": "Only the documentation (target mdl_docs): the frontend and mdl-doc, no TVM/LLVM/oneDNN",
+            "inherits": "conf-release-common",
+            "cacheVariables": {
+                "BUILD_SHARED_LIBS": "OFF",
+                "MDL_ENABLE_COMPILER": "OFF",
+                "MDL_BUILD_TESTS": "OFF",
+                "MDL_BUILD_EXAMPLES": "OFF",
+                "MDL_BUILD_DOCS": "ON"
+            },
+            "binaryDir": "${sourceDir}/build/docs"
+        },
+        {
             "name": "conf-dev",
             "description": "Settings for development",
             "inherits": "conf-common",
@@ -57,6 +70,32 @@
             "name": "conf-tests",
             "description": "",
             "configurePreset": "conf-dev"
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "docs",
+            "description": "Builds the documentation",
+            "configurePreset": "conf-docs",
+            "targets": [
+                "mdl_docs"
+            ]
+        }
+    ],
+    "workflowPresets": [
+        {
+            "name": "docs",
+            "description": "Configures and builds the documentation",
+            "steps": [
+                {
+                    "type": "configure",
+                    "name": "conf-docs"
+                },
+                {
+                    "type": "build",
+                    "name": "docs"
+                }
+            ]
         }
     ]
 }

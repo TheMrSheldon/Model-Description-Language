@@ -1,4 +1,4 @@
-# Einops Expressions
+# Einops Expressions {#spec_einops}
 
 MDL supports einops-style tensor rearrangements via the `[lhs -> rhs | bindings]` syntax.
 These expressions map directly to `PERMUTE`, `RESHAPE`, and `EXPAND` operations in the compute graph.
@@ -35,59 +35,83 @@ Parentheses merge or split dimensions:
 
 ### Permute
 
+<div class="mdl">
+
 ```mdl
 x[b h w c -> b c h w]      // NCHW layout from NHWC
 ```
+</div>
 
 The compiler emits a single `PERMUTE` node.
 
 ### Merge dimensions
 
+<div class="mdl">
+
 ```mdl
 x[a b -> (a b)]             // flatten last two dims
 ```
+</div>
 
 Emits a `RESHAPE` node with output shape `[a*b]`.
+
+<div class="mdl">
 
 ```mdl
 x[... -> (...)]             // flatten all dimensions (e.g. mean_flat(x) = mean(x[... -> (...)]))
 ```
+</div>
 
 ### Split a dimension
+
+<div class="mdl">
 
 ```mdl
 x[(a b) -> a b | a=4, b=8]  // split dim 0 into 4×8
 ```
+</div>
 
 Emits a `RESHAPE` node.  The sizes of `a` and `b` must be supplied via bindings.
 
 ### Unsqueeze (add a size-1 dimension)
 
+<div class="mdl">
+
 ```mdl
 x[a b -> a 1 b]             // insert a size-1 dim
 ```
+</div>
 
 Emits a `RESHAPE` node.
 
 ### Batch-agnostic permute with ellipsis
 
+<div class="mdl">
+
 ```mdl
 x[... h w -> ... w h]       // swap last two dims regardless of batch rank
 ```
+</div>
 
 Emits a `PERMUTE` node using negative indices for post-batch dims so the backend can handle tensors of unknown rank.
 
 ### Merge and permute together
 
+<div class="mdl">
+
 ```mdl
 x[b h w c -> b (h w) c]     // NHWC → N(HW)C
 ```
+</div>
 
 Emits a `RESHAPE` node (permutation is identity, so no `PERMUTE` is needed).
+
+<div class="mdl">
 
 ```mdl
 x[b h w c -> b c (h w)]     // NHWC → NC(HW)
 ```
+</div>
 
 Emits a `PERMUTE` followed by a `RESHAPE`.
 
@@ -95,15 +119,21 @@ Emits a `PERMUTE` followed by a `RESHAPE`.
 
 When a named dimension appears inside a parenthesized **LHS** group its size cannot be inferred from the tensor shape alone (only the product is known).  Provide the sizes via key-value pairs:
 
+<div class="mdl">
+
 ```mdl
 x[(h w) c -> h w c | h=16, w=16]
 ```
+</div>
 
 Bindings may also be runtime expressions, not just integer literals:
+
+<div class="mdl">
 
 ```mdl
 x[(h w) c -> h w c | h=height, w=width]
 ```
+</div>
 
 where `height` and `width` are in-scope variables.
 

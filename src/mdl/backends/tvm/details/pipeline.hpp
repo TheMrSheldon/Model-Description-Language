@@ -19,7 +19,7 @@ namespace mdl::backend::tvm {
 	::tvm::Target makeTarget(const mdl::CompileOptions& opts);
 
 	/**
-	 * @brief The Relax module at the matching boundary of kernel packages (see docs/kernels.md): constants folded and the
+	 * @brief The Relax module at the matching boundary of kernel packages (see docs/dev/spec/kernel-packages.md): constants folded and the
 	 * backend's canonical forms recognized (relax.nn.* operators, mdl.matmul with folded permutations), before
 	 * legalization.
 	 */

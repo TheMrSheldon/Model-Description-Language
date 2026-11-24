@@ -83,8 +83,8 @@ namespace {
 		std::vector<std::pair<std::string, std::string>> sections;
 	};
 
-	/** @brief The text of the lines of a comment without the comment markers. */
-	std::vector<std::string> commentLines(std::string_view comment) {
+	/** @brief The lines of a comment without the comment markers. */
+	std::vector<std::string> strippedLines(std::string_view comment) {
 		std::vector<std::string> lines;
 		std::istringstream in{std::string{comment}};
 		std::string line;
@@ -113,6 +113,12 @@ namespace {
 				l.remove_suffix(1);
 			lines.emplace_back(l);
 		}
+		return lines;
+	}
+
+	/** @brief The text of the lines of a comment without the comment markers, one line per command. */
+	std::vector<std::string> commentLines(std::string_view comment) {
+		const auto lines = strippedLines(comment);
 		// Commands in the middle of a line start a new paragraph (like in Doxygen): one line per command.
 		std::vector<std::string> split;
 		const std::regex command{R"(\s+(?=[@\\](brief|details|t?param|returns?|todo|note|warning|see|sa|deprecated)\b))"
@@ -258,7 +264,24 @@ std::string mdl::analysis::docParameter(std::string_view comment, std::string_vi
 	return {};
 }
 
+std::string mdl::analysis::stripCommentMarkers(std::string_view comment) {
+	auto lines = strippedLines(comment);
+	while (!lines.empty() && lines.front().empty())
+		lines.erase(lines.begin());
+	while (!lines.empty() && lines.back().empty())
+		lines.pop_back();
+	std::string text;
+	for (const auto& line : lines)
+		text += line + "\n";
+	return text;
+}
+
 std::string mdl::analysis::fileDocumentation(std::string_view text) {
+	const std::string comment = fileComment(text);
+	return comment.empty() ? std::string{} : docCommentToMarkdown(comment);
+}
+
+std::string mdl::analysis::fileComment(std::string_view text) {
 	// The comments at the start of the file (before the first code), the first one with `@file`.
 	size_t pos = 0;
 	while (pos < text.size()) {
@@ -275,7 +298,7 @@ std::string mdl::analysis::fileDocumentation(std::string_view text) {
 			break;
 		const std::string_view comment = text.substr(pos, end + 2 - pos);
 		if (comment.find("@file") != std::string_view::npos || comment.find("\\file") != std::string_view::npos)
-			return docCommentToMarkdown(comment);
+			return std::string{comment};
 		pos = end + 2;
 	}
 	return {};

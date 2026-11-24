@@ -28,6 +28,10 @@ target_include_directories(mdls_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../src)
 target_compile_definitions(mdls_tests PRIVATE MDL_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 add_test(NAME mdls_tests COMMAND mdls_tests)
 
+# mdl-doc: the Doxygen pages of a test package (golden files, see tests/docs/check_mdl_doc.cmake).
+add_test(NAME mdl_doc_golden COMMAND ${CMAKE_COMMAND} -DMDL_DOC=$<TARGET_FILE:mdl-doc>
+	"-DSOURCE=${CMAKE_CURRENT_LIST_DIR}/docs" "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/mdl-doc" -P "${CMAKE_CURRENT_LIST_DIR}/docs/check_mdl_doc.cmake")
+
 if(NOT MDL_ENABLE_COMPILER)
 	return()
 endif()
@@ -84,7 +88,7 @@ endif()
 add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
 set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")
 
-# The build settings of argument-value files (mdlc --arg-vals, see docs/build-config.md): the command line takes
+# The build settings of argument-value files (mdlc --arg-vals, see docs/user/build-config.md): the command line takes
 # precedence, unknown keys and builds are errors.
 set(_cfg "${CMAKE_CURRENT_LIST_DIR}/configs")
 set(_out "${CMAKE_CURRENT_BINARY_DIR}/configs")

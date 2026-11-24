@@ -231,7 +231,7 @@ inline std::string fileHash(const std::filesystem::path& file) {
 
 /**
  * @brief Writes the kernel report (`--kernel-report`): the implementations of kernel packages that the compiled code
- * calls, and what must be linked (structured; integrations translate it, see docs/kernels.md).
+ * calls, and what must be linked (structured; integrations translate it, see docs/dev/spec/kernel-packages.md).
  */
 inline void writeKernelReport(const std::filesystem::path& file, const std::vector<mdl::SelectedKernel>& kernels) {
 	nlohmann::json report{{"schema", 1}, {"kernels", nlohmann::json::array()}, {"link", nlohmann::json::array()}};
@@ -465,7 +465,7 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	auto* config = app.set_config(
 			"-a,--arg-vals", "",
 			"Argument values (YAML): hyperparameters (`args:`) and build settings (`build:`, `builds:`, see "
-			"docs/build-config.md); the command line takes precedence."
+			"docs/user/build-config.md); the command line takes precedence."
 	);
 	config->check(CLI::ExistingFile);
 	app.add_option(
@@ -598,7 +598,7 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
 	app.add_option(
 			"--kernels-dir", args.compileOpts.kernelDirs,
-			"A kernel directory with kernel packages (searched first; repeatable; see docs/kernels.md)."
+			"A kernel directory with kernel packages (searched first; repeatable; see docs/dev/spec/kernel-packages.md)."
 	);
 	app.add_option(
 			"--kernel-package", args.compileOpts.kernelPackages,
@@ -614,7 +614,7 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	app.add_option(
 			"--kernel-report", args.kernelReport,
 			"Write a JSON report of the implementations of kernel packages that the compiled code calls and of the "
-			"libraries to link (see docs/kernels.md)."
+			"libraries to link (see docs/dev/spec/kernel-packages.md)."
 	);
 	return config;
 }

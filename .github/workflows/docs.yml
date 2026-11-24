@@ -1,0 +1,108 @@
+# The documentation (Doxygen, see docs/dev/technical/documentation.md), published on GitHub Pages (branch gh-pages):
+#
+# - A pull request builds it (Doxygen warnings are errors) without publishing.
+# - A push to main publishes it as nightly/ (also a prerelease).
+# - A release vX.Y.Z publishes it as vX.Y.Z/ and as latest/. The root redirects to latest/; versions.json lists the
+#   published versions (docs/doxygen/mdl-version.js reads it for the version dropdown).
+name: Documentation
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write # push to gh-pages
+
+concurrency:
+  group: docs-${{ github.event_name == 'pull_request' && github.ref || 'deploy' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOXYGEN_VERSION: 1.15.0
+  CMAKE_GENERATOR: Ninja
+
+jobs:
+  docs:
+    name: Build${{ github.event_name != 'pull_request' && ' and Publish' || '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      # ── Tools ─────────────────────────────────────────────────────────────────────────────────────────────────────
+      - name: Install Java (ANTLR code generation)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install Graphviz, BibTeX, and Ninja
+        run: sudo apt-get update && sudo apt-get install -y graphviz texlive-base texlive-bibtex-extra ninja-build
+      - name: Install Doxygen ${{ env.DOXYGEN_VERSION }} (the distribution's is too old)
+        run: |
+          tag="Release_${DOXYGEN_VERSION//./_}"
+          curl -fsSL "https://github.com/doxygen/doxygen/releases/download/${tag}/doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-${DOXYGEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+      # ── Build ─────────────────────────────────────────────────────────────────────────────────────────────────────
+      - name: Determine the Version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = release ] && [ "${{ github.event.release.prerelease }}" = false ]; then
+            echo "name=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=nightly" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Configure CMake
+        run: cmake --preset conf-docs -DMDL_DOCS_WARN_AS_ERROR=ON "-DMDL_DOCS_VERSION=${{ steps.version.outputs.name }}"
+      - name: Build the Documentation
+        run: |
+          cmake --build --preset docs
+          touch build/docs/documentation/html/.nojekyll
+
+      # ── Publish ───────────────────────────────────────────────────────────────────────────────────────────────────
+      - name: Publish as ${{ steps.version.outputs.name }}/
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: build/docs/documentation/html
+          target-folder: ${{ steps.version.outputs.name }}
+          clean: true # only within the target folder: the other versions stay
+      - name: Publish as latest/
+        if: github.event_name == 'release' && steps.version.outputs.name != 'nightly'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: build/docs/documentation/html
+          target-folder: latest
+          clean: true
+      - name: Checkout the Published Pages (for the list of versions)
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          path: gh-pages
+      - name: Write the Root Redirect and versions.json
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p root
+          # The published versions: the directories vX.Y.Z (newest first), then latest and nightly if present.
+          versions=$(find gh-pages -mindepth 1 -maxdepth 1 -type d -name 'v*' -printf '%f\n' | sort -rV)
+          for alias in latest nightly; do [ -d "gh-pages/$alias" ] && versions="$versions"$'\n'"$alias"; done
+          printf '%s\n' $versions | jq -R . | jq -s . > root/versions.json
+          target=latest; [ -d gh-pages/latest ] || target=nightly
+          cat > root/index.html <<EOF
+          <!DOCTYPE html>
+          <html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=${target}/">
+          <link rel="canonical" href="${target}/"><title>MDL documentation</title></head>
+          <body><a href="${target}/">MDL documentation</a></body></html>
+          EOF
+          touch root/.nojekyll
+      - name: Publish the Root Redirect and versions.json
+        if: github.event_name != 'pull_request'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: root
+          clean: false # keeps the versions' directories
