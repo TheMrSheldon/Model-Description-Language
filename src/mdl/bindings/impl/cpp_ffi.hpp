@@ -389,7 +389,7 @@ namespace mdl::bindings::detail {
 			emitInfos("inputs", inputs);
 			emitInfos("outputs", outputs);
 		}
-		out << "\n    /// The state of calls (see docs/technical/runtime.md): the workspace, grown on demand. One per "
+		out << "\n    /// The state of calls (see docs/dev/technical/runtime.md): the workspace, grown on demand. One per "
 			   "thread (not\n"
 			<< "    /// thread-safe); movable, not copyable. Its functions are those of `" << module
 			<< "` (whose static functions use a\n"

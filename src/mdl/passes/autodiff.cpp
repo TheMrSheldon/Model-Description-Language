@@ -883,7 +883,7 @@ namespace mdl::autodiff {
 		}
 
 		// The residuals: a minimum cut through the primal values (input-dependent, not cotangent-dependent) that the
-		// backward pass needs, which minimizes the bytes saved (docs/technical/optimization.md). Values that only depend
+		// backward pass needs, which minimizes the bytes saved (docs/dev/technical/optimization.md). Values that only depend
 		// on weights and constants are recomputed (they are not part of the cut).
 		auto primal = [&](const Node& node) {
 			auto [cot, inp] = dependencies(node);

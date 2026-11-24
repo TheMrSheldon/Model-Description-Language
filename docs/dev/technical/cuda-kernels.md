@@ -87,9 +87,9 @@ Bias and LayerNorm-parameter gradients have this form. The rule runs **two kerne
    With few columns (e.g. 768 bias gradients) this pass is latency-bound, so it uses blocks of `kThreads = 32` (spread
    over many SMs) and unrolls the chunks by `kUnroll = 32`, which keeps their loads in flight together. Splitting a
    column's chunks over several threads would need its epilogue (often `gradient += sum`, possibly in place) on one of
-   them; TVM's schedule cannot guard that, so it isn't done (TODO.md).
+   them; TVM's schedule cannot guard that, so it isn't done (see the open items below).
 
-A reduction block may have two results (sibling sums merged before scheduling, see optimization.md): both passes then
+A reduction block may have two results (sibling sums merged before scheduling, see \ref dev_optimization): both passes then
 keep a register cache per result, created before any is moved into the loops. Each reduction is scheduled with its
 epilogues in its own loop nest; then the nests of all reductions are merged level
 by level (`Merge`), so that both passes are one kernel each. The rule needs at least `kMinRows = 256` rows; with
@@ -160,7 +160,7 @@ Strided-view helpers shared with the CPU packages are in `kernels/common/include
   scratch buffer, never into the output, because C may alias it. The fastest is cached.
 - **Per thread and device:** the cuBLAS and cuBLASLt handles and a 32 MiB cuBLASLt workspace.
 - Not used yet: the GELU / DGELU / BGRADB epilogues. GELU is only the tanh approximation, so it would need
-  `--fast-math`. Deferred; see TODO.
+  `--fast-math`. Deferred (see the open items below).
 
 ## cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
 
@@ -226,9 +226,18 @@ FlashAttention-2 (github.com/Dao-AILab/flash-attention, BSD-3-Clause, v2.7.4.pos
   return `std::nullopt` for anything they don't handle.
 - **An op that cannot be legalized generically:** register a handler in `CUDATarget::overrideLegalizations`.
 
-# Known gaps (see TODO.md)
+# Open items
 
-- The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on the A100 slice and is not
-  used; see TODO.md.
-- The Python bindings do not use the framework's current stream yet (see runtime.md).
-- Unpadding of suffix-masked regions.
+\todo The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on an A100 slice
+(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions. Likewise the
+GELU and DGELU epilogues (tanh approximation only: with `--fast-math`).
+
+\todo ColumnReduction's second pass: the partial sums of a column over several threads (a cross-thread
+reduction), with the epilogue on one of them.
+
+\todo The merged sibling sums of a LayerNorm backward pass take 46 µs where a hand-written kernel takes 17 µs: the
+reductions' initialization inside the loop (`DecomposeReduction` splits the kernel) and 64-bit index arithmetic.
+
+\todo The Python bindings do not use the framework's current stream yet (see \ref dev_runtime).
+
+\todo Unpadding of suffix-masked regions.

@@ -12,7 +12,8 @@ decisions along the way.
 | Graph passes | computation graph → computation graph | `src/mdl/passes/` (shapes, autodiff, masking) |
 | Lowering | computation graph → TVM Relax | `src/mdl/backends/tvm/tvm.cpp` |
 | Canonicalization, kernel selection | Relax → Relax | `src/mdl/backends/tvm/details/{pipeline,patterns,kernel_match}.cpp` |
-| Legalization, scheduling | Relax → TIR | `src/mdl/backends/tvm/details/{legalize,schedule}.cpp` |
+| Legalization, fusion | Relax → TIR | `src/mdl/backends/tvm/details/{legalize.cpp,fusion/}` |
+| Scheduling | TIR → TIR | `src/mdl/backends/tvm/targets/` (schedule rules per target) |
 | Code generation | TIR → object file | `src/mdl/backends/tvm/details/aot.cpp` |
 
 The backend builds on TVM \cite chen2018tvm.
@@ -46,8 +47,10 @@ The graph is lowered to TVM's Relax. A canonicalization phase normalizes the gra
 target (see \ref spec_kernel_packages). Kernel selection then replaces matching regions by calls to optimized kernels
 (e.g. oneDNN); where a kernel's constraints can only be decided at runtime (e.g. a symbolic size), the region is
 guarded by a runtime check with the original computation as fallback. All remaining operations are legalized into TIR,
-fused into kernels, and scheduled per target (see \ref dev_optimization and, for CUDA, \ref dev_cuda_kernels), and
-the whole program is compiled ahead of time into one object file that exports a function per
-compiled member function.
+grouped into kernels by a fusion planner, and scheduled per target (see \ref dev_optimization and, for CUDA,
+\ref dev_cuda_kernels), and the whole program is compiled ahead of time into one object file that exports a function
+per compiled member function.
 
-\todo Memory planning, the calling convention, and the bindings.
+The callers' sessions provide the compiled functions' workspace (see \ref dev_runtime).
+
+\todo Memory planning.

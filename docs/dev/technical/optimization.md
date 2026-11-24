@@ -51,7 +51,7 @@ The masking pass turns a masked function into an unmasked one with explicit fill
 
 - **Element mask:** arbitrary booleans per element. The most general form.
 - **Suffix mask:** per-sequence lengths. The structure is known: everything after the length is masked. This allows
-  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding (see TODO).
+  cheaper forms, such as cuDNN's padding mode instead of a materialized `-inf` bias, and later unpadding.
 
 ## Gradients: save or recompute
 
@@ -85,14 +85,14 @@ The forward pass of a training build stores *residuals* in a context buffer, and
   GEMM's epilogue.
 - **Memory budget:** `SplitOptions::memoryBudget`, in bytes at `typicalDim`; internal, not exposed to users. If the
   preferred residuals exceed it, the cut is taken without preferences: everything that can be recomputed is.
-  Later, the compiler can set the budget from the model, the batch size and the target's memory (TODO.md).
+  \todo The compiler could set the budget from the model, the batch size and the target's memory.
 - **Boolean masks** are small and simply part of the cut.
 - **Checkpointing:** module calls selected for checkpointing are always recomputed, including their matrix products;
   their inputs can be saved.
 
 Measured (A100 bf16 BERT-base training):
 - GELU backward: 149 → 117 µs (PyTorch: 105 µs).
-- LayerNorm statistics saved (with RowReduction's per-row results, see cuda_kernels.md): forward LayerNorm 43 → 22
+- LayerNorm statistics saved (with RowReduction's per-row results, see \ref dev_cuda_kernels): forward LayerNorm 43 → 22
   µs, and the backward pass no longer recomputes them. That is about 0.1 ms per step of GPU time.
 - Step: 30.85 → 30.35 ms at 64x128, 33.44 → 32.9 ms at 16x512.
 - The context grows by `gelu(h)`, about 600 MB at 64x128 (12 layers), and by the statistics, a few MB.
@@ -231,7 +231,7 @@ the rows.
   legalize the values of bound variables, which multi-result reductions use.
 - **Measured** (A100 bf16 BERT-base training, LayerNorm parameter gradients): first pass 61 → 46 µs, second pass 14 →
   9.5 µs. A hand-written kernel needs 17 µs; the rest is the reductions' initialization inside the loop and 64-bit
-  index arithmetic (TODO.md).
+  index arithmetic (see the open items in \ref dev_cuda_kernels).
 
 ## Schedule rules
 

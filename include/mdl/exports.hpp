@@ -69,7 +69,7 @@ namespace mdl {
 	 * @details The exported (DPS) calling convention is: inputs (in declaration order), then weights (in canonical
 	 * order, see mdl::weightPaths), then preallocated outputs, then the context buffer (if any; a 1-D uint8 tensor),
 	 * then the workspace (a 1-D uint8 tensor of at least workspaceSizeSymbol's result, aligned to 64 bytes, on the
-	 * tensors' device; owned by the caller's session, see docs/technical/runtime.md).
+	 * tensors' device; owned by the caller's session, see docs/dev/technical/runtime.md).
 	 * Packed inputs and outputs are not arguments (they are stored in the context buffer). Backends and binding
 	 * generators must both use this description so that the generated bindings match the compiled code.
 	 */

@@ -5,7 +5,7 @@ How compiled models are called: what state a call needs (code, library handles, 
 graphs), who owns it, and how the bindings expose it.
 
 **Status:** implemented: the caller's workspace, sessions, and CUDA graphs (see "Implementation order"). A C API and
-a `Model` class are deferred (TODO.md).
+a `Model` class are deferred (see the open items below).
 
 # Why
 
@@ -124,4 +124,8 @@ The C API is target-independent; only what a session holds differs.
    - Not yet: the framework's current stream in the Python bindings; updating a graph whose pointers changed
      (`cudaGraphExecUpdate`) instead of a new capture.
 
-This replaces the TODO item "caller-provided workspace".
+\todo A C API (`mdl_<prefix>_model_create`, `..._session_create`, ...), a `Model` class and an explicit Python
+`Session`, once the model owns state (handles, plans).
+
+\todo The framework's current stream in the Python bindings; updating a captured graph whose pointers changed
+(`cudaGraphExecUpdate`) instead of capturing anew.

@@ -609,7 +609,7 @@ namespace mdl::backend::tvm {
 			/**
 			 * @brief A buffer in the workspace: all intermediate buffers of a call are views at 64-byte aligned offsets of
 			 * the caller's workspace (see arenaPrologue), so that a call allocates nothing (the caller's session owns the
-			 * workspace, see docs/technical/runtime.md).
+			 * workspace, see docs/dev/technical/runtime.md).
 			 */
 			tirx::BufferVar allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
 				const auto i64 = DataType::Int(64);

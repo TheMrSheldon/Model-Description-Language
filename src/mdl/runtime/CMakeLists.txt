@@ -12,7 +12,7 @@ target_link_libraries(mdl_runtime INTERFACE tvm_runtime nlohmann_json::nlohmann_
 # The runtime of a compilation target besides the CPU (mdl_add_model(... TARGET <kind> ...) links it): CUDA needs TVM's
 # CUDA runtime (device API, loading the embedded PTX).
 if(MDL_ENABLE_CUDA)
-	# The CUDA sessions (a stream and CUDA graphs per session, see docs/technical/runtime.md): registers TVM FFI
+	# The CUDA sessions (a stream and CUDA graphs per session, see docs/dev/technical/runtime.md): registers TVM FFI
 	# functions when loaded, which the bindings look up.
 	find_package(CUDAToolkit REQUIRED)
 	add_library(mdl_session_cuda SHARED sessions/cuda.cpp)

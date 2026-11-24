@@ -180,7 +180,7 @@ weights.b = b;
 mdl::models::FFN::forward(x, weights, out);
 
 // The same with an explicit session (its workspace, grown on demand; one per thread). The static functions above use
-// a session per thread (docs/technical/runtime.md).
+// a session per thread (docs/dev/technical/runtime.md).
 mdl::models::FFN::Session session;
 session.forward(x, weights, out);
 

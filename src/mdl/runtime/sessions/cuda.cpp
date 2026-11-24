@@ -1,4 +1,4 @@
-// The CUDA device sessions of compiled models (docs/technical/runtime.md): each session runs the calls on its own
+// The CUDA device sessions of compiled models (docs/dev/technical/runtime.md): each session runs the calls on its own
 // stream and replays them as CUDA graphs. The bindings find the session functions as TVM FFI globals
 // `mdl.session.2.{create,call,free}` (2: kDLCUDA) when this library is loaded; otherwise they call directly.
 //

@@ -76,7 +76,7 @@ namespace mdl::autodiff {
 		shapes::Oracle* shapes = nullptr;
 		/**
 		 * @brief The bytes the residuals may take at most, at `typicalDim` (internal; not exposed to users yet):
-		 * above it, values are recomputed instead of saved wherever possible (see docs/technical/optimization.md).
+		 * above it, values are recomputed instead of saved wherever possible (see docs/dev/technical/optimization.md).
 		 */
 		double memoryBudget = std::numeric_limits<double>::infinity();
 		/** @brief The size assumed for dimensions known only at runtime (e.g. batch, sequence), to compare sizes. */
@@ -89,7 +89,7 @@ namespace mdl::autodiff {
 	 * cut that minimizes their bytes (as PyTorch's AOTAutograd partitioner does): the backward pass recomputes the
 	 * other values from them. Matrix products, attention and other library operations are never recomputed; values
 	 * that a non-fusible operation of the backward pass reads are saved, unless that exceeds the memory budget. Values that only depend on weights and constants are recomputed.
-	 * See docs/technical/optimization.md.
+	 * See docs/dev/technical/optimization.md.
 	 *
 	 * @param numOutputs the number of outputs of the differentiated function (the first outputs of @p vjp; its last
 	 * @p numOutputs parameters are the cotangents).
