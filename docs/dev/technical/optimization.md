@@ -24,7 +24,8 @@ shape occurs.
 | Relax | Fusion planner: which kernel calls become one kernel | `details/fusion/` (then TVM FuseTIR) |
 | TIR | Merging results, flattening injective kernels | `details/flatten_injective.cpp` |
 | TIR | Schedule rules (per target) | `targets/` |
-| AOT | Workspace arena, kernel CSE | `details/aot.cpp`, `details/pipeline.cpp` |
+| AOT | Caller's workspace, kernel CSE | `details/aot.cpp`, `details/pipeline.cpp` |
+| Runtime | Sessions, CUDA graphs | bindings, `src/mdl/runtime/sessions/` (\ref dev_runtime) |
 
 # Graph level
 
@@ -187,12 +188,19 @@ contract in `fusion/rules.hpp`). Our rules are written for symbolic dimensions (
 
 - **CUDA:** warp-per-row reductions (several reductions and epilogues), two-pass column reductions, vectorized
   elementwise kernels, then DLight's rules; see \ref dev_cuda_kernels.
-- **CPU:** DLight's CPU `Reduction` (ported; for kernels with one result: `targets/cpu/reduction.cpp`), then our `cpu::Fallback` (`targets/cpu/fallback.cpp`).
+- **CPU:**
+  1. DLight's CPU `Reduction` (softmax, normalizations), ported. It applies only to kernels with one result: it
+     computes every block at the last block's loops, and TVM's `compute_at` cannot move a result block
+     (`targets/cpu/reduction.cpp` checks this).
+  2. Our `cpu::Fallback` (`targets/cpu/fallback.cpp`): inlines the elementwise blocks, then vectorizes and
+     parallelizes each remaining block.
 
 # AOT level
 
-- **Workspace arena:** all temporaries of a call are offsets in one arena, sized from the symbolic dimensions.
-  Offsets are bound as variables, so the size computation stays cheap.
+- **Workspace:** all temporaries of a call are offsets in the caller's workspace (the last argument), sized from the
+  symbolic dimensions by the function `<symbol>_workspace_size`. Offsets are bound as variables, so the size
+  computation stays cheap. Sessions own the workspace; on CUDA they also replay calls as CUDA graphs. See
+  \ref dev_runtime.
 - **Kernel CSE:** common subexpressions are eliminated inside the generated kernels (TIR CSE). It runs on the kernels
   only, not on the host code with its arena bindings.
 

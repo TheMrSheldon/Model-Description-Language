@@ -7,14 +7,18 @@ For the kernel package format (manifests, patterns, expressions) see \ref spec_k
 A compiled model's GPU work comes from two sources:
 
 1. **Generated kernels**: the fusion planner groups the remaining operations and TVM's FuseTIR makes one PrimFunc per
-   group (see [optimization.md](optimization.md)). The CUDA target schedules them and compiles them to CUDA C, then
+   group (see \ref dev_optimization). The CUDA target schedules them and compiles them to CUDA C, then
    to a cubin with NVRTC at compile time. The cubin is embedded in the model's
    object file. Loading a model needs no compiler.
 2. **Kernel packages**: library calls (cuBLASLt, cuDNN) that the backend selects by pattern matching before fusion.
    From TVM's point of view these are `call_extern`s in host code.
 
-Every kernel runs on TVM's current stream (`TVMFFIEnvGetStream`). The caller controls that stream, e.g. torch's
-current stream through the Python binding. Temporary buffers are offsets in one workspace arena per call.
+Every kernel runs on TVM's current stream (`TVMFFIEnvGetStream`). During a call, a session sets that stream to its own
+stream and replays repeated calls as CUDA graphs. Temporary buffers are offsets in the session's workspace. See
+\ref dev_runtime.
+
+Kernel packages must therefore launch on `TVMFFIEnvGetStream` and must not synchronize, or calls that use them are not
+captured. They also must not allocate after their first call with a configuration: the first call is not captured.
 
 # Pipeline overview (CUDA-relevant parts)
 
@@ -147,7 +151,7 @@ Strided-view helpers shared with the CPU packages are in `kernels/common/include
   scratch buffer, never into the output, because C may alias it. The fastest is cached.
 - **Per thread and device:** the cuBLAS and cuBLASLt handles and a 32 MiB cuBLASLt workspace.
 - Not used yet: the GELU / DGELU / BGRADB epilogues. GELU is only the tanh approximation, so it would need
-  `--fast-math`. Deferred (see the open items below).
+  `--fast-math`. Deferred; see TODO.
 
 ## cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
 
@@ -182,12 +186,9 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
   return `std::nullopt` for anything they don't handle.
 - **An op that cannot be legalized generically:** register a handler in `CUDATarget::overrideLegalizations`.
 
-# Open items
+# Known gaps (see TODO.md)
 
-\todo The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on an A100 slice
-(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions. Likewise the
-GELU and DGELU epilogues (tanh approximation only: with `--fast-math`).
-
-\todo CUDA graphs and a caller-provided workspace.
-
-\todo Unpadding of suffix-masked regions.
+- The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on the A100 slice and is not
+  used; see TODO.md.
+- The Python bindings do not use the framework's current stream yet (see runtime.md).
+- Unpadding of suffix-masked regions.
