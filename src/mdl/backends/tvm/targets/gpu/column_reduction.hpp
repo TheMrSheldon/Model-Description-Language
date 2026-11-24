@@ -28,7 +28,8 @@ namespace mdl::backend::tvm::gpu {
 		static constexpr int64_t kChunk = 64;		  ///< rows per partial sum
 		static constexpr int64_t kChunksPerBlock = 8; ///< threadIdx.y of the first pass
 		static constexpr int64_t kVector = 4;		  ///< adjacent columns per thread of the first pass (vector loads)
-		static constexpr int64_t kThreads = 256;	  ///< threads of the second pass
+		static constexpr int64_t kThreads = 32;		  ///< threads of the second pass (few: blocks over many SMs)
+		static constexpr int64_t kUnroll = 32;		  ///< chunks per iteration of the second pass
 		static constexpr int64_t kMinRows = 256;	  ///< (fewer: DLight's rules)
 		static constexpr size_t kMaxReductions = 8;	  ///< in one kernel
 

@@ -84,12 +84,16 @@ Bias and LayerNorm-parameter gradients have this form. The rule runs **two kerne
    columns, so reads are coalesced. Blocks are `8 × 32` (`kChunksPerBlock × warp`). The output is partial sums of
    shape `[chunks, columns]` in the reduction type, e.g. f32.
 2. **Second pass:** each thread sums the chunks of one column in a register and applies that reduction's epilogues.
+   With few columns (e.g. 768 bias gradients) this pass is latency-bound, so it uses blocks of `kThreads = 32` (spread
+   over many SMs) and unrolls the chunks by `kUnroll = 32`, which keeps their loads in flight together. Splitting a
+   column's chunks over several threads would need its epilogue (often `gradient += sum`, possibly in place) on one of
+   them; TVM's schedule cannot guard that, so it isn't done (TODO.md).
 
 Each reduction is scheduled with its epilogues in its own loop nest; then the nests of all reductions are merged level
 by level (`Merge`), so that both passes are one kernel each. The rule needs at least `kMinRows = 256` rows; with
 fewer, DLight's rules take the kernel. The second pass's write-back is not predicated, so its thread count must
-divide a static number of columns: the largest power of two from 256 down to 32 that does, or the number of columns
-itself if it is at most 256. Otherwise DLight takes the kernel.
+divide a static number of columns: 32 if it does, or the number of columns itself if it is at most 32. Otherwise
+DLight takes the kernel.
 
 ## Elementwise (`elementwise.{hpp,cpp}`)
 

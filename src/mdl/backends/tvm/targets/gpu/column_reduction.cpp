@@ -165,6 +165,8 @@ namespace mdl::backend::tvm::gpu {
 				// float32; local bfloat16 buffers are computed in float32), which its epilogues then read per column.
 				// (threads that divide the columns: the write-back after the loop is not predicated)
 				const auto back = sch->Split(sch->GetLoops(red)[0], factors(threads));
+				// (the chunks unrolled by kUnroll: their loads in flight together, not one after the other)
+				sch->Unroll(sch->Split(sch->GetLoops(red).back(), factors(kUnroll))[1]);
 				if (epiloguesOf[k].empty()) {
 					sch->ReverseComputeAt(sch->CacheWrite(red, 0, "local"), back[1], /*preserve_unit_loops=*/false);
 				} else {
