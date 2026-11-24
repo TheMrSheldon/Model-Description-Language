@@ -4,8 +4,8 @@
  * @details These are ordinary functions composed of builtins; backends may recognize them (pattern matching) and
  * replace them by optimized implementations where the target provides one.
  */
-import std.arithmetic;
-import std.statistics;
+from .arithmetic import *;
+from .statistics import *;
 
 /**
  * @brief Computes the softmax function over the last dimension.
@@ -18,7 +18,7 @@ import std.statistics;
  * @param x the input tensor.
  * @return The softmax of \p x .
  */
-float[...] softmax(x: float[...]) {
+public float[...] softmax(x: float[...]) {
     auto power = exp(x - max(x)[... -> ... 1]);
     return power / sum(power)[... -> ... 1];
 }
@@ -37,13 +37,13 @@ float[...] softmax_gradient(x: float[...], dy: float[...]) {
  * @details Adds a large negative bias at the masked elements (like an additive attention mask), so that this is an
  * ordinary softmax: backends can use their fused softmax, and the gradient pass uses softmax_gradient.
  */
-float[...] softmax(x: masked float[...]) => softmax(x.data + (x.mask - 1) * 3.4028234e38);
+public float[...] softmax(x: masked float[...]) => softmax(x.data + (x.mask - 1) * 3.4028234e38);
 
 /**
  * @brief Gaussian Error Linear Unit (exact, erf-based).
  * @details \f[\text{GELU}(x) := \frac x2\left(1 + \text{erf}\left(\frac x{\sqrt 2}\right)\right)\f]
  */
-float[...] gelu(x: float[...]) => x * 0.5 * (1 + erf(x / sqrt(2)));
+public float[...] gelu(x: float[...]) => x * 0.5 * (1 + erf(x / sqrt(2)));
 
 /**
  * @brief Closed-form gradient of GELU (used by the gradient pass):
@@ -56,9 +56,9 @@ float[...] gelu_gradient(x: float[...], dy: float[...]) =>
 /**
  * @brief Logistic sigmoid, \f(\sigma(x) = 1 / (1 + e^{-x})\f).
  */
-float[...] sigmoid(x: float[...]) => 1 / (1 + exp(-x));
+public float[...] sigmoid(x: float[...]) => 1 / (1 + exp(-x));
 
 /**
  * @brief Sigmoid Linear Unit (a.k.a. swish), \f(x\sigma(x)\f).
  */
-float[...] silu(x: float[...]) => x * sigmoid(x);
+public float[...] silu(x: float[...]) => x * sigmoid(x);

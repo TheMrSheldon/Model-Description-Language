@@ -10,15 +10,16 @@ MDL is a language for describing neural networks and a compiler (`mdlc`) that tu
 file plus bindings (C++ header, Python).
 
 ```dlm
-import std;
-
 module FFN[indim: uint, outdim: uint] {
     W: float[outdim, indim]
     b: float[outdim]
 
-    float[..., outdim] forward(x: float[..., indim]) => x @ W.T() + b;
+    public float[..., outdim] forward(x: float[..., indim]) => gelu(x @ W.T() + b);
 }
 ```
+The `public` member functions of a compiled module are its entry points. Elementwise functions, reductions, and
+activations (`gelu`, `softmax`, ...) come from the prelude; other definitions are imported, e.g.
+`from std.nn import Linear;` (see [Imports and visibility](docs/language-spec.md#imports-and-visibility)).
 
 ## Compile
 ```bash

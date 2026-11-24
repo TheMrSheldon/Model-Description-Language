@@ -6,14 +6,80 @@ standard library documents its definitions with `/** ... */` comments.
 How a model is compiled (hyperparameter values, `...` rank, float type, gradients, masking, quantization) is not part of
 the language: these are build settings, see [build-config.md](build-config.md).
 
-# Imports
+# Imports and visibility
+Every file has its own namespace. An import makes a namespace or selected names of another file available in the
+importing file; nothing else of that file becomes visible.
 ```dlm
-import std;              // all files of the standard library (directory std/)
-import std.activations;  // a single file (std/activations.dlm)
-import mylib.layers;     // mylib/layers.dlm, searched next to the importing file and in the -i directories
+import std.nn;                         // the namespace `nn` (the last component):   nn.LayerNorm[768]
+import std.nn as layers;               // under another name:                          layers.LayerNorm[768]
+from std.nn import LayerNorm, Linear;  // selected names:                              LayerNorm[768]
+from std.nn import Linear as Dense;    // a name under another name
+from std.nn import *;                  // all names that std.nn makes visible here
+import std;                            // a directory (see below):                     std.nn.LayerNorm[768]
+from .layers import Block;             // relative: layers.dlm next to this file
+from ..common import utils;            // relative: one directory up
 ```
-Imported definitions are visible in the importing file. Only the definitions of the compiled file itself are
-exported; every file is translated once, even if it is imported several times.
+- **Paths.** `a.b` is the file `a/b.dlm` or the directory `a/b`. An absolute path is searched in the directory of the
+  compiled file, in the import directories (`-i`), and (for `std`) in the standard library. A path that starts with
+  dots is relative to the importing file's directory (`.` is that directory, every further dot one directory up).
+- **Names.** Local definitions take precedence over imported names, and explicitly imported names over the prelude.
+  A local definition that hides an imported name is reported by `-Wshadow`. Explicitly importing two different
+  definitions under the same name is an error; a `*` import does not override a name that is already imported. An
+  imported function brings all its overloads (e.g. `softmax` and its masked overload).
+- **Every file is translated once**, even if several files import it.
+
+## Visibility
+Definitions (functions, modules, structs) and the members of modules and structs have one of three visibilities:
+
+| Visibility | Written | Visible in |
+|---|---|---|
+| private | `private` | the file (a member: the module or struct) |
+| package | (the default) | all files of the package |
+| public | `public` | every file that imports it |
+
+```dlm
+private float[...] scale(x: float[...]) => x * 2.0;        // only this file
+
+module Block[dim: uint] {
+    proj: Linear[dim, dim]                                 // package: e.g. `block.proj.W` in the package
+    private float[..., dim] residual(x: float[..., dim]) => x + proj(x);
+    public float[..., dim] forward(x: float[..., dim]) => residual(x) * 0.5;
+}
+```
+A **package** is a directory directly below an import root (the compiled file's directory, an `-i` directory, or the
+standard library, which is the package `std`), with all its subdirectories; a file directly in an import root is a
+package of its own. The files of the compiled program belong to its package. Visibility is about names in the source:
+the weights of a module are always part of its checkpoint, whatever their visibility.
+
+## Re-exports
+Imports are private: they make names visible in the importing file only. `public` re-exports them, so that importers
+of this file see them too, with the visibility of public definitions:
+```dlm
+// mylib/utils.dlm: the public interface of the package
+public from ._fileutils import normalize;   // public from here on (normalize itself has package visibility)
+public import .layers;                      // utils.layers for importers
+```
+So the implementation of a package can live in files that importers from other packages cannot use directly
+(`from mylib._fileutils import normalize` is an error: `normalize` is not public; the message names the files that
+re-export it). File names carry no rules: `_fileutils` is only a convention.
+
+## Directory imports
+`import a;` for a directory `a` gives the namespace of its **index file** `a/a.dlm` if there is one (its public names,
+typically re-exports of the other files). Without an index file, the namespace contains the files and subdirectories of
+`a` as namespaces (`a.utils`, `a.layers`), each with its public names.
+
+## Prelude
+Every file outside the standard library implicitly imports `from std.prelude import *;` with the lowest precedence:
+local definitions and explicit imports take precedence over its names (without a `-Wshadow` warning). The prelude
+(`std/prelude.dlm`) re-exports the elementwise functions, the reductions, and the activations (see
+[Standard library](#standard-library)); the modules (`std.nn`), losses, and autodiff helpers are imported explicitly.
+
+## Compiled functions
+A module is compiled if the argument values have an entry for it (see [build-config.md](build-config.md)). Its
+`public` member functions become exported functions (entry points of the compiled model); functions with package or
+private visibility are not exported. `export: [forward, loss]` (`--export forward`, repeatable) exports only the named
+public functions (`Bert.forward` names a function of one of several compiled modules); naming a function that is not
+public, does not exist, or is differentiated (`grad`) but not exported is an error.
 
 # Modules
 - Compile-time arguments ("hyperparameters"). E.g., the following is a linear layer with three hyperparameters: the
@@ -59,8 +125,8 @@ exported; every file is translated once, even if it is imported several times.
   ```
   `layers[i]` with a compile-time index is the instance `i` (weights `layers.<i>.…`).
 
-A module is compiled if the argument values have an entry for it; each of its member functions becomes an exported
-function.
+A module is compiled if the argument values have an entry for it; its `public` member functions become exported
+functions (see [Compiled functions](#compiled-functions)).
 
 ## Hyperparameters
 Hyperparameters may have default values (which may use the earlier hyperparameters). Values can be given by name
@@ -371,7 +437,8 @@ hyperparameters). `--strict` (`strict: true`) reports what may be wrong as an er
 diagnostics are errors.
 
 # Standard library
-`import std;` (directory `std/`):
+The package `std` (directory `std/`). The prelude (`std.prelude`, imported implicitly) contains the functions of
+`arithmetic`, `statistics`, and `activations`; the others are imported explicitly (e.g. `from std.nn import Linear;`).
 
 | File | Contents |
 |---|---|

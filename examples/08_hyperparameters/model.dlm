@@ -1,4 +1,4 @@
-import std;
+from std.nn import LayerNorm, Linear;
 
 /** The sizes of an MLP: layer i maps sizes[i] to sizes[i + 1]; biases[i] says whether it has a bias. */
 struct MlpConf {
@@ -15,7 +15,7 @@ module MLP[conf: MlpConf, normalize: bool = false] {
     @conditional(normalize)
     norm: LayerNorm[conf.sizes[3]]
 
-    float[..., conf.sizes[3]] forward(x: float[..., conf.sizes[0]]) {
+    public float[..., conf.sizes[3]] forward(x: float[..., conf.sizes[0]]) {
         auto h = x;
         for (i in 0..2) {
             h = gelu(layers[i](h));

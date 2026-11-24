@@ -6,10 +6,12 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <iostream>
 
 #include "computegraphv2/datatype.hpp"
+#include "visibility.hpp"
 
 namespace mdl {
 
@@ -20,11 +22,24 @@ namespace mdl {
 		/** @brief Builtin datatypes. **/
 		static const std::map<std::string, DataType> builtinTypes;
 
-		Namespace* parent;
+		Namespace* parent = nullptr;
 		std::map<std::string, std::any> objects;
 		std::map<std::string, DataType> types;
 		/** @brief The definitions (see analysis::SemanticIndex) of the names defined here, for tools. */
 		std::map<std::string, size_t> symbols;
+
+	public:
+		/**
+		 * @brief How a name of this namespace is seen from other files: its visibility, and its origin (the defining
+		 * file and name, the same for every import or re-export of the definition).
+		 */
+		struct Entry {
+			Visibility visibility = Visibility::Package;
+			std::string origin;
+		};
+
+	private:
+		std::map<std::string, Entry> entries;
 
 		explicit Namespace(
 				Namespace* parent, const std::map<std::string, std::any>& objects = {},
@@ -34,6 +49,12 @@ namespace mdl {
 
 	public:
 		Namespace() {}
+
+		/** @brief Defines @p name as a copy of an object of another namespace (an import). */
+		void putAny(std::string_view name, std::any obj) {
+			auto [it, inserted] = objects.emplace(std::string{name}, std::move(obj));
+			assert(inserted);
+		}
 
 		template <typename T>
 		const T& put(std::string_view name, T&& obj) {
@@ -120,6 +141,44 @@ namespace mdl {
 			if (parent != nullptr)
 				return parent->getType(name);
 			return std::nullopt;
+		}
+
+		/** @brief Records the visibility and origin of @p name (defined in this namespace). */
+		void setEntry(std::string_view name, Entry entry) { entries[std::string{name}] = std::move(entry); }
+
+		/** @brief The visibility and origin of @p name if it is defined in this namespace itself. */
+		const Entry* entry(std::string_view name) const {
+			auto it = entries.find(std::string{name});
+			return it == entries.end() ? nullptr : &it->second;
+		}
+
+		/** @brief The object named @p name of this namespace itself (not a parent), any kind; nullptr if none. */
+		const std::any* localObject(std::string_view name) const {
+			auto it = objects.find(std::string{name});
+			return it == objects.end() ? nullptr : &it->second;
+		}
+
+		/** @brief The type named @p name of this namespace itself (not a parent); nullptr if none. */
+		const DataType* localType(std::string_view name) const {
+			auto it = types.find(std::string{name});
+			return it == types.end() ? nullptr : &it->second;
+		}
+
+		/** @brief The names of the objects and types defined in this namespace itself. */
+		std::vector<std::string> localNames() const {
+			std::vector<std::string> names;
+			for (const auto& [name, _] : objects)
+				names.push_back(name);
+			for (const auto& [name, _] : types)
+				if (!objects.contains(name))
+					names.push_back(name);
+			return names;
+		}
+
+		/** @brief The symbol of @p name if it is defined in this namespace itself. */
+		std::optional<size_t> localSymbol(std::string_view name) const {
+			auto it = symbols.find(std::string{name});
+			return it == symbols.end() ? std::nullopt : std::optional<size_t>{it->second};
 		}
 
 		static const Namespace emptyNamespace() { return Namespace{}; }

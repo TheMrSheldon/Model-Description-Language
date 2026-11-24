@@ -142,8 +142,8 @@ Features:
   open documents and their imports; definitions of the standard library are not renamed). Highlighting an einops axis
   marks its occurrences in the pattern.
 - **Quick fixes:** `.name=value` for an optional hyperparameter given by position, `float32(x)` (or the respective
-  type) for an implicit float conversion, renaming a definition that breaks a naming rule, and an `import std.x;` for
-  an undefined name that the standard library defines.
+  type) for an implicit float conversion, renaming a definition that breaks a naming rule, and
+  `from std.x import name;` for an undefined name (or type) that the standard library defines.
 - **Go to definition of struct members** (`conf.dims.model`), **folding ranges** (blocks, comments, imports), and
   **range formatting**.
 - **Formatting:** the whole document, with `mdl-format`'s style (from `.mdl-format`, else the editor's tab size).

@@ -296,10 +296,12 @@ static void quantizeWeights(
 std::vector<ExportedFunction> mdl::exportedFunctions(
 		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients,
 		const std::vector<std::string>& masked, const std::map<std::string, unsigned>& inputRanks,
-		const std::vector<QuantizationRule>& quantize
+		const std::vector<QuantizationRule>& quantize, const std::vector<std::string>& exportOnly
 ) {
 	std::vector<ExportedFunction> exports;
-	std::set<std::string> differentiated; // the requested gradient functions that some compiled module defines
+	std::set<std::string> differentiated;	   // the requested gradient functions that some compiled module defines
+	std::set<std::string> exportedNames;	   // the names of --export that select a function
+	std::map<std::string, std::string> hidden; // requested (exported or differentiated) but not public: the reason
 	for (const auto& [moduleName, member] : unit.definitions) {
 		const auto* definition = std::get_if<ModuleType>(&member);
 		if (definition == nullptr)
@@ -410,6 +412,24 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		};
 		std::vector<std::string> maskedHere = masked; // requested, plus functions that declare masked parameters
 		for (const auto& [funcName, decl] : module->functions) {
+			// Only public functions are exported, and of them those that --export names (if any).
+			auto selects = [&](const std::string& name) {
+				return name == funcName || name == moduleName + "." + funcName;
+			};
+			const bool named = std::ranges::any_of(exportOnly, selects);
+			if (decl.visibility != Visibility::Public) {
+				if (named || std::ranges::any_of(gradients.functions, selects))
+					hidden.emplace(funcName, std::format("{}.{} is not public", moduleName, funcName));
+				continue;
+			}
+			if (!exportOnly.empty() && !named) {
+				if (std::ranges::any_of(gradients.functions, selects))
+					hidden.emplace(funcName, std::format("{}.{} is not exported (see --export)", moduleName, funcName));
+				continue;
+			}
+			for (const auto& name : exportOnly)
+				if (selects(name))
+					exportedNames.insert(name);
 			decls.emplace(funcName, &decl);
 			if (std::any_of(
 						decl.parameters.begin(), decl.parameters.end(),
@@ -684,9 +704,22 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			exports.push_back(std::move(fn));
 		}
 	}
+	for (const auto& name : exportOnly)
+		if (!exportedNames.contains(name)) {
+			const auto dot = name.rfind('.');
+			auto it = hidden.find(dot == std::string::npos ? name : name.substr(dot + 1));
+			throw std::runtime_error(
+					it != hidden.end()
+							? std::format("--export {}: {}", name, it->second)
+							: std::format("--export {}: no compiled module has a public function {}", name, name)
+			);
+		}
 	for (const auto& name : gradients.functions)
-		if (!differentiated.contains(name))
+		if (!differentiated.contains(name)) {
+			if (auto it = hidden.find(name); it != hidden.end())
+				throw std::runtime_error(std::format("cannot differentiate '{}': {}", name, it->second));
 			throw std::runtime_error(std::format("no compiled module has a member function '{}' to differentiate", name)
 			);
+		}
 	return exports;
 }

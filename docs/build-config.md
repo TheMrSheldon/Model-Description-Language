@@ -40,11 +40,12 @@ that can be repeated take a list:
 | `ellipsis-rank` | `--ellipsis-rank` | `2`, or `{ default: 2, labels: 1 }` for `--ellipsis-rank 2 --ellipsis-rank labels=1` |
 | `float` | `--float` | `bf16` |
 | `mask` | `--mask` | `[forward]` |
+| `export` | `--export` | `[forward, loss]` (only these public functions; default: all public functions) |
 | `grad` | `--grad` | `[loss]` |
 | `trainable` | `--trainable` | `["layers.**", "!layers.0.**"]` |
 | `checkpoint` | `--checkpoint` | `["encoder.layers.*"]` |
 | `grad-fused`, `grad-overwrite`, `input-grads` | the flags | `true` |
-| `kernels` | `--kernels` | `tvm` |
+| `kernels` | `--kernels` | `none` |
 | `fast-math`, `profile` | the flags | `true` |
 | `bindings` | `--binding` | `[cpp, python-torch]` |
 | `quantize` | `--quantize` | `[{ weights: ["**"], format: int4, group: 128 }]` (see [Quantization](#quantization)) |

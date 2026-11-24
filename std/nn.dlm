@@ -2,19 +2,19 @@
  * @file
  * @brief Basic neural network layers.
  */
-import std.arithmetic;
-import std.statistics;
-import std.autodiff;
+from .arithmetic import *;
+from .statistics import *;
+from .autodiff import *;
 
 /**
  * @brief Implements layer normalization as proposed by \cite layernorm.
  * \todo make epsilon configurable (currently 1e-12 as in BERT).
  */
-module LayerNorm[dim: uint] {
-    beta: float[dim]
-    gamma: float[dim]
+public module LayerNorm[dim: uint] {
+    public beta: float[dim]
+    public gamma: float[dim]
 
-    float[..., dim] forward(x: float[..., dim]) {
+    public float[..., dim] forward(x: float[..., dim]) {
         auto mu = mean(x)[... -> ... 1];
         auto x_c = x - mu;
         auto sigma = rsqrt(mean(x_c * x_c)[... -> ... 1] + 1e-12);
@@ -42,12 +42,12 @@ module LayerNorm[dim: uint] {
  * @details Given a vector \f(x\f) computes \f(xW^\top + b\f), or \f(xW^\top\f) without bias (`.bias=false`; then
  * the instance has no weight `b`).
  */
-module Linear[indim: uint, outdim: uint, bias: bool = true] {
-    W: float[outdim, indim]
+public module Linear[indim: uint, outdim: uint, bias: bool = true] {
+    public W: float[outdim, indim]
     @conditional(bias)
-    b: float[outdim]
+    public b: float[outdim]
 
-    float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
+    public float[..., outdim] forward(x: float[..., indim]) => bias ? x @ W.T() + b : x @ W.T();
 }
 
 /**
@@ -55,8 +55,8 @@ module Linear[indim: uint, outdim: uint, bias: bool = true] {
  * @details Out-of-range ids are clipped to the valid range. The gradient of the table adds the gradients of the
  * selected rows (repeated ids accumulate); rows that are not selected get a zero gradient.
  */
-module Embedding[num: uint, dim: uint] {
-    table: float[num, dim]
+public module Embedding[num: uint, dim: uint] {
+    public table: float[num, dim]
 
-    float[..., dim] forward(ids: int[...]) => table[ids];
+    public float[..., dim] forward(ids: int[...]) => table[ids];
 }

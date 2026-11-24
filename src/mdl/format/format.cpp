@@ -46,6 +46,7 @@ namespace {
 		bool tight = false;			  ///< `=` without spaces (`.bias=false`, einops `h=heads`)
 		bool einops = false;		  ///< inside an einops pattern
 		bool templateAngle = false;	  ///< `<` or `>` of `template<...>`
+		bool importDot = false;		  ///< a leading `.`/`..`/`...` of a relative import path
 	};
 
 	bool isComment(size_t type) { return type == mdlLexer::BLOCKCOMMENT || type == mdlLexer::LINECOMMENT; }
@@ -131,6 +132,9 @@ namespace {
 			} else if (auto* ctx = dynamic_cast<mdlParser::KeyvalueContext*>(tree)) {
 				if (auto* eq = terminal(ctx, "="))
 					props(eq).tight = true;
+			} else if (auto* ctx = dynamic_cast<mdlParser::Import_pathContext*>(tree)) {
+				for (auto* dot : ctx->dots)
+					props(dot).importDot = true;
 			} else if (auto* ctx = dynamic_cast<mdlParser::EinopsContext*>(tree)) {
 				// The pattern (`... (h d) -> h ... d`) and the separators; the values of the bindings are expressions.
 				for (auto* child : ctx->children) {
@@ -239,6 +243,11 @@ namespace {
 				return false;
 			if (c == "}" && p == "{")
 				return false;
+			// `from ..lib import x`, `from . import x`: a space before the dots of a relative path, none after them.
+			if (pp.importDot)
+				return c == "import";
+			if (cp.importDot)
+				return true;
 			if (c == "." || p == "." || c == ".." || p == "..")
 				return false;
 			const bool word = P.type == mdlLexer::IDENT;

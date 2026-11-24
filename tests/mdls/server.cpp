@@ -57,7 +57,7 @@ namespace {
 		return {{"id", id}, {"method", method}, {"params", params}};
 	}
 
-	const std::string model = R"(import std;
+	const std::string model = R"(from std.nn import Linear;
 /** @brief A residual block. */
 module Block[d: uint] {
     lin: Linear[d, d]
@@ -234,10 +234,23 @@ TEST_CASE("mdls hovers and goes to definitions while the text does not parse", "
 	CHECK((*response(messages, 2))["result"]["range"]["start"] == json{{"line", 4}, {"character", 26}});
 }
 
+TEST_CASE("mdls completes the names of an imported namespace", "[mdls]") {
+	const std::string text = "import std.nn;\nmodule M[] {\n    l: nn.Linear[4, 3]\n}\n";
+	auto completion = request(1, "textDocument/completion", 2, 10);
+	auto messages = session({open(text), completion});
+	std::set<std::string> labels;
+	const auto& result = (*response(messages, 1))["result"];
+	for (const auto& item : result.is_array() ? result : result["items"])
+		labels.insert(item["label"].get<std::string>());
+	CHECK(labels.contains("Linear"));
+	CHECK(labels.contains("LayerNorm"));
+	CHECK(labels.contains("Embedding"));
+}
+
 TEST_CASE("mdls completes named hyperparameters and nothing in comments", "[mdls]") {
-	const std::string text = "import std;\nmodule M[] {\n    l: Linear[4, 3, .\n    // l.\n}\n";
+	const std::string text = "from std.nn import Linear;\nmodule M[] {\n    l: Linear[4, 3, .\n    // l.\n}\n";
 	auto messages = session(
-			{open("import std;\nmodule M[] {\n    l: Linear[4, 3]\n    // l\n}\n"),
+			{open("from std.nn import Linear;\nmodule M[] {\n    l: Linear[4, 3]\n    // l\n}\n"),
 			 {{"method", "textDocument/didChange"},
 			  {"params",
 			   {{"textDocument", {{"uri", uri}, {"version", 2}}}, {"contentChanges", json::array({{{"text", text}}})}}}
@@ -268,7 +281,7 @@ TEST_CASE("mdls re-analyzes the open documents that import a changed document", 
 	// Renaming the function in the open library makes the importer's call an error.
 	auto messages = session(
 			{openDoc(libUri, "float[...] twice(x: float[...]) => x + x;\n"),
-			 openDoc(mainUri, "import lib;\nfloat[...] f(x: float[...]) => twice(x);\n"),
+			 openDoc(mainUri, "from lib import twice;\nfloat[...] f(x: float[...]) => twice(x);\n"),
 			 {{"method", "textDocument/didChange"},
 			  {"params",
 			   {{"textDocument", {{"uri", libUri}, {"version", 2}}},
@@ -301,7 +314,7 @@ TEST_CASE("mdls shows the documentation of imported files and goes to them", "[m
 }
 
 namespace {
-	const std::string features = R"(import std;
+	const std::string features = R"(from std.nn import Linear;
 struct Conf { dims: struct { model: uint heads: uint } }
 /** @brief Attention. @param conf the sizes */
 module Att[conf: Conf] {
@@ -390,10 +403,11 @@ TEST_CASE("mdls offers quick fixes", "[mdls]") {
 		titles.insert(a["title"].get<std::string>());
 	CHECK(titles == std::set<std::string>{"Write `.bias=true`", "Convert to float32"});
 
-	auto missing = session({open("float[...] f(x: float[...]) => softmax(x);\n"), imports});
+	auto missing = session({open("float f(x: float[...]) => mse(x, x);\n"), imports});
 	const auto& add = (*response(missing, 2))["result"];
 	REQUIRE(add.size() == 1);
-	CHECK(add[0]["title"] == "Import std.activations");
+	CHECK(add[0]["title"] == "Import mse from std.losses");
+	CHECK(add[0]["edit"]["changes"].begin().value()[0]["newText"] == "from std.losses import mse;\n");
 }
 
 TEST_CASE("mdls goes to struct members, folds, and formats ranges", "[mdls]") {
@@ -437,7 +451,7 @@ TEST_CASE("mdls highlights Doxygen commands and their arguments in doc comments"
 }
 
 namespace {
-	const std::string models = R"(import std;
+	const std::string models = R"(from std.nn import Linear, LayerNorm;
 import std.losses;
 /** @brief Uses \ref Block. */
 module Block[d: uint] {
@@ -502,7 +516,8 @@ TEST_CASE("mdls marks unused variables, parameters, members, and imports", "[mdl
 	CHECK(unused.contains("unused is never used"));
 	CHECK(unused.contains("The parameter extra is never used"));
 	CHECK(unused.contains("The member spare of Block is never used"));
-	CHECK_FALSE(unused.contains("The import std is never used"));
+	CHECK_FALSE(unused.contains("The import std.nn is never used"));
+	CHECK(unused.contains("The import std.losses is never used"));
 }
 
 TEST_CASE("mdls completes einops axes and renames them within the pattern", "[mdls]") {

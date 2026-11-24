@@ -10,16 +10,16 @@
  * output cotangent over all batch dimensions.
  * @ingroup Autodiff
  */
-float[...] sum_like(x: float[...], like: float[...]) => __builtin_sum_like(x, like);
+public float[...] sum_like(x: float[...], like: float[...]) => __builtin_sum_like(x, like);
 
 /**
  * @brief Broadcasts \p x to the shape of \p like.
  * @ingroup Autodiff
  */
-float[...] broadcast_like(x: float[...], like: float[...]) => __builtin_broadcast_like(x, like);
+public float[...] broadcast_like(x: float[...], like: float[...]) => __builtin_broadcast_like(x, like);
 
 /**
  * @brief Returns \p x unchanged but stops gradients: no gradient flows from the result back to \p x.
  * @ingroup Autodiff
  */
-float[...] nograd(x: float[...]) => __builtin_stop_gradient(x);
+public float[...] nograd(x: float[...]) => __builtin_stop_gradient(x);

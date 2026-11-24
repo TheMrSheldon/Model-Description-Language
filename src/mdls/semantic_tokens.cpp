@@ -103,9 +103,13 @@ namespace {
 					emit(terminal->getSymbol(), Discarded); // a discarded value: not a variable
 				return; // keywords, literals, operators: lexical (the editor's grammar colors them)
 			}
-			if (auto* ctx = dynamic_cast<mdlParser::Import_stmtContext*>(tree)) {
+			if (auto* ctx = dynamic_cast<mdlParser::Import_pathContext*>(tree)) {
 				for (auto* part : ctx->path)
 					emit(part, Namespace);
+				visitChildren(ctx);
+			} else if (auto* ctx = dynamic_cast<mdlParser::ImportModuleContext*>(tree)) {
+				if (ctx->alias != nullptr)
+					emit(ctx->alias, Namespace, Declaration);
 				visitChildren(ctx);
 			} else if (auto* ctx = dynamic_cast<mdlParser::Module_defContext*>(tree)) {
 				if (ctx->IDENT())

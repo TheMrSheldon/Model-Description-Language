@@ -447,7 +447,18 @@ void mdls::Server::logLine(const std::string& text) {
 const std::map<std::string, std::string>& mdls::Server::standardLibraryNames() {
 	if (!stdNames) {
 		stdNames.emplace();
-		std::istringstream source{"import std;"};
+		// Every file of the standard library (`import std;` translates none: their names are its namespaces').
+		std::string text;
+		const auto dirs = parseOptions.stdlibDirs.empty() ? mdl::parser::defaultStdlibDirs() : parseOptions.stdlibDirs;
+		for (const auto& dir : dirs) {
+			std::error_code ec;
+			for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+				if (entry.path().extension() == ".dlm" && entry.path().stem() != "prelude")
+					text += "import std." + entry.path().stem().string() + ";\n";
+			if (!text.empty())
+				break;
+		}
+		std::istringstream source{text};
 		auto result = mdl::parser::analyze(source, "<std>", parseOptions);
 		for (const auto& s : result.index->symbols())
 			if (s.container.empty() &&

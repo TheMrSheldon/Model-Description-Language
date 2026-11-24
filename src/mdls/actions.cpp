@@ -51,22 +51,25 @@ mdls::json mdls::codeActions(
 				} catch (const RequestError&) {
 				}
 			}
-		// A name that the standard library defines: import its module.
-		static const std::regex undefined{"Variable (\\w+) (is )?not defined"};
+		// A name (a value or a type) that the standard library defines: import it from its file.
+		static const std::regex undefined{"Variable (\\w+) (is )?not defined|(\\w+) does not name a type"};
 		std::smatch match;
-		if (std::regex_match(d.message, match, undefined))
-			if (auto it = stdNames.find(match[1]); it != stdNames.end()) {
+		if (std::regex_match(d.message, match, undefined)) {
+			const std::string name = match[1].matched ? match[1].str() : match[3].str();
+			if (auto it = stdNames.find(name); it != stdNames.end()) {
 				// After the last import (or at the top).
 				size_t line = 0;
 				for (size_t i = 0; i < lines.lineCount(); ++i)
-					if (lines.line(i).starts_with("import "))
+					if (lines.line(i).starts_with("import ") || lines.line(i).starts_with("from "))
 						line = i + 1;
 				const json at{{"line", line}, {"character", 0}};
-				action("Import " + it->second, {{doc.uri, json::array(
-																  {{{"range", {{"start", at}, {"end", at}}},
-																	{"newText", "import " + it->second + ";\n"}}}
-														  )}});
+				action("Import " + name + " from " + it->second,
+					   {{doc.uri, json::array(
+										  {{{"range", {{"start", at}, {"end", at}}},
+											{"newText", "from " + it->second + " import " + name + ";\n"}}}
+								  )}});
 			}
+		}
 	}
 	return actions;
 }

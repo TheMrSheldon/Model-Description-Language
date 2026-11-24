@@ -96,6 +96,16 @@ set_tests_properties(mdlc_config_unknown_key PROPERTIES WILL_FAIL TRUE)
 add_test(NAME mdlc_config_build COMMAND mdlc "${_cfg}/model.dlm" -a "${_cfg}/builds.yml" --build train -o "${_out}/d.o")
 add_test(NAME mdlc_config_unknown_build COMMAND mdlc "${_cfg}/model.dlm" -a "${_cfg}/builds.yml" --build fast -o "${_out}/e.o")
 set_tests_properties(mdlc_config_unknown_build PROPERTIES WILL_FAIL TRUE)
+# Exported functions: the public member functions; --export selects some (only public ones; differentiated ones must be
+# exported).
+add_test(NAME mdlc_export_default COMMAND mdlc "${_cfg}/exports.dlm" -a "${_cfg}/exports.yml" -o "${_out}/x1.o")
+add_test(NAME mdlc_export_selected COMMAND mdlc "${_cfg}/exports.dlm" -a "${_cfg}/exports.yml" --export forward --export Ex.loss -o "${_out}/x2.o")
+add_test(NAME mdlc_export_not_public COMMAND mdlc "${_cfg}/exports.dlm" -a "${_cfg}/exports.yml" --export helper -o "${_out}/x3.o")
+set_tests_properties(mdlc_export_not_public PROPERTIES PASS_REGULAR_EXPRESSION "--export helper: Ex.helper is not public")
+add_test(NAME mdlc_export_missing COMMAND mdlc "${_cfg}/exports.dlm" -a "${_cfg}/exports.yml" --export nope -o "${_out}/x4.o")
+set_tests_properties(mdlc_export_missing PROPERTIES PASS_REGULAR_EXPRESSION "no compiled module has a public function nope")
+add_test(NAME mdlc_export_grad_not_exported COMMAND mdlc "${_cfg}/exports.dlm" -a "${_cfg}/exports.yml" --export forward --grad loss -o "${_out}/x5.o")
+set_tests_properties(mdlc_export_grad_not_exported PROPERTIES PASS_REGULAR_EXPRESSION "cannot differentiate 'loss': Ex.loss is not exported")
 # Quantization (--quantize, `quantize:`): quantized weights are frozen; invalid group sizes are errors.
 add_test(NAME mdlc_quantize COMMAND mdlc "${_cfg}/model.dlm" -a "${_cfg}/quantize.yml" -o "${_out}/q1.o")
 add_test(NAME mdlc_quantize_cli COMMAND mdlc "${_cfg}/model.dlm" -a "${_cfg}/quantize.yml" --quantize int8=W -o "${_out}/q2.o")

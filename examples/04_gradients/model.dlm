@@ -1,4 +1,5 @@
-import std;
+from std.nn import LayerNorm, Linear;
+from std.losses import mse;
 
 /**
  * @brief A small transformer-style block that exercises most gradient rules: linear layers (matmul, transposed weights,
@@ -13,7 +14,7 @@ module Block[dim: uint, hidden: uint, heads: uint] {
     up: Linear[dim, hidden]
     down: Linear[hidden, dim]
 
-    float[..., dim] forward(x: float[..., dim]) {
+    public float[..., dim] forward(x: float[..., dim]) {
         auto qh = q(x)[... (h d) -> h ... d | h=heads];
         auto kh = k(x)[... (h d) -> h ... d | h=heads];
         auto vh = v(x)[... (h d) -> h ... d | h=heads];
@@ -23,5 +24,5 @@ module Block[dim: uint, hidden: uint, heads: uint] {
     }
 
     /** An objective: compiled with `--grad loss`, it returns the loss and the gradients in one call. */
-    float loss(x: float[..., dim], target: float[..., dim]) => mse(forward(x), target);
+    public float loss(x: float[..., dim], target: float[..., dim]) => mse(forward(x), target);
 }

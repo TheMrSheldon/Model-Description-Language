@@ -2,6 +2,7 @@
 #define MDL_COMPUTEGRAPH_DATATYPE_HPP
 
 #include "../utils/overload.hpp"
+#include "../visibility.hpp"
 #include "node_decl.hpp"
 #include <algorithm>
 
@@ -82,6 +83,8 @@ namespace mdl {
 		 * the calls in the body see them as well (and e.g. choose masked overloads).
 		 */
 		std::shared_ptr<FunctionTemplate> templ = nullptr;
+		/** @brief As written (`public`, `private`, or none: package); a module's public functions are exported. */
+		Visibility visibility = Visibility::Package;
 	};
 
 	/**

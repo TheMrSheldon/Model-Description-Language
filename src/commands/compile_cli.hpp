@@ -176,6 +176,7 @@ struct CompileArgs {
 	std::optional<std::filesystem::path> depfile;
 	std::optional<std::filesystem::path> kernelReport;
 	std::vector<std::string> gradFunctions;
+	std::vector<std::string> exportFunctions;
 	std::vector<std::string> trainable;
 	std::optional<std::filesystem::path> trainableFile;
 	bool inputGrads = false;
@@ -406,7 +407,7 @@ inline void runCompileCommand(const CompileArgs& args) {
 			);
 	auto exports = mdl::exportedFunctions(
 			program, argvals, compileOpts.ellipsisRank, gradients, args.maskFunctions, compileOpts.inputEllipsisRanks,
-			parseQuantizationRules(args.quantize)
+			parseQuantizationRules(args.quantize), args.exportFunctions
 	);
 	if (exports.empty())
 		logger->warn("Nothing to compile: no module has all of its hyperparameters set (see --arg-vals)");
@@ -476,6 +477,11 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	)
 			->type_name("TYPE[=PATH]");
 	app.add_option("--depfile", args.depfile, "Write a dependency file listing all (imported) source files.");
+	app.add_option(
+			"--export", args.exportFunctions,
+			"Export only this public member function (`forward`, or `Module.forward` with several compiled modules); "
+			"default: all public member functions of the compiled modules. Repeatable."
+	);
 	app.add_option(
 			"--grad", args.gradFunctions,
 			"Gradient build: replace this member function by its gradient (compile without --grad for inference). "

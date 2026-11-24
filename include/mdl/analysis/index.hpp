@@ -63,6 +63,7 @@ namespace mdl::analysis {
 		std::string name;				  ///< the path up to this part, e.g. `std.nn`
 		std::vector<std::string> targets; ///< the imported file, or the files of the directory (package)
 		std::string documentation;		  ///< the file's `@file` comment, or the list of the package's files (Markdown)
+		bool reexported = false;		  ///< a `public` import (part of the file's interface: never unused)
 	};
 
 	/** @brief An axis of an einops pattern (`h` in `x[... (h d) -> h ... d | h=heads]`) and its size(s). */
