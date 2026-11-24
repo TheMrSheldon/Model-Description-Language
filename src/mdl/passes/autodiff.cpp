@@ -1015,12 +1015,19 @@ namespace mdl::autodiff {
 			}
 			return false;
 		};
-		// Recomputing it is allowed, but saving it is preferred (unless over the memory budget): values of the forward
-		// pass that a non-fusible backward operation reads (e.g. `gelu(h)` for a weight gradient). Not a view: a view is
-		// not materialized for the operation (e.g. the permuted heads that attention reads).
-		// (Not yet: reductions to much smaller results, e.g. the statistics of a normalization, as PyTorch saves them.
-		// Our row-reduction schedule does not cover the kernels that then write per-row results, see TODO.md.)
+		// Recomputing it is allowed, but saving it is preferred (unless over the memory budget): reductions to much
+		// smaller results (e.g. the statistics of a normalization: recomputing them reads the whole input again), and
+		// values of the forward pass that a non-fusible backward operation reads (e.g. `gelu(h)` for a weight
+		// gradient). Not a view: a view is not materialized for the operation (e.g. the permuted heads that attention
+		// reads).
 		auto preferSaved = [&](const Node& node) {
+			if (reduction(node)) {
+				double input = 0;
+				for (const auto& a : std::get<InvocationNode>(node).arguments)
+					input = std::max(input, bytes(a.get()));
+				if (4 * bytes(node) <= input)
+					return true;
+			}
 			return forward.contains(&node) && !isView(node) && readByOpaque(node);
 		};
 		// The values that the forward pass writes to memory anyway (saving them costs their read in the backward pass;
@@ -1068,7 +1075,11 @@ namespace mdl::autodiff {
 					}
 			}
 		}
-		auto cost = [&](const Node& node) { return (written.contains(&node) ? 1.0 : 2.0) * bytes(node); };
+		// (A view costs slightly more than the value it views, which is saved instead on a tie: a saved view is a copy,
+		// and the backends compute a view of a result after the kernel, e.g. the per-row mean reshaped for broadcasting.)
+		auto cost = [&](const Node& node) {
+			return (written.contains(&node) ? 1.0 : 2.0) * bytes(node) * (isView(node) ? 1.0 + 1e-6 : 1.0);
+		};
 
 		// (Checkpointing: recomputed, also matrix products; the boundary values are saved.)
 		auto forcedRecompute = [&](const Node& node) {

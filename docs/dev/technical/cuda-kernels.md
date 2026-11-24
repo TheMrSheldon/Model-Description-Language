@@ -57,14 +57,17 @@ uncoalesced.
 ## RowReduction (`row_reduction.{hpp,cpp}`)
 
 Sums, maxima, softmax and normalizations (LayerNorm forward and backward, log-softmax): one or more reductions over
-the innermost dimension(s), followed by elementwise epilogues over the same rows. Row fusion produces such kernels.
+the innermost dimension(s), followed by elementwise epilogues over the same rows. The fusion planner produces such kernels.
 
 - One **warp per row**. The 32 lanes stride over the row and combine their partials with warp shuffles.
 - A single reduction packs `kRowsPerBlock = 4` rows into a block. With several reductions (e.g. mean, then
   variance), each row gets its own block.
-- **Several epilogues** (several results, e.g. a normalization's output and the values saved for its gradient):
-  their loop nests are merged into the last one's (`Merge`). Full-shape epilogues share all loops; per-row results
-  share only the row loops and are written outside the column loop.
+- **Several epilogues** (several results, e.g. a normalization's output and its statistics saved for the gradient):
+  their loop nests are merged into those of the *anchor*, the last epilogue over the full rows (`Merge`). Full-row
+  epilogues share all loops; per-row results share only the row loops and are written outside the column loop. Per-row
+  results may come in any order after the reductions.
+- **Per-row blocks between the reductions** (e.g. a mean that is a result and that the variance's reduction reads) are
+  computed at the row loop like the reductions; every lane of the row computes the same value.
 - The rule applies to rows of symbolic length, or of static length up to `kMaxRowLength = 4096`, and needs at least
   `kMinRows = 64` rows.
 

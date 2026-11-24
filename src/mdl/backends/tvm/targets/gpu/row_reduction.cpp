@@ -63,23 +63,40 @@ namespace mdl::backend::tvm::gpu {
 		const size_t numTrailingR = kind.size() - numLeadingS;
 		// (several epilogues: further results of the same rows, e.g. values saved for a gradient; per row or of the
 		// last epilogue's shape)
+		// The reductions, and between them per-row blocks (e.g. a statistic that is also a result, which a later
+		// reduction reads): numReductions is the number of blocks up to the last reduction.
 		size_t numReductions = 0;
-		while (numReductions < infos->size() && !(*infos)[numReductions].is_injective())
-			++numReductions;
+		for (size_t b = 0; b < infos->size(); ++b)
+			if (!(*infos)[b].is_injective())
+				numReductions = b + 1;
 		if (numReductions == 0)
 			return std::nullopt;
+		// The epilogues: over the rows (the last of them: the anchor of the loops, see schedule), or per row.
+		bool fullEpilogue = false;
 		for (size_t b = numReductions; b < infos->size(); ++b) {
 			const size_t rank = (*infos)[b].dom_kind().size();
-			if (!(*infos)[b].is_injective() || (rank != kind.size() && (rank != numLeadingS || b + 1 == infos->size())))
+			if (rank != kind.size() && rank != numLeadingS)
 				return std::nullopt;
+			fullEpilogue |= rank == kind.size();
 		}
+		if (numReductions < infos->size() && !fullEpilogue)
+			return std::nullopt;
 		::tvm::sym::Analyzer analyzer;
 		std::vector<PrimExpr> rowDoms, rowLengthDoms;
 		for (size_t i = 0; i < kind.size(); ++i)
 			(i < numLeadingS ? rowDoms : rowLengthDoms).push_back((*infos)[0].iters[i].dom);
+		// (a block over the rows only: its other loops, if any, have one iteration)
+		auto perRow = [&](const dl::analysis::SBlockInfo& info) {
+			if (info.iters.size() < numLeadingS)
+				return false;
+			for (size_t i = numLeadingS; i < info.iters.size(); ++i)
+				if (!analyzer->CanProveEqual(info.iters[i].dom, 1))
+					return false;
+			return true;
+		};
 		for (size_t b = 0; b < infos->size(); ++b) {
 			const auto& info = (*infos)[b];
-			if (b < numReductions && info.dom_kind() != kind)
+			if (b < numReductions && info.dom_kind() != kind && !(info.is_injective() && perRow(info)))
 				return std::nullopt;
 			for (size_t i = 0; i < numLeadingS; ++i)
 				if (!analyzer->CanProveEqual(info.iters[i].dom, rowDoms[i]))
@@ -131,9 +148,13 @@ namespace mdl::backend::tvm::gpu {
 			size_t numTrailingR, size_t numReductions
 	) {
 		const auto* infos = &infos_;
-		// Several epilogues: in the loops of the last one (merged level by level; per-row results share the row loops).
+		// The anchor: the last epilogue over the rows (or the last reduction). Several epilogues: in its loops (merged
+		// level by level; per-row results share the row loops).
+		size_t anchor = infos->size() - 1;
+		while (anchor >= numReductions && (*infos)[anchor].dom_kind().size() != numLeadingS + numTrailingR)
+			--anchor;
 		{
-			const SBlockRV lastBlock = infos->back().block_rv;
+			const SBlockRV lastBlock = (*infos)[anchor].block_rv;
 			const auto lastLoops = sch->GetLoops(lastBlock);
 			const size_t depth = lastLoops.size();
 			::tvm::sym::Analyzer analyzer;
@@ -147,8 +168,9 @@ namespace mdl::backend::tvm::gpu {
 				return true;
 			};
 			std::vector<SBlockRV> full, perRow;
-			for (size_t b = numReductions; b + 1 < infos->size(); ++b)
-				(sameLoops((*infos)[b].block_rv) ? full : perRow).push_back((*infos)[b].block_rv);
+			for (size_t b = numReductions; b < infos->size(); ++b)
+				if (b != anchor)
+					(sameLoops((*infos)[b].block_rv) ? full : perRow).push_back((*infos)[b].block_rv);
 			full.push_back(lastBlock);
 			if (full.size() > 1)
 				for (size_t d = 0; d < depth; ++d) {
@@ -165,7 +187,7 @@ namespace mdl::backend::tvm::gpu {
 		// only for a single reduction: the intermediate results of several (e.g. the maximum and the sum of softmax)
 		// are computed per row, whose region compute_at can only determine exactly for one row per block.
 		const int64_t rowsPerBlock = infos->size() == 1 ? kRowsPerBlock : 1; // (several epilogues: several blocks)
-		const SBlockRV last = infos->back().block_rv;
+		const SBlockRV last = (*infos)[anchor].block_rv;
 		auto loops = sch->GetLoops(last);
 		const LoopRV row =
 				sch->Fuse(Array<LoopRV>(loops.begin(), loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS)));
@@ -189,11 +211,16 @@ namespace mdl::backend::tvm::gpu {
 		sch->Bind(tx, "threadIdx.x");
 
 		// The reductions before it: per row (computed at the row loop), the row over the warp; their results in shared
-		// memory for the threads of the row.
+		// memory for the threads of the row. Per-row blocks between them are computed at the row loop as well (every
+		// thread of the row computes the same value).
 		for (size_t b = numReductions; b-- > 0;) {
-			if (b == infos->size() - 1)
-				continue; // (the last block, if it is a reduction: scheduled above)
+			if (b == anchor)
+				continue; // (the anchor, if it is a reduction: scheduled above)
 			const SBlockRV block = (*infos)[b].block_rv;
+			if ((*infos)[b].is_injective()) { // (a per-row block between the reductions: once per row)
+				sch->ComputeAt(block, at, /*preserve_unit_loops=*/true);
+				continue;
+			}
 			for (size_t i = 0; i < sch->Get(block)->writes.size(); ++i)
 				sch->SetScope(block, static_cast<int>(i), "shared");
 			sch->ComputeAt(block, at, /*preserve_unit_loops=*/true);

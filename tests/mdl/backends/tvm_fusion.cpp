@@ -114,3 +114,26 @@ TEST_CASE("kernels that a call outside the group connects are not fused (no cycl
 	});
 	CHECK(sizes.empty());
 }
+
+TEST_CASE("a normalization that also returns its per-row statistics is one kernel", "[tvm][fusion]") {
+	// (the statistics saved for the backward pass: the mean without the reduced axis, reshaped for the normalization)
+	auto sizes = groups([](BlockBuilder& bb, const Var& x, const Var&) -> Expr {
+		static const auto sumOp = tvm::ffi::Function::GetGlobalRequired("relax.op.sum");
+		static const auto reshape = tvm::ffi::Function::GetGlobalRequired("relax.op.reshape");
+		static const auto astype = tvm::ffi::Function::GetGlobalRequired("relax.op.astype");
+		// (as in bfloat16 builds: sums in float32)
+		auto wide = bb->Emit(astype(x, tvm::PrimType::Float(64)->dtype).cast<Expr>());
+		auto total = bb->Emit(astype(bb->Emit(sumOp(wide, Array<int64_t>{-1}, false).cast<Expr>()),
+									 tvm::PrimType::Float(32)->dtype)
+									  .cast<Expr>());
+		auto mean = bb->Emit(op("relax.divide", {total, scalar(64)}));
+		auto mu = bb->Emit(reshape(mean, Array<tvm::PrimExpr>{tvm::IntImm(tvm::PrimType::Int(64), 256),
+														  tvm::IntImm(tvm::PrimType::Int(64), 1)})
+								   .cast<Expr>());
+		auto xc = bb->Emit(op("relax.subtract", {x, mu}));
+		auto var = bb->Emit(op("relax.divide", {bb->Emit(sum(bb->Emit(op("relax.multiply", {xc, xc})), -1)), scalar(64)}));
+		auto rstd = bb->Emit(op("relax.rsqrt", {bb->Emit(op("relax.add", {var, scalar(1e-5)}))}));
+		return Tuple({bb->Emit(op("relax.multiply", {xc, rstd})), mean, rstd});
+	});
+	CHECK(sizes.size() == 1);
+}

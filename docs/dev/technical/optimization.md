@@ -71,10 +71,14 @@ The forward pass of a training build stores *residuals* in a context buffer, and
   - The sizes come from the exact shapes. Dimensions known only at runtime are taken as `typicalDim` (128); since all
     sizes scale with them, this only orders the costs.
 - **Never recomputed:** matrix products, attention, embeddings and other library operations.
-- **Saved by preference:** a value of the forward pass that a non-fusible operation of the backward pass reads, e.g.
-  `gelu(h)` for the weight gradient of the next matrix product. Recomputing it would write it again; saving it costs
-  only memory. A view is never preferred, since the backends fold views into the operation (e.g. the permuted heads
-  that attention reads). Its source is preferred instead.
+- **Saved by preference:**
+  - A reduction whose result is at least 4x smaller than its input, e.g. the statistics of a normalization:
+    recomputing it would read the whole input again.
+  - A value of the forward pass that a non-fusible operation of the backward pass reads, e.g. `gelu(h)` for the
+    weight gradient of the next matrix product. Recomputing it would write it again; saving it costs only memory.
+  - A view is never preferred, since the backends fold views into the operation (e.g. the permuted heads that
+    attention reads). Its source is preferred instead. A view also costs slightly more to save than its source, so
+    that on a tie its source is saved (e.g. the per-row mean, not its reshape for broadcasting).
 - **Ties:** among cuts of the same cost, the one closest to the backward pass is taken: the latest values. For
   example, a matrix product with its bias is saved rather than without it, which would move the bias out of the
   GEMM's epilogue.
@@ -85,12 +89,12 @@ The forward pass of a training build stores *residuals* in a context buffer, and
 - **Checkpointing:** module calls selected for checkpointing are always recomputed, including their matrix products;
   their inputs can be saved.
 
-Measured (A100 bf16 BERT-base training): GELU backward 149 → 117 µs (PyTorch: 105 µs), step 30.85 → 30.37 ms at
-64x128, 33.44 → 32.93 ms at 16x512. The context grows by `gelu(h)`, about 600 MB at 64x128 (12 layers).
-
-Not yet: saving the statistics of normalizations (mean and rstd, as PyTorch does). The backward pass recomputes
-them, which reads `x` again (about 0.6 ms per step at BERT-base 64x128). Saving them needs our row-reduction rule
-to schedule kernels that write per-row results of the reduction chain, and float32 statistics; see TODO.md.
+Measured (A100 bf16 BERT-base training):
+- GELU backward: 149 → 117 µs (PyTorch: 105 µs).
+- LayerNorm statistics saved (with RowReduction's per-row results, see cuda_kernels.md): forward LayerNorm 43 → 22
+  µs, and the backward pass no longer recomputes them. That is about 0.1 ms per step of GPU time.
+- Step: 30.85 → 30.35 ms at 64x128, 33.44 → 32.9 ms at 16x512.
+- The context grows by `gelu(h)`, about 600 MB at 64x128 (12 layers), and by the statistics, a few MB.
 
 Recomputation can create *siblings*: a recomputed value and its derivative, both computed from the same saved input.
 The fusion planner puts these into one kernel (below), so recomputing costs neither memory nor an extra memory pass.
