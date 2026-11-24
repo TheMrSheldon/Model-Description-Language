@@ -23,6 +23,7 @@ shape occurs.
 | Relax | In-place accumulation | `tvm.cpp`, `details/aot.cpp` |
 | Relax | Fusion planner: which kernel calls become one kernel | `details/fusion/` (then TVM FuseTIR) |
 | TIR | Merging results, flattening injective kernels | `details/flatten_injective.cpp` |
+| TIR | Sibling sums in one block | `details/merge_sums.cpp` |
 | TIR | Schedule rules (per target) | `targets/` |
 | AOT | Caller's workspace, kernel CSE | `details/aot.cpp`, `details/pipeline.cpp` |
 | Runtime | Sessions, CUDA graphs | bindings, `src/mdl/runtime/sessions/` (\ref dev_runtime) |
@@ -210,6 +211,27 @@ nothing shares the intermediates, keeps the single operations.
   trailing broadcasts at `n % P`. This removes the 64-bit divisions of split loops over symbolic dimensions.
 - Reshapes that only insert or remove unit dimensions are legalized as direct index maps (not TOPI's reshape, which
   divides by symbolic extents), so that they inline into fused kernels.
+
+## Sibling sums in one block
+
+`mergeSiblingSums` (TIR, before scheduling, target-independent) merges pairs of sums over the same iteration domain that
+do not depend on each other, e.g. the gradients of a normalization's scale and shift: `sum(dy · x̂)` and `sum(dy)` over
+the rows.
+
+- **Why:** as separate blocks, each sum has its own loop body, loads and predicates in the scheduled kernel, even with
+  its loops merged. A shared input is then loaded twice.
+- **Form:** one block with TVM's two-sum reducer. The new values are bound first, then stored: `v0 = acc0 + x; v1 =
+  acc1 + y; acc0 = v0; acc1 = v1`, which is how TVM recognizes a reduction with several results (for `rfactor` and
+  cross-thread reductions).
+- **Order:** the root's statements are reordered by their buffer dependencies, so that the merged sums come after the
+  producers of both and before the consumers of both. A pair is merged only if neither depends on the other, also
+  through the statements between them.
+- **Pairs only:** TVM's reducers have at most two results.
+- **bfloat16:** needs `patches/tvm/0001-bf16-compute-legalize-bind.patch`. TVM v0.27's bfloat16 legalization does not
+  legalize the values of bound variables, which multi-result reductions use.
+- **Measured** (A100 bf16 BERT-base training, LayerNorm parameter gradients): first pass 61 → 46 µs, second pass 14 →
+  9.5 µs. A hand-written kernel needs 17 µs; the rest is the reductions' initialization inside the loop and 64-bit
+  index arithmetic (TODO.md).
 
 ## Schedule rules
 

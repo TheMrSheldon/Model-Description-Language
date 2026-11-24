@@ -129,11 +129,12 @@ namespace mdl::backend::tvm::gpu {
 				std::optional<size_t> of;
 				for (size_t k = 0; k < reductions.size(); ++k)
 					for (const auto& r : sch->Get(e)->reads)
-						if (r->source.get() == sch->Get(reductions[k])->writes[0]->source.get()) {
-							if (of && *of != k)
-								return std::nullopt;
-							of = k;
-						}
+						for (const auto& w : sch->Get(reductions[k])->writes) // (several: merged sibling sums)
+							if (r->source.get() == w->source.get()) {
+								if (of && *of != k)
+									return std::nullopt;
+								of = k;
+							}
 				if (!of)
 					return std::nullopt;
 				epiloguesOf[*of].push_back(e);
@@ -167,10 +168,17 @@ namespace mdl::backend::tvm::gpu {
 				const auto back = sch->Split(sch->GetLoops(red)[0], factors(threads));
 				// (the chunks unrolled by kUnroll: their loads in flight together, not one after the other)
 				sch->Unroll(sch->Split(sch->GetLoops(red).back(), factors(kUnroll))[1]);
+				const int results = static_cast<int>(sch->Get(red)->writes.size());
 				if (epiloguesOf[k].empty()) {
-					sch->ReverseComputeAt(sch->CacheWrite(red, 0, "local"), back[1], /*preserve_unit_loops=*/false);
+					// (the caches of all results first: each is created next to the block, then moved)
+					std::vector<SBlockRV> caches;
+					for (int i = 0; i < results; ++i)
+						caches.push_back(sch->CacheWrite(red, i, "local"));
+					for (const auto& cache : caches)
+						sch->ReverseComputeAt(cache, back[1], /*preserve_unit_loops=*/false);
 				} else {
-					sch->SetScope(red, 0, "local");
+					for (int i = 0; i < results; ++i)
+						sch->SetScope(red, i, "local");
 					for (const auto& e : epiloguesOf[k])
 						sch->ReverseComputeAt(e, back[1], /*preserve_unit_loops=*/false);
 				}
@@ -196,8 +204,13 @@ namespace mdl::backend::tvm::gpu {
 			if (vector > 1)
 				sch->Vectorize(p[5]);
 			// (each thread's partial sums in registers, stored once after its chunk)
-			for (const auto& rf : partialSums)
-				sch->ReverseComputeAt(sch->CacheWrite(rf, 0, "local"), p[3], /*preserve_unit_loops=*/false);
+			for (const auto& rf : partialSums) {
+				std::vector<SBlockRV> caches; // (all first: each is created next to the block, then moved)
+				for (int i = 0; i < static_cast<int>(sch->Get(rf)->writes.size()); ++i)
+					caches.push_back(sch->CacheWrite(rf, i, "local"));
+				for (const auto& cache : caches)
+					sch->ReverseComputeAt(cache, p[3], /*preserve_unit_loops=*/false);
+			}
 			sch->Bind(merged(writeBack, 0), "blockIdx.x");
 			sch->Bind(merged(writeBack, 1), "threadIdx.x");
 		} catch (const std::exception&) {

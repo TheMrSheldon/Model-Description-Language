@@ -65,6 +65,7 @@ add_library(mdl
 	backends/tvm/details/patterns.cpp
 	backends/tvm/details/pipeline.cpp
 	backends/tvm/details/flatten_injective.cpp
+	backends/tvm/details/merge_sums.cpp
 	backends/tvm/details/fusion/duplicate_producers.cpp
 	backends/tvm/details/fusion/fusion.cpp
 	backends/tvm/details/fusion/materialize.cpp

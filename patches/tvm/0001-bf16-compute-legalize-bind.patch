@@ -1,0 +1,21 @@
+BF16/FP8 compute legalization of Bind statements: legalize the bound value (its sub-expressions, as for every other
+statement) and give the variable the type of the legalized value. Without it, a reduction with several results
+(multi-result reducers bind their new values) keeps bfloat16 arithmetic, which LLVM cannot generate and NVRTC finds
+ambiguous, and its variables keep their bfloat16 type although their values become float32.
+
+--- a/src/tirx/transform/unsupported_dtype_legalize.cc
++++ b/src/tirx/transform/unsupported_dtype_legalize.cc
+@@ -340,10 +340,11 @@
+     if (!prim_value) {
+       return StmtExprMutator::Mutate_(op, inplace_mode);
+     }
+-    PrimExpr value = PromoteToTarget(prim_value.value());
++    PrimExpr value = PromoteToTarget(
++        this->Mutate(prim_value.value(), inplace_mode).ValueOrUnchanged(prim_value.value()));
+     Var var = op->var;
+     if (value.ty() != prim_value.value().ty()) {
+-      var = op->var.CopyWithDType(prim_value.value().ty());
++      var = op->var.CopyWithDType(value.ty());
+       VarRemapSet(op->var, var);
+     }
+ 

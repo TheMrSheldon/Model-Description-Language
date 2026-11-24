@@ -89,7 +89,9 @@ Bias and LayerNorm-parameter gradients have this form. The rule runs **two kerne
    column's chunks over several threads would need its epilogue (often `gradient += sum`, possibly in place) on one of
    them; TVM's schedule cannot guard that, so it isn't done (TODO.md).
 
-Each reduction is scheduled with its epilogues in its own loop nest; then the nests of all reductions are merged level
+A reduction block may have two results (sibling sums merged before scheduling, see optimization.md): both passes then
+keep a register cache per result, created before any is moved into the loops. Each reduction is scheduled with its
+epilogues in its own loop nest; then the nests of all reductions are merged level
 by level (`Merge`), so that both passes are one kernel each. The rule needs at least `kMinRows = 256` rows; with
 fewer, DLight's rules take the kernel. The second pass's write-back is not predicated, so its thread count must
 divide a static number of columns: 32 if it does, or the number of columns itself if it is at most 32. Otherwise

@@ -8,6 +8,7 @@
 #include "./fusion/fusion.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
+#include "./merge_sums.hpp"
 #include "./pattern_registry.hpp"
 
 #include <tvm/ffi/extra/structural_visit.h>
@@ -390,6 +391,7 @@ namespace mdl::backend::tvm {
 		}
 		kernels = runPasses(kernels, {::tvm::tirx::transform::BindTarget(tvmTarget)}, tvmTarget);
 		kernels = flattenInjective(kernels, tvmTarget); // (target-independent: flat loops for injective kernels)
+		kernels = mergeSiblingSums(kernels);			// (target-independent: sibling sums in one block)
 		kernels = markLibraryCalls(kernels);
 		kernels = target.schedule(kernels);
 		mod = runPasses(kernels, target.blockLowering(), tvmTarget);
