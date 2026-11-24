@@ -32,7 +32,7 @@ namespace mdl::kernels::expr {
 			/**
 			 * `$capture.field`: of a tensor shape, ndim, dtype, data (a pointer; NULL if the capture is not a tensor),
 			 * is_tensor; of a scalar value (integer) or real; of a shape value (e.g. a permutation) values; of an
-			 * operator attr.<name> (real). `$out` (or `$out0`, `$out1`, ... for several results): the result.
+			 * operator `attr.NAME` (real). `$out` (or `$out0`, `$out1`, ... for several results): the result.
 			 */
 			access,
 			unary,	   ///< op: `-`, `not`
