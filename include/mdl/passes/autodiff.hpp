@@ -7,6 +7,7 @@
 #include "./shapes.hpp"
 
 #include <expected>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -64,20 +65,37 @@ namespace mdl::autodiff {
 		size_t numResiduals = 0;
 	};
 
+	struct SplitOptions {
+		/**
+		 * @brief Module instances (gitignore-style patterns over their paths, e.g. `encoder.layers.*`) whose
+		 * computations are recomputed in the backward pass instead of being saved (gradient checkpointing): only their
+		 * inputs are saved. nullptr for none.
+		 */
+		const PathPatterns* checkpoint = nullptr;
+		/** @brief Exact shapes, for the sizes of the values (optional; else from the declared types). */
+		shapes::Oracle* shapes = nullptr;
+		/**
+		 * @brief The bytes the residuals may take at most, at `typicalDim` (internal; not exposed to users yet):
+		 * above it, values are recomputed instead of saved wherever possible (see docs/technical/optimization.md).
+		 */
+		double memoryBudget = std::numeric_limits<double>::infinity();
+		/** @brief The size assumed for dimensions known only at runtime (e.g. batch, sequence), to compare sizes. */
+		int64_t typicalDim = 128;
+	};
+
 	/**
 	 * @brief Splits a gradient function (see vjp) into a forward and a backward pass.
-	 * @details The residuals are the values computed from the inputs that the backward pass needs. Values that only
-	 * depend on weights and constants, and cheap reshaping operations of residuals, are recomputed in the backward
-	 * pass instead of being saved.
+	 * @details The residuals are the values computed from the inputs that the backward pass needs, chosen by a minimum
+	 * cut that minimizes their bytes (as PyTorch's AOTAutograd partitioner does): the backward pass recomputes the
+	 * other values from them. Matrix products, attention and other library operations are never recomputed; values
+	 * that a non-fusible operation of the backward pass reads are saved, unless that exceeds the memory budget. Values that only depend on weights and constants are recomputed.
+	 * See docs/technical/optimization.md.
 	 *
 	 * @param numOutputs the number of outputs of the differentiated function (the first outputs of @p vjp; its last
 	 * @p numOutputs parameters are the cotangents).
-	 * @param checkpoint module instances (gitignore-style patterns over their paths, e.g. `encoder.layers.*`) whose
-	 * computations are recomputed in the backward pass instead of being saved (gradient checkpointing): only their
-	 * inputs are saved. nullptr for none.
 	 */
 	std::expected<Split, std::string>
-	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint = nullptr);
+	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const SplitOptions& options = {});
 
 } // namespace mdl::autodiff
 

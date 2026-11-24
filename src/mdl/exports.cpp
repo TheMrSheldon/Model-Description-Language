@@ -571,9 +571,10 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				continue;
 			}
 			const PathPatterns checkpoint{gradients.checkpoint};
-			auto parts = autodiff::split(
-					unit.graph(), vjp, original.outputs.size(), gradients.checkpoint.empty() ? nullptr : &checkpoint
-			);
+			autodiff::SplitOptions splitOptions;
+			splitOptions.checkpoint = gradients.checkpoint.empty() ? nullptr : &checkpoint;
+			splitOptions.shapes = &oracle;
+			auto parts = autodiff::split(unit.graph(), vjp, original.outputs.size(), splitOptions);
 			if (!parts)
 				throw std::runtime_error(moduleName + "." + parts.error());
 			ContextBuffer context{

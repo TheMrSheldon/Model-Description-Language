@@ -16,7 +16,7 @@ shape occurs.
 |---|---|---|
 | Graph (frontend) | Attention fusion | `src/mdl/passes/attention.cpp` |
 | Graph (frontend) | Masking: element vs suffix masks | `src/mdl/passes/masking.cpp` |
-| Graph (frontend) | Gradients: what to save, what to recompute | `src/mdl/passes/autodiff.cpp` |
+| Graph (frontend) | Gradients: what to save (minimum cut), what to recompute | `src/mdl/passes/autodiff.cpp` |
 | Relax | Canonicalization, CSE, permutation folding | `details/pipeline.cpp`, `details/permutations.cpp` |
 | Relax | Kernel selection (library calls) in rounds | `details/kernel_match.cpp`, `tvm.cpp` |
 | Relax | Context pruning, context layouts | `details/contexts.cpp` |
@@ -54,20 +54,46 @@ The masking pass turns a masked function into an unmasked one with explicit fill
 
 ## Gradients: save or recompute
 
-The forward pass of a training build stores *residuals* in a context buffer, and `forward_backward` reads them. Which
-values become residuals is decided in `autodiff.cpp`:
+The forward pass of a training build stores *residuals* in a context buffer, and `forward_backward` reads them.
+`autodiff::split` chooses them with a minimum cut, as PyTorch's AOTAutograd partitioner does (`autodiff.cpp`):
 
-- **Recomputed in the backward pass:** results of purely elementwise chains. The backward pass instead saves the
-  chain's input and recomputes the chain where it fuses into the kernel that uses it. An elementwise result is never
-  smaller than its arguments, so this never costs memory. It also keeps the forward pass free of extra
-  materializations, so a backend may still replace that computation with a fused kernel (e.g. a matmul epilogue).
-- **Saved:** values that the forward pass materializes anyway, because a non-elementwise operation such as a matmul
-  reads them.
-- **Boolean masks:** saved; they are small.
-- **Checkpointing:** module calls selected for checkpointing are recomputed from their saved inputs.
+- **The graph:** the primal values: they depend on the inputs but not on the cotangents. Values that depend only on
+  weights and constants are always recomputed and are not part of the cut. Each value has a capacity, the cost of
+  saving it. The backward pass must be able to compute every value it reads from the saved values; it recomputes
+  the rest.
+- **Cost of saving a value:**
+  - Its bytes, if the forward pass writes it to memory anyway. These are the inputs and outputs, the results of
+    matrix products, attention and other library operations, and the arguments of non-elementwise forward
+    operations, also through reshapes and permutations.
+  - A GEMM's epilogue, a bias or scale of weights and constants that the backends compute with the product, counts
+    as written in the product's place.
+  - Twice its bytes otherwise, because the forward pass must also write it.
+  - The sizes come from the exact shapes. Dimensions known only at runtime are taken as `typicalDim` (128); since all
+    sizes scale with them, this only orders the costs.
+- **Never recomputed:** matrix products, attention, embeddings and other library operations.
+- **Saved by preference:** a value of the forward pass that a non-fusible operation of the backward pass reads, e.g.
+  `gelu(h)` for the weight gradient of the next matrix product. Recomputing it would write it again; saving it costs
+  only memory. A view is never preferred, since the backends fold views into the operation (e.g. the permuted heads
+  that attention reads). Its source is preferred instead.
+- **Ties:** among cuts of the same cost, the one closest to the backward pass is taken: the latest values. For
+  example, a matrix product with its bias is saved rather than without it, which would move the bias out of the
+  GEMM's epilogue.
+- **Memory budget:** `SplitOptions::memoryBudget`, in bytes at `typicalDim`; internal, not exposed to users. If the
+  preferred residuals exceed it, the cut is taken without preferences: everything that can be recomputed is.
+  Later, the compiler can set the budget from the model, the batch size and the target's memory (TODO.md).
+- **Boolean masks** are small and simply part of the cut.
+- **Checkpointing:** module calls selected for checkpointing are always recomputed, including their matrix products;
+  their inputs can be saved.
+
+Measured (A100 bf16 BERT-base training): GELU backward 149 → 117 µs (PyTorch: 105 µs), step 30.85 → 30.37 ms at
+64x128, 33.44 → 32.93 ms at 16x512. The context grows by `gelu(h)`, about 600 MB at 64x128 (12 layers).
+
+Not yet: saving the statistics of normalizations (mean and rstd, as PyTorch does). The backward pass recomputes
+them, which reads `x` again (about 0.6 ms per step at BERT-base 64x128). Saving them needs our row-reduction rule
+to schedule kernels that write per-row results of the reduction chain, and float32 statistics; see TODO.md.
 
 Recomputation can create *siblings*: a recomputed value and its derivative, both computed from the same saved input.
-Sibling fusion turns these into one kernel (below), so recomputing costs neither memory nor an extra memory pass.
+The fusion planner puts these into one kernel (below), so recomputing costs neither memory nor an extra memory pass.
 
 # Relax level
 
