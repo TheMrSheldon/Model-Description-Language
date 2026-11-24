@@ -4,6 +4,6 @@ import std;
 module Stats[] {
     w: float[8]
 
-    float[...] population(x: float[..., 8]) => var(x * w, 0);
-    float[...] sample(x: float[..., 8]) => var(x * w, 1);
+    public float[...] population(x: float[..., 8]) => var(x * w, 0);
+    public float[...] sample(x: float[..., 8]) => var(x * w, 1);
 }
