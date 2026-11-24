@@ -72,8 +72,9 @@ if(MDL_ENABLE_COMPILER)
 		VERSION 0.27.0
 		GITHUB_REPOSITORY apache/tvm
 		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
-		# Fixes of TVM bugs we hit (each patch describes its bug); remove a patch once the pinned version has the fix.
-		PATCHES "${PROJECT_SOURCE_DIR}/patches/tvm/0001-bf16-compute-legalize-bind.patch"
+		# Fixes of TVM bugs we hit (patches/tvm; each patch describes its bug); remove a patch once the pinned version has
+		# the fix. (Applied unless applied already: FetchContent may run the step again on the patched sources.)
+		PATCH_COMMAND sh "${PROJECT_SOURCE_DIR}/patches/apply.sh" "${PROJECT_SOURCE_DIR}/patches/tvm"
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
 		OPTIONS "USE_LLVM ON" "USE_CUDA ${MDL_TVM_USE_CUDA}" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"

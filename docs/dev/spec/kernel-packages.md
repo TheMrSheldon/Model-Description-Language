@@ -7,8 +7,8 @@ compiler selects implementations and falls back to TVM's code generation for eve
 **Status:** the package format (`schema: 1`), the kernel directories, matching, selection, runtime guards, compiling
 with the selected implementations, the link report, and the CMake integration are implemented. The built-in oneDNN
 kernels are the package `kernels/onednn` (matrix products, also quantized; softmax; GELU and its gradient; layer
-normalization; column sums), for CUDA `kernels/cublas` (matrix products) and `kernels/cudnn` (fused attention and its
-gradient); the compiler calls no kernel directly and knows none of their ABIs.
+normalization; column sums), for CUDA `kernels/cublas` (matrix products), `kernels/cudnn` (fused attention and its
+gradient) and `kernels/flash` (FlashAttention-2: attention without masks); the compiler calls no kernel directly and knows none of their ABIs.
 
 ## Kernel directories
 Each immediate subdirectory of a kernel directory that contains a `package.yml` is a package. Its directory must have

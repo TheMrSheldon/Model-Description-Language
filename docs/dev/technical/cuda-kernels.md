@@ -186,6 +186,37 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 - **f32:** not covered. f32 attention is expanded into matmul + softmax kernels, the expansion fallback for unmatched
   ops.
 
+## FlashAttention-2: `kernels/flash` (`mdl_flash_attention_{fwd,bwd}_{bf16,f16}`)
+
+FlashAttention-2 (github.com/Dao-AILab/flash-attention, BSD-3-Clause, v2.7.4.post1) behind the cuDNN package's ABI.
+
+- **Patterns and priority:** the same patterns as the cuDNN package, priority 300 against cuDNN's 200, so it is chosen
+  wherever it applies:
+  - no bias and no lengths: masked attention stays on cuDNN;
+  - rank 3 or 4;
+  - head dimensions 32, 64 or 128 (V's the same as Q's);
+  - the head dimension contiguous.
+- **Mixing packages:** both packages write the row statistics in the same layout (`[..., Sq]`, float32), so a forward
+  pass of one and a backward pass of the other fit together.
+- **Sources:** fetched by CPM with FlashAttention's CUTLASS submodule.
+  - Only the instantiations we call are compiled: forward and backward, bf16 and f16, head dimensions 32/64/128, not
+    causal. That is 12 compilation units, about 3 minutes with `-j8`.
+  - `FLASHATTENTION_DISABLE_{DROPOUT,ALIBI,SOFTCAP,LOCAL,UNEVEN_K}` remove the features we don't use.
+  - Built for sm_80, and newer GPUs through PTX.
+  - `MDL_ENABLE_FLASH=OFF` skips the package.
+- **Wrapper (`src/flash.cu`):** replaces FlashAttention's `flash_api.cpp`, which needs PyTorch. It fills FlashAttention's
+  parameters from the strided views: the logical `[L0, L1, S, D]` becomes FlashAttention's batch `L0` and heads `L1`.
+  Then FlashAttention's row statistics `[b, h, s]` are the ABI's layout.
+- **PyTorch includes:** `shim/` replaces the three PyTorch headers that FlashAttention's kernels include. These are
+  the dropout generator state (unused without dropout) and the CUDA error macros, which throw an error that the
+  wrapper turns into a non-zero return value.
+- **Backward workspace:** dQ is accumulated in float32 (`[b, Sq rounded to 128, h, d]`), plus the row sums of
+  dO·O. Both live in a per-thread, per-device buffer that grows on demand, so CUDA graph captures (after the warm-up)
+  allocate nothing.
+- **Measured** (A100 bf16 BERT-base training): attention 3.58 → 3.13 ms per step (PyTorch's FlashAttention: 2.99 ms).
+  The step takes 29.27 ms against `torch.compile` + SDPA's 30.18 ms at 64×128, and 31.37 ms against 32.29 ms at
+  16×512.
+
 # Adding a CUDA kernel
 
 - **A new library call:** add an implementation to a package manifest (see \ref spec_kernel_packages), with a
