@@ -10,6 +10,7 @@
 #include "./legalize.hpp"
 #include "./pattern_registry.hpp"
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
@@ -267,6 +268,31 @@ namespace mdl::backend::tvm {
 					0, "mdl.InlineScalarConstants", {}
 			);
 		}
+		/**
+		 * @brief Marks the calls of kernel packages (a block without loops around a call_extern) as scheduled: they are
+		 * host code, which the targets' schedules skip (in TVM's pipelines, such calls are not PrimFuncs).
+		 */
+		IRModule markLibraryCalls(IRModule kernels) {
+			std::vector<std::pair<::tvm::GlobalVar, ::tvm::BaseFunc>> calls;
+			for (const auto& [gv, func] : kernels->functions) {
+				const auto* prim = func.as<::tvm::tirx::PrimFuncNode>();
+				if (prim == nullptr)
+					continue;
+				bool loops = false;
+				::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
+						prim->body,
+						[&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
+							loops = true;
+							return ::tvm::ffi::WalkResult::Advance();
+						}
+				);
+				if (!loops)
+					calls.emplace_back(gv, ::tvm::WithAttr(func, "tirx.is_scheduled", ::tvm::IntImm::Bool(true)));
+			}
+			for (const auto& [gv, func] : calls)
+				kernels->Update(gv, func);
+			return kernels;
+		}
 	} // namespace
 
 	IRModule canonicalize(IRModule mod, const ::tvm::Target& target) {
@@ -364,6 +390,7 @@ namespace mdl::backend::tvm {
 		}
 		kernels = runPasses(kernels, {::tvm::tirx::transform::BindTarget(tvmTarget)}, tvmTarget);
 		kernels = flattenInjective(kernels, tvmTarget); // (target-independent: flat loops for injective kernels)
+		kernels = markLibraryCalls(kernels);
 		kernels = target.schedule(kernels);
 		mod = runPasses(kernels, target.blockLowering(), tvmTarget);
 		for (const auto& [gv, func] : entries)

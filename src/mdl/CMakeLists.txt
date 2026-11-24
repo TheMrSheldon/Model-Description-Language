@@ -63,7 +63,6 @@ add_library(mdl
 	backends/tvm/details/permutations.cpp
 	backends/tvm/details/pattern_registry.cpp
 	backends/tvm/details/patterns.cpp
-	backends/tvm/details/schedule.cpp
 	backends/tvm/details/pipeline.cpp
 	backends/tvm/details/flatten_injective.cpp
 	backends/tvm/details/fusion/duplicate_producers.cpp
@@ -72,6 +71,8 @@ add_library(mdl
 	backends/tvm/details/fusion/planner.cpp
 	backends/tvm/details/fusion/rules.cpp
 	backends/tvm/details/fusion/signature.cpp
+	backends/tvm/targets/cpu/fallback.cpp
+	backends/tvm/targets/cpu/reduction.cpp
 	backends/tvm/targets/llvm.cpp
 	backends/tvm/targets/registry.cpp
 	bindings/generator.cpp

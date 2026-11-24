@@ -1,6 +1,9 @@
 #include "./llvm.hpp"
 
-#include "../details/schedule.hpp"
+#include "./cpu/fallback.hpp"
+#include "./cpu/reduction.hpp"
+
+#include <tvm_ported/s_tir/dlight/base/transform.hpp>
 
 #include <tvm/target/codegen.h>
 
@@ -24,7 +27,11 @@ namespace mdl::backend::tvm {
 	}
 
 	::tvm::IRModule LLVMTarget::schedule(::tvm::IRModule kernels) const {
-		return applyDefaultCPUSchedule(std::move(kernels));
+		// TVM's default CPU schedule (DLight, ported to C++ in src/tvm_ported) where it applies, then ours.
+		const auto apply = mdl::tvm_ported::dlight::ApplyDefaultSchedule(
+				{std::make_shared<cpu::Reduction>(), std::make_shared<cpu::Fallback>()}
+		);
+		return runPasses(std::move(kernels), {apply}, target);
 	}
 
 	std::vector<::tvm::transform::Pass> LLVMTarget::blockLowering() const {

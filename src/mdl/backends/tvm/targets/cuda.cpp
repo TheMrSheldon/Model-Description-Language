@@ -11,7 +11,6 @@
 #include <tvm_ported/s_tir/dlight/gpu/gpu.hpp>
 #include <tvm_ported/support/nvcc.hpp>
 
-#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/target/codegen.h>
 #include <tvm/tirx/function.h>
@@ -63,26 +62,6 @@ namespace mdl::backend::tvm {
 
 	::tvm::IRModule CUDATarget::schedule(::tvm::IRModule kernels) const {
 		// TVM's default GPU schedules (DLight), as TVM's own pipelines apply them; ported to C++ (src/tvm_ported).
-		// The calls of kernel packages (a block without loops around a call_extern) are host code: marked as
-		// scheduled, which ApplyDefaultSchedule skips (in TVM's pipelines, such calls are not PrimFuncs).
-		std::vector<std::pair<::tvm::GlobalVar, ::tvm::BaseFunc>> externs;
-		for (const auto& [gv, func] : kernels->functions) {
-			const auto* prim = func.as<::tvm::tirx::PrimFuncNode>();
-			if (prim == nullptr)
-				continue;
-			bool loops = false;
-			::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
-					prim->body,
-					[&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
-						loops = true;
-						return ::tvm::ffi::WalkResult::Advance();
-					}
-			);
-			if (!loops)
-				externs.emplace_back(gv, ::tvm::WithAttr(func, "tirx.is_scheduled", ::tvm::IntImm::Bool(true)));
-		}
-		for (const auto& [gv, func] : externs)
-			kernels->Update(gv, func);
 		namespace gpu = mdl::tvm_ported::dlight::gpu;
 		const auto apply = mdl::tvm_ported::dlight::ApplyDefaultSchedule(
 				{// (RowReduction, ColumnReduction: ours, before DLight's reductions.)

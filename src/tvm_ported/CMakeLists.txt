@@ -7,6 +7,7 @@ add_library(mdl_tvm_ported STATIC
 	s_tir/dlight/base/common_schedules.cpp
 	s_tir/dlight/base/transform.cpp
 	s_tir/dlight/base/utils.cpp
+	s_tir/dlight/cpu/reduction.cpp
 	s_tir/dlight/gpu/fallback.cpp
 	s_tir/dlight/gpu/general_reduction.cpp
 	s_tir/dlight/gpu/matmul.cpp

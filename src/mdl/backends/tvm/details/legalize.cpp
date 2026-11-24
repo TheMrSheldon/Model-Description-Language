@@ -786,7 +786,7 @@ namespace mdl::backend::tvm {
 			);
 			auto body = rootBlock(tirx::SeqStmt(::tvm::ffi::Array<tirx::Stmt>{zero, accumulate}));
 			auto func = tirx::PrimFunc({G, I, O}, body, ::tvm::VoidType());
-			func = ::tvm::WithAttr(std::move(func), "op_pattern", 8); // opaque: not fused or rescheduled
+			func = ::tvm::WithAttr(std::move(func), "tirx.is_scheduled", ::tvm::IntImm::Bool(true)); // (not fused)
 			return func;
 		}
 	} // namespace

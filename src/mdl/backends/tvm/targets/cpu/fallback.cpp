@@ -1,21 +1,16 @@
-#include "./schedule.hpp"
+#include "./fallback.hpp"
 
-#include "../../../logging.hpp"
+#include <tvm_ported/s_tir/dlight/base/utils.hpp>
 
-#include <tvm/ir/module.h>
 #include <tvm/s_tir/schedule/schedule.h>
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 
 #include <exception>
 #include <optional>
-#include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
-namespace mdl::backend::tvm {
+namespace mdl::backend::tvm::cpu {
 
 	namespace {
 		using ::tvm::IntImmNode;
@@ -26,9 +21,6 @@ namespace mdl::backend::tvm {
 		using ::tvm::s_tir::Schedule;
 		namespace tirx = ::tvm::tirx;
 
-		constexpr int64_t kVectorLanes = 16;		  ///< float32 lanes of an AVX-512 register
-		constexpr int64_t kMinParallelWork = 1 << 14; ///< below this many iterations, parallelization costs more
-
 		/** @brief The constant extent of a loop, or -1 if symbolic. */
 		int64_t extentOf(const Schedule& sch, const LoopRV& loop) {
 			const auto* imm = sch->Get(loop)->extent.as<IntImmNode>();
@@ -36,9 +28,9 @@ namespace mdl::backend::tvm {
 		}
 
 		/** @brief The split factor for vectorization. */
-		Optional<::tvm::PrimExpr> lanes() { return ::tvm::IntImm(::tvm::PrimType::Int(32), kVectorLanes); }
+		Optional<::tvm::PrimExpr> lanes() { return ::tvm::IntImm(::tvm::PrimType::Int(32), Fallback::kVectorLanes); }
 
-		bool largeEnough(int64_t work) { return work < 0 || work >= kMinParallelWork; }
+		bool largeEnough(int64_t work) { return work < 0 || work >= Fallback::kMinParallelWork; }
 
 		/** @brief Injective block (only spatial iterators): fuse, vectorize the inner part, parallelize the rest. */
 		void scheduleInjective(Schedule& sch, const SBlockRV& block) {
@@ -47,7 +39,7 @@ namespace mdl::backend::tvm {
 				return;
 			LoopRV fused = loops.size() == 1 ? loops[0] : sch->Fuse(loops);
 			const int64_t extent = extentOf(sch, fused);
-			if (extent >= 0 && extent < kVectorLanes)
+			if (extent >= 0 && extent < Fallback::kVectorLanes)
 				return;
 			auto split = sch->Split(fused, {std::nullopt, lanes()});
 			sch->Vectorize(split[1]);
@@ -69,7 +61,7 @@ namespace mdl::backend::tvm {
 
 			std::optional<LoopRV> outer;
 			const int64_t innerExtent = extentOf(sch, spatial.back());
-			if (innerExtent > 0 && innerExtent % kVectorLanes == 0) {
+			if (innerExtent > 0 && innerExtent % Fallback::kVectorLanes == 0) {
 				auto split = sch->Split(spatial.back(), {std::nullopt, lanes()});
 				Array<LoopRV> order(spatial.begin(), spatial.end() - 1);
 				order.push_back(split[0]);
@@ -132,48 +124,24 @@ namespace mdl::backend::tvm {
 			return std::pair{numSpatial, reductionSeen};
 		}
 
-		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
-			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
-			Schedule sch = Schedule::Concrete(
-					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
-			);
-			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
-			inlineElementwise(sch, root);
-			for (const auto& block : sch->GetChildBlocks(root)) {
-				const auto shape = shapeOf(sch, block);
-				if (!shape)
-					continue;
-				const size_t numSpatial = shape->first;
-				const bool reductionSeen = shape->second;
-				if (reductionSeen)
-					scheduleReduction(sch, block, numSpatial);
-				else
-					scheduleInjective(sch, block);
-			}
-			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
-		}
-
 	} // namespace
 
-	::tvm::IRModule applyDefaultCPUSchedule(::tvm::IRModule mod) {
-		auto logger = mdl::log::getLogger("compiler");
-		std::vector<std::pair<::tvm::GlobalVar, tirx::PrimFunc>> updates;
-		for (const auto& [gv, func] : mod->functions) {
-			const auto* prim = func.as<tirx::PrimFuncNode>();
-			if (prim == nullptr || !prim->body->IsInstance<::tvm::s_tir::SBlockRealizeNode>())
-				continue;
-			if (auto pattern = prim->GetAttr<int64_t>("op_pattern"); pattern && *pattern == 8)
-				continue; // extern kernel
-			try {
-				updates.emplace_back(gv, schedule(::tvm::ffi::GetRef<tirx::PrimFunc>(prim)));
-			} catch (const std::exception& e) {
-				logger->debug("Default schedule skipped for {}: {}", std::string(gv->name_hint), e.what());
-			}
+	std::optional<Schedule> Fallback::apply(const tirx::PrimFunc& func, const ::tvm::Target& target, bool) const {
+		if (!is_target_available(target))
+			return std::nullopt;
+		try {
+			Schedule sch = mdl::tvm_ported::dlight::schedule_of(func);
+			const SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
+			inlineElementwise(sch, root);
+			for (const auto& block : sch->GetChildBlocks(root))
+				if (const auto shape = shapeOf(sch, block); shape && shape->second)
+					scheduleReduction(sch, block, shape->first);
+				else if (shape)
+					scheduleInjective(sch, block);
+			return sch;
+		} catch (const std::exception&) {
+			return std::nullopt; // (e.g. no root block: left as it is)
 		}
-		for (auto& [gv, func] : updates)
-			mod->Update(gv, func);
-		logger->info("Scheduled {} kernel(s) for the CPU", updates.size());
-		return mod;
 	}
 
-} // namespace mdl::backend::tvm
+} // namespace mdl::backend::tvm::cpu

@@ -187,7 +187,7 @@ contract in `fusion/rules.hpp`). Our rules are written for symbolic dimensions (
 
 - **CUDA:** warp-per-row reductions (several reductions and epilogues), two-pass column reductions, vectorized
   elementwise kernels, then DLight's rules; see \ref dev_cuda_kernels.
-- **CPU:** `applyDefaultCPUSchedule`.
+- **CPU:** DLight's CPU `Reduction` (ported; for kernels with one result: `targets/cpu/reduction.cpp`), then our `cpu::Fallback` (`targets/cpu/fallback.cpp`).
 
 # AOT level
 

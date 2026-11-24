@@ -3,7 +3,7 @@
 mdlc does not depend on Python, but some parts of TVM that the CUDA target needs exist only in TVM's Python package.
 This directory translates them to C++, file by file, mirroring `python/tvm/`:
 
-- **DLight** (`s_tir/dlight/`): the default GPU schedules.
+- **DLight** (`s_tir/dlight/`): the default GPU schedules and the CPU Reduction rule.
 - **CUDA tensor intrinsics** (`s_tir/tensor_intrin/cuda.cpp`): the WMMA intrinsics.
 - **CUDA C code generation callbacks** (`backend/cuda/codegen/`, `support/nvcc.cpp`): the CUDA header, the intrinsic
   codegen registry, and compiling the generated CUDA with NVRTC.
@@ -52,6 +52,8 @@ The goal is a port that can be diffed against TVM and updated when TVM changes:
 | `s_tir/dlight/base/common_schedules.py` | `s_tir/dlight/base/common_schedules.{hpp,cpp}` | |
 | `s_tir/dlight/analysis/common_analysis.py` | `s_tir/dlight/analysis/common_analysis.{hpp,cpp}` | `BufferInfo`, `is_layout_transform` and `is_data_pad` are not ported: only unported rules use them. |
 | `s_tir/dlight/gpu/__init__.py`, `gpu/base.py` | `s_tir/dlight/gpu/gpu.hpp`, `gpu/base.hpp` | |
+| `s_tir/dlight/cpu/base.py`, `cpu/__init__.py` | `s_tir/dlight/cpu/base.hpp`, `cpu/cpu.hpp` | |
+| `s_tir/dlight/cpu/reduction.py` | `s_tir/dlight/cpu/reduction.cpp` | |
 | `s_tir/dlight/gpu/fallback.py` | `s_tir/dlight/gpu/fallback.cpp` | |
 | `s_tir/dlight/gpu/general_reduction.py` | `s_tir/dlight/gpu/general_reduction.cpp` | |
 | `s_tir/dlight/gpu/reduction.py` | `s_tir/dlight/gpu/reduction.cpp` | |
