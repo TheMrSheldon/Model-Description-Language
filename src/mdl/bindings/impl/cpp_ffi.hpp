@@ -376,7 +376,7 @@ namespace mdl::bindings::detail {
 					<< "            };\n"
 					<< "            " << load << "();\n"
 					<< "            mdl_detail::callWithWorkspace(__tvm_ffi_" << fn->symbol << ", __tvm_ffi_"
-					<< sizeSymbol << ", args, workspace, \"" << fn->symbol << "\", \"" << sizeSymbol << "\");\n"
+					<< sizeSymbol << ", args, state, \"" << fn->symbol << "\", \"" << sizeSymbol << "\");\n"
 					<< "        }\n";
 			auto emitInfos = [&](const char* suffix, const std::vector<const TensorSignature*>& tensors) {
 				out << "    static constexpr std::array<mdl_detail::TensorInfo, " << tensors.size() << "> "
@@ -398,7 +398,7 @@ namespace mdl::bindings::detail {
 			<< "    public:\n"
 			<< members.str() << "\n"
 			<< "    private:\n"
-			<< "        mdl_detail::Buffer workspace;\n"
+			<< "        mdl_detail::SessionState state;\n"
 			<< "    };\n\n"
 			<< "    /// The session of the static functions (one per thread).\n"
 			<< "    static Session& defaultSession() {\n"
@@ -424,7 +424,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#include <stdexcept>\n"
 		<< "#include <string>\n"
 		<< "#include <string_view>\n"
-		<< "#include <utility>\n\n"
+		<< "#include <utility>\n"
+		<< "#include <vector>\n\n"
 		<< "extern \"C\" {\n"
 		<< "// Device memory of context buffers (TVM runtime; see mdl_detail::allocContext).\n"
 		<< "void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t nbytes, int dtype_code_hint,\n"
@@ -504,11 +505,10 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "        ctx = Context{};\n"
 		<< "    }\n\n"
 		<< "    using Function = int (*)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*);\n\n"
-		<< "    inline TVMFFIAny callRaw(Function fn, const TVMFFIAny* args, int32_t num_args, const char* name) {\n"
-		<< "        TVMFFIAny result{};\n"
-		<< "        result.type_index = kTVMFFINone;\n"
-		<< "        if (fn(nullptr, args, num_args, &result) == 0)\n"
-		<< "            return result;\n"
+		<< "    /// Throws the error that a call with a nonzero status raised.\n"
+		<< "    inline void raiseIfFailed(int status, const char* name) {\n"
+		<< "        if (status == 0)\n"
+		<< "            return;\n"
 		<< "        TVMFFIObjectHandle error = nullptr;\n"
 		<< "        TVMFFIErrorMoveFromRaised(&error);\n"
 		<< "        std::string message = std::string{name} + \" failed\";\n"
@@ -519,6 +519,12 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "            TVMFFIObjectDecRef(error);\n"
 		<< "        }\n"
 		<< "        throw std::runtime_error(message);\n"
+		<< "    }\n\n"
+		<< "    inline TVMFFIAny callRaw(Function fn, const TVMFFIAny* args, int32_t num_args, const char* name) {\n"
+		<< "        TVMFFIAny result{};\n"
+		<< "        result.type_index = kTVMFFINone;\n"
+		<< "        raiseIfFailed(fn(nullptr, args, num_args, &result), name);\n"
+		<< "        return result;\n"
 		<< "    }\n\n"
 		<< "    template <size_t N>\n"
 		<< "    inline void call(Function fn, TVMFFIAny (&args)[N], const char* name) {\n"
@@ -614,19 +620,118 @@ inline void mdl::bindings::CppFfiGenerator::generate(
         }
     };
 
-    /// Calls `fn` with `args` and a workspace from `workspace` (grown to the size that `size` returns for `args`; on
-    /// the device of the first tensor): `args` has one more element, for the workspace.
+    /// The session of the runtime of a device, if it registers one as the TVM FFI functions
+    /// `mdl.session.<device type>.{create,call,free}` (e.g. CUDA: a stream and CUDA graphs); otherwise calls run
+    /// directly.
+    class DeviceSession {
+    public:
+        DeviceSession() = default;
+        DeviceSession(DeviceSession&& other) noexcept { swap(other); }
+        DeviceSession& operator=(DeviceSession&& other) noexcept {
+            DeviceSession(std::move(other)).swap(*this);
+            return *this;
+        }
+        DeviceSession(const DeviceSession&) = delete;
+        DeviceSession& operator=(const DeviceSession&) = delete;
+        ~DeviceSession() { reset(); }
+
+        /// Calls `fn` with `args` (on `device`).
+        void call(Function fn, TVMFFIAny* args, int32_t n, DLDevice device, const char* name) {
+            if (device.device_type != type || device.device_id != id)
+                open(device);
+            if (callFn == nullptr) {
+                callRaw(fn, args, n, name);
+                return;
+            }
+            std::array<TVMFFIAny, 2> head{};
+            head[0].type_index = kTVMFFIOpaquePtr;
+            head[0].v_ptr = handle;
+            head[1].type_index = kTVMFFIOpaquePtr;
+            head[1].v_ptr = reinterpret_cast<void*>(fn);
+            all.assign(head.begin(), head.end());
+            all.insert(all.end(), args, args + n);
+            TVMFFIAny result{};
+            result.type_index = kTVMFFINone;
+            raiseIfFailed(TVMFFIFunctionCall(callFn, all.data(), static_cast<int32_t>(all.size()), &result), name);
+        }
+
+    private:
+        int32_t type = -1, id = -1;
+        TVMFFIObjectHandle callFn = nullptr, freeFn = nullptr;
+        void* handle = nullptr;
+        std::vector<TVMFFIAny> all; ///< (the arguments of callFn, kept to allocate once)
+
+        static TVMFFIObjectHandle lookup(const std::string& name) {
+            TVMFFIByteArray bytes{name.data(), name.size()};
+            TVMFFIObjectHandle fn = nullptr;
+            return TVMFFIFunctionGetGlobal(&bytes, &fn) == 0 ? fn : nullptr;
+        }
+
+        void open(DLDevice device) {
+            reset();
+            type = device.device_type;
+            id = device.device_id;
+            const std::string prefix = "mdl.session." + std::to_string(type) + ".";
+            TVMFFIObjectHandle create = lookup(prefix + "create");
+            if (create == nullptr)
+                return; // (no session for this device: direct calls)
+            TVMFFIAny arg = intArg(id);
+            TVMFFIAny result{};
+            result.type_index = kTVMFFINone;
+            const int status = TVMFFIFunctionCall(create, &arg, 1, &result);
+            TVMFFIObjectDecRef(create);
+            raiseIfFailed(status, "creating a device session");
+            handle = result.v_ptr;
+            callFn = lookup(prefix + "call");
+            freeFn = lookup(prefix + "free");
+        }
+
+        void reset() {
+            if (handle != nullptr && freeFn != nullptr) {
+                TVMFFIAny arg{};
+                arg.type_index = kTVMFFIOpaquePtr;
+                arg.v_ptr = handle;
+                TVMFFIAny result{};
+                result.type_index = kTVMFFINone;
+                TVMFFIFunctionCall(freeFn, &arg, 1, &result);
+            }
+            for (TVMFFIObjectHandle fn : {callFn, freeFn})
+                if (fn != nullptr)
+                    TVMFFIObjectDecRef(fn);
+            callFn = freeFn = nullptr;
+            handle = nullptr;
+            type = id = -1;
+        }
+
+        void swap(DeviceSession& other) noexcept {
+            std::swap(type, other.type);
+            std::swap(id, other.id);
+            std::swap(callFn, other.callFn);
+            std::swap(freeFn, other.freeFn);
+            std::swap(handle, other.handle);
+            std::swap(all, other.all);
+        }
+    };
+
+    /// The state of a session's calls: the workspace and the device's session.
+    struct SessionState {
+        Buffer workspace;
+        DeviceSession device;
+    };
+
+    /// Calls `fn` with `args` and a workspace of `state` (grown to the size that `size` returns for `args`; on the
+    /// device of the first tensor) through the device's session: `args` has one more element, for the workspace.
     template <size_t N>
-    inline void callWithWorkspace(Function fn, Function size, TVMFFIAny (&args)[N], Buffer& workspace,
+    inline void callWithWorkspace(Function fn, Function size, TVMFFIAny (&args)[N], SessionState& state,
                                   const char* name, const char* sizeName) {
         const auto bytes = static_cast<size_t>(callInt(size, args, static_cast<int32_t>(N - 1), sizeName));
         const DLDevice device = static_cast<const DLTensor*>(args[0].v_ptr)->device;
-        const DLTensor* current = workspace.get();
-        if (current == nullptr || workspace.bytes() < bytes || current->device.device_type != device.device_type ||
-            current->device.device_id != device.device_id)
-            workspace = Buffer(bytes > 0 ? bytes : kTensorAlignment, device);
-        args[N - 1] = tensorArg(workspace.get(), "workspace", {kDLUInt, 8, 1});
-        call(fn, args, name);
+        const DLTensor* current = state.workspace.get();
+        if (current == nullptr || state.workspace.bytes() < bytes ||
+            current->device.device_type != device.device_type || current->device.device_id != device.device_id)
+            state.workspace = Buffer(bytes > 0 ? bytes : kTensorAlignment, device);
+        args[N - 1] = tensorArg(state.workspace.get(), "workspace", {kDLUInt, 8, 1});
+        state.device.call(fn, args, static_cast<int32_t>(N), device, name);
     }
 
 )"

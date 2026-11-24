@@ -4,8 +4,8 @@
 How compiled models are called: what state a call needs (code, library handles, workspace, streams, captured CUDA
 graphs), who owns it, and how the bindings expose it.
 
-**Status:** step 1 is implemented: the caller's workspace and sessions (see "Implementation order"). CUDA graphs are
-not implemented yet.
+**Status:** implemented: the caller's workspace, sessions, and CUDA graphs (see "Implementation order"). A C API and
+a `Model` class are deferred (TODO.md).
 
 # Why
 
@@ -72,17 +72,30 @@ allocates them per step, separate from the session.
 
 These live in the session and are on by default; `MDL_CUDA_GRAPHS=0` disables them.
 
+**Where:** the bindings are target-independent, so the device-specific part is a library of the device's runtime:
+- `mdl_session_cuda` (`src/mdl/runtime/sessions/cuda.cpp`, linked by `mdl_target_cuda`) registers the TVM FFI
+  functions `mdl.session.2.create(device_id)`, `call(session, function, args...)` and `free(session)` (2 is
+  `kDLCUDA`).
+- A binding's session (C++ `Session`, Python's per-thread state) looks them up for the tensors' device and calls
+  through them. Where none are registered (the CPU), it calls directly.
+- A CUDA session owns a stream, created blocking so that it is ordered with the legacy default stream, and sets it as
+  the TVM FFI environment's stream during its calls. TVM's kernels and the kernel packages launch on that stream.
+
 - **Key:** the function plus everything a graph replays: the data pointers, shapes and strides of the tensor
   arguments, and the integer arguments.
 - **First call of a key:** runs normally. It is a warm-up: cuBLASLt autotuning, cuDNN plan building and workspace
   growth cannot be captured.
-- **Second call:** captured on the session's stream (relaxed capture mode), instantiated, then launched.
+- **Second call:** captured on the session's stream, instantiated, then launched. Capture uses
+  `cudaStreamCaptureModeThreadLocal`: a synchronizing call fails instead of running once. A relaxed capture would
+  run such a call (e.g. a copy of device data to the host) once, and every replay would reuse the value it read.
 - **Later calls:** replay the graph (`cudaGraphLaunch`). A graph whose pointers differ only in the arguments could
   be updated with `cudaGraphExecUpdate` instead of recaptured (later).
 - **Failure:** if capture fails (an operation that cannot be captured, e.g. a synchronization in a kernel
-  package), the key is marked as uncapturable and runs directly from then on.
-- **Bounds:** at most a few graphs per function (least recently used are dropped), so that shapes that change on
-  every call (e.g. sequence lengths) do not accumulate graphs.
+  package, or the context header that a consumer copies to the host), the key is marked as uncapturable and runs
+  directly from then on. A call that fails for other reasons fails again when it runs directly, and its error is
+  raised.
+- **Bounds:** a session keeps at most 32 keys (graphs, warm-ups, failed captures); the least recently used one is
+  dropped. Shapes that change on every call (e.g. sequence lengths) therefore do not accumulate graphs.
 - **Memory:** a graph keeps the session's arena at the size it was captured with. Several shapes share the arena,
   because calls of one session are ordered on its stream. Different sessions never share it.
 
@@ -103,6 +116,12 @@ The C API is target-independent; only what a session holds differs.
    - Measured on BERT-base: GPU A100 bf16 train 64x128 min 31.55 ms (unchanged), CPU f32 train min 1229 ms (1203
      before; within the run-to-run spread of 5 iterations).
    - Each call also calls the size function: one more FFI call.
-2. CUDA graphs in the session, with a stream per session.
+2. **Done.** CUDA graphs in the session, with a stream per session.
+   - Measured, A100 bf16 BERT-base training step: 64x128 30.85 ms vs 31.67 ms without graphs, 16x512 33.44 vs 34.13
+     ms.
+   - Kernel launches by the host per profile: about 18,000 → about 1,000, plus one graph launch per call.
+   - `cuda_bert_*` checks the result of a replay (`bert_check.cpp` calls three times).
+   - Not yet: the framework's current stream in the Python bindings; updating a graph whose pointers changed
+     (`cudaGraphExecUpdate`) instead of a new capture.
 
 This replaces the TODO item "caller-provided workspace".

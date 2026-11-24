@@ -53,12 +53,20 @@ namespace {
 		return d.operator->();
 	}
 
-	/** @brief Calls @p f with a device buffer for @p host, then copies the buffer back into @p host. */
+	/**
+	 * @brief Calls @p f with a device buffer for @p host, then copies the buffer back into @p host. @p f runs three
+	 * times, so that the result checked is a replay of a captured CUDA graph (the calls of a session: a warm-up, the
+	 * capture, then replays); the buffer is reset before the last call.
+	 */
 	template <typename T, typename F>
 	void intoHost(mdl::runtime::BasicTensor<T>& host, F&& f) {
 		auto* d = const_cast<DLTensor*>(onDevice(host));
+		auto& buffer = deviceTensors.back();
 		f(d);
-		deviceTensors.back().CopyTo(host.dl());
+		f(d);
+		buffer.CopyFrom(host.dl());
+		f(d);
+		buffer.CopyTo(host.dl());
 	}
 } // namespace
 #else
