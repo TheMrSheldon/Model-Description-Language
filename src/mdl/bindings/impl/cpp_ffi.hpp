@@ -11,6 +11,7 @@
 #include <fstream>
 #include <map>
 #include <ostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -265,6 +266,7 @@ namespace mdl::bindings::detail {
 				<< "    static constexpr Hyperparameters hyperparameters{" << hyperparameterInit(tree) << "};\n";
 		}
 
+		std::ostringstream members; // (of Session)
 		for (const auto* fn : fns) {
 			// Packed tensors are not arguments: they are stored in the context buffer.
 			std::vector<const TensorSignature*> inputs, outputs;
@@ -332,35 +334,50 @@ namespace mdl::bindings::detail {
 			if (std::any_of(outputs.begin(), outputs.end(), [](const auto* o) { return o->accumulate; }))
 				out << "    /// The gradients are added to the given buffers (accumulation): zero them before the "
 					   "first step.\n";
-			out << "    static void " << fn->function << "(";
-			for (const auto* in : inputs)
-				out << "const DLTensor* " << in->name << ", ";
-			out << "const Weights& weights";
-			for (const auto* o : outputs)
-				out << ", DLTensor* " << o->name;
-			if (context)
-				out << ", " << (context->producer ? "" : "const ") << "Context& ctx";
-			out << ") {\n";
-			if (context)
-				out << "        int64_t ctx_shape[1] = {static_cast<int64_t>(ctx.bytes)};\n"
-					<< "        DLTensor ctx_tensor{ctx.data, ctx.device, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, "
-					   "0};\n";
-			out << "        TVMFFIAny args[] = {\n";
-			for (const auto* in : inputs)
-				out << "            mdl_detail::tensorArg(" << in->name << ", \"" << in->name << "\", "
-					<< dlDtype(in->dtype) << "),\n";
-			for (const auto& w : fn->weights)
-				out << "            mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name << "\", "
-					<< dlDtype(w.dtype) << "),\n";
-			for (const auto* o : outputs)
-				out << "            mdl_detail::tensorArg(" << o->name << ", \"" << o->name << "\", "
-					<< dlDtype(o->dtype) << "),\n";
-			if (context)
-				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\", {kDLUInt, 8, 1}),\n";
-			out << "        };\n"
-				<< "        " << load << "();\n"
-				<< "        mdl_detail::call(__tvm_ffi_" << fn->symbol << ", args, \"" << fn->symbol << "\");\n"
+			// The function is a member of Session (members); the static function calls it on the default session.
+			std::string params, names;
+			for (const auto* in : inputs) {
+				params += "const DLTensor* " + in->name + ", ";
+				names += in->name + ", ";
+			}
+			params += "const Weights& weights";
+			names += "weights";
+			for (const auto* o : outputs) {
+				params += ", DLTensor* " + o->name;
+				names += ", " + o->name;
+			}
+			if (context) {
+				params += std::string(", ") + (context->producer ? "" : "const ") + "Context& ctx";
+				names += ", ctx";
+			}
+			out << "    static void " << fn->function << "(" << params << ") {\n"
+				<< "        defaultSession()." << fn->function << "(" << names << ");\n"
 				<< "    }\n";
+			members << "        void " << fn->function << "(" << params << ") {\n";
+			if (context)
+				members << "            int64_t ctx_shape[1] = {static_cast<int64_t>(ctx.bytes)};\n"
+						<< "            DLTensor ctx_tensor{ctx.data, ctx.device, 1, {kDLUInt, 8, 1}, ctx_shape, "
+						   "nullptr, "
+						   "0};\n";
+			members << "            TVMFFIAny args[] = {\n";
+			for (const auto* in : inputs)
+				members << "                mdl_detail::tensorArg(" << in->name << ", \"" << in->name << "\", "
+						<< dlDtype(in->dtype) << "),\n";
+			for (const auto& w : fn->weights)
+				members << "                mdl_detail::tensorArg(weights." << cppAccess(w.name) << ", \"" << w.name
+						<< "\", " << dlDtype(w.dtype) << "),\n";
+			for (const auto* o : outputs)
+				members << "                mdl_detail::tensorArg(" << o->name << ", \"" << o->name << "\", "
+						<< dlDtype(o->dtype) << "),\n";
+			if (context)
+				members << "                mdl_detail::tensorArg(&ctx_tensor, \"ctx\", {kDLUInt, 8, 1}),\n";
+			const std::string sizeSymbol = workspaceSizeSymbol(fn->symbol);
+			members << "                TVMFFIAny{}, // (the workspace)\n"
+					<< "            };\n"
+					<< "            " << load << "();\n"
+					<< "            mdl_detail::callWithWorkspace(__tvm_ffi_" << fn->symbol << ", __tvm_ffi_"
+					<< sizeSymbol << ", args, workspace, \"" << fn->symbol << "\", \"" << sizeSymbol << "\");\n"
+					<< "        }\n";
 			auto emitInfos = [&](const char* suffix, const std::vector<const TensorSignature*>& tensors) {
 				out << "    static constexpr std::array<mdl_detail::TensorInfo, " << tensors.size() << "> "
 					<< fn->function << "_" << suffix << "{{\n";
@@ -372,7 +389,23 @@ namespace mdl::bindings::detail {
 			emitInfos("inputs", inputs);
 			emitInfos("outputs", outputs);
 		}
-		out << "};\n\n";
+		out << "\n    /// The state of calls (see docs/technical/runtime.md): the workspace, grown on demand. One per "
+			   "thread (not\n"
+			<< "    /// thread-safe); movable, not copyable. Its functions are those of `" << module
+			<< "` (whose static functions use a\n"
+			<< "    /// session per thread).\n"
+			<< "    class Session {\n"
+			<< "    public:\n"
+			<< members.str() << "\n"
+			<< "    private:\n"
+			<< "        mdl_detail::Buffer workspace;\n"
+			<< "    };\n\n"
+			<< "    /// The session of the static functions (one per thread).\n"
+			<< "    static Session& defaultSession() {\n"
+			<< "        static thread_local Session session;\n"
+			<< "        return session;\n"
+			<< "    }\n"
+			<< "};\n\n";
 	}
 } // namespace mdl::bindings::detail
 
@@ -390,7 +423,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#include <new>\n"
 		<< "#include <stdexcept>\n"
 		<< "#include <string>\n"
-		<< "#include <string_view>\n\n"
+		<< "#include <string_view>\n"
+		<< "#include <utility>\n\n"
 		<< "extern \"C\" {\n"
 		<< "// Device memory of context buffers (TVM runtime; see mdl_detail::allocContext).\n"
 		<< "void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t nbytes, int dtype_code_hint,\n"
@@ -398,6 +432,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr);\n";
 	for (const auto& fn : exports) {
 		out << "int __tvm_ffi_" << fn.symbol
+			<< "(void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result);\n";
+		out << "int __tvm_ffi_" << workspaceSizeSymbol(fn.symbol)
 			<< "(void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result);\n";
 		if (fn.context && fn.context->producer)
 			out << "int __tvm_ffi_" << fn.context->sizeSymbol
@@ -494,6 +530,106 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "            throw std::runtime_error(std::string{name} + \" did not return an integer\");\n"
 		<< "        return result.v_int64;\n"
 		<< "    }\n\n"
+		<< R"(    /// A global function of the TVM runtime (looked up once by the caller).
+    inline TVMFFIObjectHandle globalFunction(const char* name) {
+        TVMFFIByteArray bytes{name, std::char_traits<char>::length(name)};
+        TVMFFIObjectHandle fn = nullptr;
+        if (TVMFFIFunctionGetGlobal(&bytes, &fn) != 0 || fn == nullptr)
+            throw std::runtime_error(std::string{"the TVM runtime has no "} + name);
+        return fn;
+    }
+
+    /// Memory on a device, freed on any thread: host memory directly; device memory of the TVM runtime (a tensor
+    /// object, freed when its last reference goes; unlike TVM's workspace pools, which are per thread).
+    class Buffer {
+    public:
+        Buffer() = default;
+        /// `bytes` bytes on `device`, aligned to kTensorAlignment.
+        Buffer(size_t bytes, DLDevice device) {
+            const size_t rounded = (bytes + kTensorAlignment - 1) / kTensorAlignment * kTensorAlignment;
+            shape = static_cast<int64_t>(rounded > 0 ? rounded : kTensorAlignment);
+            if (device.device_type == kDLCPU) {
+                host = {std::aligned_alloc(kTensorAlignment, static_cast<size_t>(shape)), device, 1,
+                        {kDLUInt, 8, 1}, &shape, nullptr, 0};
+                if (host.data == nullptr)
+                    throw std::bad_alloc();
+                tensor = &host;
+                return;
+            }
+            static const TVMFFIObjectHandle shapeFn = globalFunction("ffi.Shape");
+            static const TVMFFIObjectHandle emptyFn = globalFunction("runtime.TVMTensorAllocWithScope");
+            TVMFFIAny size = intArg(shape);
+            TVMFFIAny shape{};
+            shape.type_index = kTVMFFINone;
+            if (TVMFFIFunctionCall(shapeFn, &size, 1, &shape) != 0)
+                throw std::runtime_error("creating a shape failed");
+            TVMFFIAny args[4]{};
+            args[0] = shape;
+            args[1].type_index = kTVMFFIDataType;
+            args[1].v_dtype = {kDLUInt, 8, 1};
+            args[2].type_index = kTVMFFIDevice;
+            args[2].v_device = device;
+            args[3].type_index = kTVMFFINone;
+            TVMFFIAny result{};
+            result.type_index = kTVMFFINone;
+            const int status = TVMFFIFunctionCall(emptyFn, args, 4, &result);
+            TVMFFIObjectDecRef(shape.v_obj);
+            if (status != 0)
+                throw std::bad_alloc();
+            handle = result.v_obj;
+            tensor = TVMFFITensorGetDLTensorPtr(handle);
+        }
+        Buffer(Buffer&& other) noexcept { swap(other); }
+        Buffer& operator=(Buffer&& other) noexcept {
+            Buffer(std::move(other)).swap(*this);
+            return *this;
+        }
+        Buffer(const Buffer&) = delete;
+        Buffer& operator=(const Buffer&) = delete;
+        ~Buffer() {
+            if (handle != nullptr)
+                TVMFFIObjectDecRef(handle);
+            else if (tensor != nullptr)
+                std::free(tensor->data);
+        }
+        size_t bytes() const { return tensor != nullptr ? static_cast<size_t>(tensor->shape[0]) : 0; }
+        const DLTensor* get() const { return tensor; }
+
+    private:
+        TVMFFIObjectHandle handle = nullptr; ///< (device memory)
+        DLTensor host{};                     ///< (host memory)
+        int64_t shape = 0;
+        DLTensor* tensor = nullptr;
+        void swap(Buffer& other) noexcept {
+            std::swap(handle, other.handle);
+            std::swap(host, other.host);
+            std::swap(shape, other.shape);
+            std::swap(tensor, other.tensor);
+            // (pointers into the objects themselves)
+            for (Buffer* b : {this, &other})
+                if (b->handle == nullptr && b->tensor != nullptr) {
+                    b->tensor = &b->host;
+                    b->host.shape = &b->shape;
+                }
+        }
+    };
+
+    /// Calls `fn` with `args` and a workspace from `workspace` (grown to the size that `size` returns for `args`; on
+    /// the device of the first tensor): `args` has one more element, for the workspace.
+    template <size_t N>
+    inline void callWithWorkspace(Function fn, Function size, TVMFFIAny (&args)[N], Buffer& workspace,
+                                  const char* name, const char* sizeName) {
+        const auto bytes = static_cast<size_t>(callInt(size, args, static_cast<int32_t>(N - 1), sizeName));
+        const DLDevice device = static_cast<const DLTensor*>(args[0].v_ptr)->device;
+        const DLTensor* current = workspace.get();
+        if (current == nullptr || workspace.bytes() < bytes || current->device.device_type != device.device_type ||
+            current->device.device_id != device.device_id)
+            workspace = Buffer(bytes > 0 ? bytes : kTensorAlignment, device);
+        args[N - 1] = tensorArg(workspace.get(), "workspace", {kDLUInt, 8, 1});
+        call(fn, args, name);
+    }
+
+)"
 		<< "    /// Loads the TVM system library `prefix` (the compiled object), which attaches its device code (e.g.\n"
 		<< "    /// CUDA kernels) to its functions; nothing to do on the CPU, but harmless.\n"
 		<< "    inline bool loadSystemLib(const char* prefix) {\n"

@@ -15,7 +15,8 @@ namespace mdl::backends::tvm {
 	/**
 	 * @brief Compiles the exported functions into a relocatable object file.
 	 * @details Each function is exported with the TVM FFI packed calling convention as `__tvm_ffi_<symbol>`, taking
-	 * the inputs, the weights, and the preallocated outputs (see mdl::ExportedFunction).
+	 * the inputs, the weights, the preallocated outputs, the context buffer and the workspace (see
+	 * mdl::ExportedFunction), with the workspace size function `__tvm_ffi_<symbol>_workspace_size`.
 	 */
 	void compileToFile(
 			const std::vector<mdl::ExportedFunction>& exports, const std::filesystem::path& output,

@@ -29,6 +29,8 @@ namespace mdl::bindings {
 		std::string imports() const override { return "import torch\n"; }
 		// torch.Tensor implements the DLPack protocol, which tvm_ffi accepts directly.
 		std::string tensorType() const override { return "torch.Tensor"; }
+		// (PyTorch's allocator: 64-byte aligned on the CPU, 512 on CUDA)
+		std::string emptyBytes() const override { return "torch.empty(nbytes, dtype=torch.uint8, device=like.device)"; }
 
 		/** @brief The pairs (forward pass, backward pass) of the split gradient functions of @p module. */
 		static std::vector<std::pair<const ExportedFunction*, const ExportedFunction*>>
@@ -165,7 +167,8 @@ namespace mdl::bindings {
 			for (const auto* o : outputs)
 				out << "torch.empty(" << shapeExpr(*o) << ", dtype=" << torchDtype(o->dtype) << ", device=device), ";
 			out << "]\n"
-				<< "        owner._mod[\"" << fw.symbol << "\"](*inputs, *[owner.weights[p] for p in " << className(fw)
+				<< "        owner._call(\"" << fw.symbol << "\", \"" << workspaceSizeSymbol(fw.symbol)
+				<< "\", *inputs, *[owner.weights[p] for p in " << className(fw)
 				<< ".forward_weights], *outputs, buffer)\n"
 				<< "        ctx.owner, ctx.buffer, ctx.dims, ctx.device = owner, buffer, dims, device\n"
 				<< "        ctx.output_shapes = [o.shape for o in outputs]\n"
@@ -194,8 +197,9 @@ namespace mdl::bindings {
 			}
 			out << "]\n"
 				<< "        dims = ctx.dims  # noqa: F841 (shapes of input gradients)\n"
-				<< "        owner._mod[\"" << bw.symbol << "\"](*cotangents, *[owner.weights[p] for p in "
-				<< className(fw) << ".backward_weights], *outputs, ctx.buffer)\n";
+				<< "        owner._call(\"" << bw.symbol << "\", \"" << workspaceSizeSymbol(bw.symbol)
+				<< "\", *cotangents, *[owner.weights[p] for p in " << className(fw)
+				<< ".backward_weights], *outputs, ctx.buffer)\n";
 			// Gradients of the inputs (if computed), then of the trainable weights.
 			out << "        input_grads = [None] * " << inputs.size() << "\n";
 			size_t k = 0;

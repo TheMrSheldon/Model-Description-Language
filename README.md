@@ -179,6 +179,11 @@ weights.W = W;
 weights.b = b;
 mdl::models::FFN::forward(x, weights, out);
 
+// The same with an explicit session (its workspace, grown on demand; one per thread). The static functions above use
+// a session per thread (docs/technical/runtime.md).
+mdl::models::FFN::Session session;
+session.forward(x, weights, out);
+
 // The hyperparameters the model was compiled with, as a constexpr struct:
 static_assert(mdl::models::FFN::hyperparameters.outdim == 3);
 ```

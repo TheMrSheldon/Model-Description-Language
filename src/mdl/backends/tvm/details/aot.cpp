@@ -1,6 +1,8 @@
 #include "./aot.hpp"
 #include "./tvm_compat.hpp"
 
+#include <mdl/exports.hpp>
+
 #include <tvm/ir/function.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/type.h>
@@ -274,6 +276,7 @@ namespace mdl::backend::tvm {
 						copy(v.buffer, outputs[i]);
 				}
 
+				params.push_back(arena);
 				const std::string bodySymbol = headerDims.empty() ? symbol : symbol + "_impl";
 				auto attrs = ::tvm::DictAttrs(
 						{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(bodySymbol)},
@@ -293,6 +296,9 @@ namespace mdl::backend::tvm {
 				functions.emplace_back(bodySymbol, body);
 				if (!headerDims.empty())
 					functions.emplace_back(symbol, wrapForHeaderDims(body, bodySymbol, symbol));
+				// (the same arguments without the workspace)
+				const std::string sizeSymbol = workspaceSizeSymbol(symbol);
+				functions.emplace_back(sizeSymbol, wrapForHeaderDims(body, bodySymbol, sizeSymbol, arenaBytes));
 				return body;
 			}
 
@@ -301,10 +307,14 @@ namespace mdl::backend::tvm {
 
 			/**
 			 * @brief The exported entry of a consumer whose dimensions partly come from the context header: it takes the
-			 * arguments of @p inner without those dimensions, reads them from the header, and calls @p inner.
+			 * arguments of @p inner without those dimensions, reads them from the header, and calls @p inner. With
+			 * @p result, instead: the function of the same arguments, without the workspace, that returns @p result (an
+			 * expression of @p inner's dimensions; e.g. the workspace's size).
 			 */
-			tirx::PrimFunc
-			wrapForHeaderDims(const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol) {
+			tirx::PrimFunc wrapForHeaderDims(
+					const tirx::PrimFunc& inner, const std::string& innerSymbol, const std::string& symbol,
+					std::optional<PrimExpr> result = std::nullopt
+			) {
 				// Fresh variables for the outer function (its buffers have the same shapes as the inner ones).
 				::tvm::ffi::Map<::tvm::Var, PrimExpr> rename;
 				auto fresh = [&](const ::tvm::Var& v) -> PrimVar {
@@ -322,6 +332,8 @@ namespace mdl::backend::tvm {
 						callArgs.push_back(fresh(p));
 						continue;
 					}
+					if (result && p.same_as(arena))
+						continue;
 					const tirx::BufferVar buffer = tirx::GetBufferVar(p.get());
 					for (const auto& d : buffer->shape)
 						for (const auto& v : tirx::UndefinedVars(d))
@@ -333,30 +345,39 @@ namespace mdl::backend::tvm {
 						outerContext = outer;
 					callArgs.push_back(makeArray(outer.data(), outer, shape));
 				}
-				// The header (the context's first contextDims words) is copied to the host stack: the context may be
-				// device memory (on the CPU, the copy is a memcpy of 64 bytes).
-				const auto n = IntImm(DataType::Int(64), kHeaderBytes / 8);
-				auto deviceWords = bufferOf("ctx_header", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
-				auto words = bufferOf("ctx_words", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
-				std::vector<tirx::Stmt> body{
-						tirx::DeclBuffer(deviceWords, outerContext->data()),
-						tirx::DeclBuffer(
-								words, ::tvm::Call(
-											   ::tvm::PointerType(DataType::Int(64)), tirx::builtin::tvm_stack_alloca(),
-											   {StringImm("shape"), n}
-									   )
-						),
-				};
-				body.push_back(tirx::Evaluate(::tvm::Call(
-						DataType::Int(32), tirx::builtin::tvm_call_packed(),
-						{StringImm("runtime.TVMTensorCopyToBytes"), makeArray(deviceWords.data(), deviceWords, {n}),
-						 words.data(), IntImm(DataType::Int(64), kHeaderBytes)}
-				)));
-				for (const auto& [slot, dim] : headerDims) {
-					PrimExpr value = tirx::BufferLoad(words, {IntImm(DataType::Int(64), slot)});
-					if (dim.ty() != DataType::Int(64))
-						value = ::tvm::prim::cast(dim.ty(), value);
-					body.push_back(tirx::Bind(fresh(dim), value));
+				std::vector<tirx::Stmt> body;
+				if (!headerDims.empty()) {
+					// The header (the context's first contextDims words) is copied to the host stack: the context may
+					// be device memory (on the CPU, the copy is a memcpy of 64 bytes).
+					const auto n = IntImm(DataType::Int(64), kHeaderBytes / 8);
+					auto deviceWords = bufferOf("ctx_header", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
+					auto words = bufferOf("ctx_words", DataType::Int(64), {n}, IntImm(DataType::Int(64), 0));
+					body.push_back(tirx::DeclBuffer(deviceWords, outerContext->data()));
+					body.push_back(tirx::DeclBuffer(
+							words, ::tvm::Call(
+										   ::tvm::PointerType(DataType::Int(64)), tirx::builtin::tvm_stack_alloca(),
+										   {StringImm("shape"), n}
+								   )
+					));
+					body.push_back(tirx::Evaluate(::tvm::Call(
+							DataType::Int(32), tirx::builtin::tvm_call_packed(),
+							{StringImm("runtime.TVMTensorCopyToBytes"), makeArray(deviceWords.data(), deviceWords, {n}),
+							 words.data(), IntImm(DataType::Int(64), kHeaderBytes)}
+					)));
+					for (const auto& [slot, dim] : headerDims) {
+						PrimExpr value = tirx::BufferLoad(words, {IntImm(DataType::Int(64), slot)});
+						if (dim.ty() != DataType::Int(64))
+							value = ::tvm::prim::cast(dim.ty(), value);
+						body.push_back(tirx::Bind(fresh(dim), value));
+					}
+				}
+				if (result) {
+					::tvm::sym::Analyzer analyzer;
+					body.push_back(tirx::Return(analyzer->Simplify(substitute({*result}, rename)[0])));
+					auto attrs = ::tvm::DictAttrs(
+							{{::tvm::attr::kGlobalSymbol, ::tvm::ffi::String(symbol)}, {kAOTEntryAttr, true}}
+					);
+					return tirx::PrimFunc(outerParams, tirx::SeqStmt::Flatten(body), DataType::Int(64), attrs);
 				}
 				body.push_back(tirx::Evaluate(cpackedCall(callArgs)));
 				auto attrs = ::tvm::DictAttrs(
@@ -380,8 +401,9 @@ namespace mdl::backend::tvm {
 			std::vector<bool> accumulated;
 			std::vector<tirx::Stmt> stmts;
 			static constexpr int64_t kArenaAlign = 64;
-			::tvm::PrimVar arenaSize{"workspace_bytes", DataType::Int(64)};
-			tirx::BufferVar arena;										   ///< the intermediate buffers (see allocate)
+			/// The caller's workspace (the last parameter): the intermediate buffers are views into it (see allocate).
+			tirx::BufferVar arena =
+					tirx::decl_buffer({PrimVar("workspace_bytes", DataType::Int(64))}, DataType::UInt(8), "workspace");
 			PrimExpr arenaBytes = IntImm(DataType::Int(64), 0);			   ///< its size so far
 			std::vector<std::pair<::tvm::PrimVar, PrimExpr>> arenaOffsets; ///< of the buffers (in their elements)
 			std::unordered_map<const ::tvm::VarNode*, Value> values;
@@ -585,15 +607,12 @@ namespace mdl::backend::tvm {
 			}
 
 			/**
-			 * @brief A buffer in the function's workspace arena: all intermediate buffers of a call are views at 64-byte
-			 * aligned offsets of one workspace allocation (see arenaPrologue), so that a call allocates once. (With an
-			 * allocation per buffer, TVM's workspace pool frees and allocates device memory on every call when the
-			 * sizes do not fit its pages, and every cudaFree synchronizes the device.)
+			 * @brief A buffer in the workspace: all intermediate buffers of a call are views at 64-byte aligned offsets of
+			 * the caller's workspace (see arenaPrologue), so that a call allocates nothing (the caller's session owns the
+			 * workspace, see docs/technical/runtime.md).
 			 */
 			tirx::BufferVar allocate(Array<PrimExpr> shape, DataType dtype, const std::string& name) {
 				const auto i64 = DataType::Int(64);
-				if (!arena.defined())
-					arena = tirx::decl_buffer({arenaSize}, DataType::UInt(8), "workspace", "global.workspace");
 				PrimExpr elements = IntImm(i64, 1);
 				for (const auto& d : shape)
 					elements = elements * ::tvm::prim::cast(i64, d);
@@ -607,19 +626,16 @@ namespace mdl::backend::tvm {
 				return view(arena, std::move(shape), dtype, offset);
 			}
 
-			/**
-			 * @brief The arena's size and allocation (workspace scope: TVMBackendAllocWorkspace, aligned as the kernels
-			 * assume), before the function's statements; none if it allocates nothing.
-			 */
+			/** @brief The offsets of the intermediate buffers and the check of the workspace's size. */
 			std::vector<tirx::Stmt> arenaPrologue() const {
-				if (!arena.defined())
-					return {};
 				std::vector<tirx::Stmt> prologue;
 				::tvm::sym::Analyzer analyzer;
 				for (const auto& [var, value] : arenaOffsets)
 					prologue.push_back(tirx::Bind(var, analyzer->Simplify(value)));
-				prologue.push_back(tirx::Bind(arenaSize, analyzer->Simplify(arenaBytes)));
-				prologue.push_back(tirx::AllocBuffer(arena));
+				prologue.push_back(tirx::AssertStmt(
+						arena->shape[0] >= analyzer->Simplify(arenaBytes), StringImm("ValueError"),
+						{StringImm("the workspace is too small for these dimensions")}
+				));
 				return prologue;
 			}
 
