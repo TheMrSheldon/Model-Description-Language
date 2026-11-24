@@ -1,4 +1,4 @@
-// Matching kernel packages at the matching boundary (see kernel_match.hpp and docs/kernels.md).
+// Matching kernel packages at the matching boundary (see kernel_match.hpp and docs/dev/spec/kernel-packages.md).
 #include "./kernel_match.hpp"
 #include "./extern_call.hpp"
 #include "./legalize.hpp"
@@ -382,7 +382,7 @@ namespace mdl::backend::tvm {
 	} // namespace
 
 	namespace {
-		/** @brief The plan of a named adapter (see `adapter:` in docs/kernels.md) for the root call of a region. */
+		/** @brief The plan of a named adapter (see `adapter:` in docs/dev/spec/kernel-packages.md) for the root call of a region. */
 		std::expected<ExternPlan, std::string> adapterPlan(const std::string& adapter, const Expr& root) {
 			const auto* call = root.as<::tvm::CallNode>();
 			if (call == nullptr)

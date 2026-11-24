@@ -3,7 +3,7 @@
 
 /**
  * @file
- * @brief Kernel packages: optimized kernels from kernel directories (see docs/kernels.md).
+ * @brief Kernel packages: optimized kernels from kernel directories (see docs/dev/spec/kernel-packages.md).
  * @details A kernel directory contains one package per subdirectory with a `package.yml`. A package describes what it
  * matches (patterns over the Relax graph at the matching boundary), how to call its prebuilt implementations (typed C
  * signatures), and which binaries (artifacts) provide them for which platforms. Loading a package only reads its

@@ -3,7 +3,7 @@
 
 /**
  * @file
- * @brief The expressions of kernel packages: argument values and applicability conditions (see docs/kernels.md).
+ * @brief The expressions of kernel packages: argument values and applicability conditions (see docs/dev/spec/kernel-packages.md).
  * @details One small typed language: integers, booleans, element types, shapes (lists of integers), and pointers,
  * over the captures of a match (`$x.shape[-1]`, `prod($x.shape[:-1])`, `$x.dtype in [float32, bfloat16]`). Parsing and
  * type checking are independent of the compiler backend; evaluation over a match is done by the backend.
@@ -29,7 +29,7 @@ namespace mdl::kernels::expr {
 			integer,   ///< a literal (value)
 			dtypeName, ///< a literal element type (name), e.g. float32
 			list,	   ///< `[a, b, ...]` of integers (a shape) or element types (for `in`)
-			access,	   ///< `$capture.field` (name = capture, field = shape, ndim, dtype, data, or attr.<name> (real))
+			access,	   ///< `$capture.field` (name = capture, field = shape, ndim, dtype, data, or `attr.NAME` (real))
 			unary,	   ///< op: `-`, `not`
 			binary,	   ///< op: + - * // % == != < <= > >= and or
 			in,		   ///< args[0] in args[1] (a list)

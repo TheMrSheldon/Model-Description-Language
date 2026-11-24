@@ -1,7 +1,9 @@
-# Build configuration
+# Build configuration {#build_config}
 
 The argument-values file (`mdlc -a model.yml`, `mdl_add_model(... CONFIG model.yml)`) holds a model's hyperparameters
 and how it is built. One file can describe several builds of the same model, e.g. for inference and for training:
+
+<div class="lang-yaml">
 
 ```yaml
 args:                                    # hyperparameters per module
@@ -24,6 +26,7 @@ builds:                                  # named builds: `mdlc --build train`, `
     trainable: ["**", "!bert.embeddings.**"]
     checkpoint: ["bert.encoder.layers.*"]
 ```
+</div>
 
 ## Hyperparameters
 `args:` maps module names to the values of their hyperparameters: numbers, booleans, structs as maps, and arrays
@@ -50,7 +53,7 @@ that can be repeated take a list:
 | `bindings` | `--binding` | `[cpp, python-torch]` |
 | `quantize` | `--quantize` | `[{ weights: ["**"], format: int4, group: 128 }]` (see [Quantization](#quantization)) |
 | `strict` | `--strict` | `true`: what may be wrong is an error (code that fails for some hyperparameter values, `permits-illegal-instantiation`) |
-| `diagnostics` | `-W` | `{ float-widening: warning, unknown-annotation: error, permits-illegal-instantiation: error }` (`error`, `warning`, or `ignored`; the names: [Diagnostics](language-spec.md#diagnostics)) |
+| `diagnostics` | `-W` | `{ float-widening: warning, unknown-annotation: error, permits-illegal-instantiation: error }` (`error`, `warning`, or `ignored`; the names: [Diagnostics](../dev/spec/language.md#diagnostics)) |
 
 The settings of the selected build replace those of `build:` key by key (e.g. `mask` above). Unknown keys, invalid
 values, and unknown builds are errors.
@@ -59,12 +62,15 @@ values, and unknown builds are errors.
 `quantize:` stores weight matrices in fewer bits; the model is unchanged. Each rule selects weights by path patterns
 (as `trainable`), and later rules take precedence:
 
+<div class="lang-yaml">
+
 ```yaml
 build:
   quantize:
     - { weights: ["bert.encoder.**"], format: int4, group: 128 }
     - { weights: ["classifier.**"], format: int8 }
 ```
+</div>
 
 Only matrices are quantized: a pattern may select whole modules, and their biases and norms stay as they are. A
 pattern that selects no matrix (e.g. a typo) is a warning, and a pattern that is the exact path of a weight that is no

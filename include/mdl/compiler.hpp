@@ -18,13 +18,13 @@ namespace mdl {
 		Iree, ///< IREE backend — produces a .vmfb via the IREE compiler API
 	};
 
-	/** Whether the backend calls optimized kernels of kernel packages (e.g. oneDNN, see docs/kernels.md). */
+	/** Whether the backend calls optimized kernels of kernel packages (e.g. oneDNN, see docs/dev/spec/kernel-packages.md). */
 	enum class Kernels {
 		Packages, ///< The selected implementations of the kernel packages (the rest is TVM-generated)
 		None,	  ///< Only TVM-generated kernels; the model depends on no kernel package
 	};
 
-	/** @brief A library of a kernel package that must be linked (see docs/kernels.md). */
+	/** @brief A library of a kernel package that must be linked (see docs/dev/spec/kernel-packages.md). */
 	struct LinkedArtifact {
 		std::string package, id;
 		std::filesystem::path path;
@@ -33,7 +33,7 @@ namespace mdl {
 				dependencies; ///< `kind:name`, e.g. `system-library:m`, `runtime:openmp`, `artifact:dnnl`
 	};
 
-	/** @brief An implementation of a kernel package that the compiler used (see docs/kernels.md). */
+	/** @brief An implementation of a kernel package that the compiler used (see docs/dev/spec/kernel-packages.md). */
 	struct SelectedKernel {
 		std::string function; ///< the compiled function's symbol
 		std::string package, version, implementation, symbol;
@@ -75,7 +75,7 @@ namespace mdl {
 		/** Instrument every kernel call (see mdl_profile_begin in mdl/runtime/profile.h). */
 		bool profile = false;
 
-		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/kernels.md and kernels::kernelDirs). */
+		/** @brief Kernel directories searched first (`--kernels-dir`; see docs/dev/spec/kernel-packages.md and kernels::kernelDirs). */
 		std::vector<std::filesystem::path> kernelDirs;
 
 		/** @brief Kernel packages that may be used (`--kernel-package`; all if empty) and those that may not. */

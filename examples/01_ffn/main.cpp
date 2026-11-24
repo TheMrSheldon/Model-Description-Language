@@ -12,6 +12,7 @@ using Model = mdl::models::FFN;
 int main() {
 	constexpr int64_t batch = 2, indim = 8, outdim = 3;
 
+	// [inputs]
 	Tensor x({batch, indim}), W({outdim, indim}), b({outdim}), out({batch, outdim});
 	for (size_t i = 0; i < x.size(); ++i)
 		x.data()[i] = 0.1f * static_cast<float>(i);
@@ -19,11 +20,14 @@ int main() {
 		W.data()[i] = 0.01f * static_cast<float>(i) - 0.1f;
 	for (size_t i = 0; i < b.size(); ++i)
 		b.data()[i] = static_cast<float>(i);
+	// [inputs]
 
+	// [call]
 	Model::Weights weights;
 	weights.W = W;
 	weights.b = b;
 	Model::forward(x, weights, out);
+	// [call]
 
 	int failures = 0;
 	for (int64_t r = 0; r < batch; ++r) {

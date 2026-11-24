@@ -64,7 +64,7 @@ namespace mdl {
 	 */
 	struct FileScope {
 		std::filesystem::path path;		  ///< canonical path (for a source without file: its name)
-		std::filesystem::path packageDir; ///< identifies the package (see docs/language-spec.md, Visibility)
+		std::filesystem::path packageDir; ///< identifies the package (see docs/dev/spec/language.md, Visibility)
 		bool isStd = false;				  ///< a file of the standard library (no implicit prelude)
 		Namespace imports;
 		Namespace local;
@@ -305,6 +305,20 @@ namespace mdl {
 			return members;
 		}
 
+		/** @brief The visibility written on the definition @p ctx (a module, struct, function, or member). */
+		Visibility declaredVisibility(antlr4::ParserRuleContext* ctx) {
+			mdlParser::VisibilityContext* v = nullptr;
+			if (auto* m = dynamic_cast<mdlParser::Module_defContext*>(ctx))
+				v = m->visibility();
+			else if (auto* st = dynamic_cast<mdlParser::Struct_defContext*>(ctx))
+				v = st->visibility();
+			else if (auto* f = dynamic_cast<mdlParser::FuncdefContext*>(ctx))
+				v = f->visibility();
+			else if (auto* d = dynamic_cast<mdlParser::VardeclContext*>(ctx))
+				v = d->visibility();
+			return visibilityOf(v);
+		}
+
 		/** @brief Records a definition in the index (if any); returns its index. */
 		std::optional<size_t>
 		define(antlr4::Token* name, analysis::SymbolKind kind, const std::string& detail,
@@ -320,6 +334,8 @@ namespace mdl {
 					.container = container,
 					.detail = detail,
 					.documentation = documentation(docCtx),
+					.comment = docComment(docCtx),
+					.visibility = declaredVisibility(docCtx),
 					.scope = scope,
 					.extent = kind == analysis::SymbolKind::module || kind == analysis::SymbolKind::structure ||
 											  kind == analysis::SymbolKind::function ||
@@ -617,7 +633,7 @@ namespace mdl {
 			return true;
 		}
 
-		// ── Imports (see docs/language-spec.md, Imports and visibility) ───────────────────────────────────────────
+		// ── Imports (see docs/dev/spec/language.md, Imports and visibility) ───────────────────────────────────────────
 
 		static bool isSource(const std::filesystem::path& p) {
 			return std::filesystem::is_regular_file(p) && (p.extension() == ".dlm" || p.extension() == ".mdl");
@@ -936,10 +952,17 @@ namespace mdl {
 			auto ns = namespaceOfTarget(*target);
 			if (!ns)
 				return {};
-			if (index() != nullptr)
+			if (index() != nullptr) {
+				std::vector<std::string> names;
+				if (ctx->star != nullptr)
+					names.emplace_back("*");
+				for (auto* n : ctx->names)
+					names.push_back((n->alias != nullptr ? n->alias : n->name)->getText());
 				indexImport(
-						ctx->import_path(), ctx->visibility() != nullptr && ctx->visibility()->getText() == "public"
+						ctx->import_path(), ctx->visibility() != nullptr && ctx->visibility()->getText() == "public",
+						std::move(names)
 				);
+			}
 			const Visibility visibility = visibilityOf(ctx->visibility());
 			auto bindMember = [&](const std::string& name, const std::string& as, antlr4::Token* tok,
 								  bool explicitImport) {
@@ -1017,7 +1040,9 @@ namespace mdl {
 		}
 
 		/** @brief Records every part of an import path with the file(s) it stands for (for hover and go to definition). */
-		void indexImport(mdlParser::Import_pathContext* ctx, bool reexported) {
+		void indexImport(
+				mdlParser::Import_pathContext* ctx, bool reexported, std::vector<std::string> names = {}
+		) {
 			auto read = [](const std::filesystem::path& file) {
 				std::ifstream in{file, std::ios::binary};
 				return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
@@ -1082,6 +1107,8 @@ namespace mdl {
 					continue;
 				analysis::ImportPath path{.file = currentFile(), .range = rangeOf(part), .name = dotted};
 				path.reexported = reexported;
+				if (k + 1 == ctx->path.size())
+					path.names = names;
 				const bool package = files.size() > 1 || std::filesystem::path{files.front()}.stem() != part->getText();
 				for (const auto& file : files) {
 					path.targets.push_back(canonical(file).string());

@@ -1,4 +1,4 @@
-# The weight matrices of the MLP in different formats (see docs/build-config.md, `quantize`).
+# The weight matrices of the MLP in different formats (see docs/user/build-config.md, `quantize`).
 args:
   MLP:
     dims: [64, 96, 32]

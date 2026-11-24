@@ -2,6 +2,7 @@
 #define MDL_ANALYSIS_INDEX_HPP
 
 #include "../diagnostics.hpp"
+#include "../visibility.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,8 @@ namespace mdl::analysis {
 		std::string container;		 ///< the enclosing module or struct (empty for global definitions)
 		std::string detail;			 ///< the declaration as written, e.g. `W: float[outdim, indim]`
 		std::string documentation;	 ///< from the doc comment before it (Markdown)
+		std::string comment;		 ///< the doc comment before it as written (e.g. for Doxygen, see mdl-doc)
+		Visibility visibility = Visibility::Package; ///< of global definitions and module or struct members
 		SourceRange scope;			 ///< where it is visible (for globals: the whole file)
 		SourceRange extent;			 ///< the whole definition (modules, structs, functions), e.g. to find callers
 		std::set<std::string> types; ///< the types it has (one per distinct elaboration, e.g. symbolic and concrete)
@@ -64,6 +67,7 @@ namespace mdl::analysis {
 		std::vector<std::string> targets; ///< the imported file, or the files of the directory (package)
 		std::string documentation;		  ///< the file's `@file` comment, or the list of the package's files (Markdown)
 		bool reexported = false;		  ///< a `public` import (part of the file's interface: never unused)
+		std::vector<std::string> names;	  ///< of the last part of `from ... import a, b`: the imported names (`*`: all)
 	};
 
 	/** @brief An axis of an einops pattern (`h` in `x[... (h d) -> h ... d | h=heads]`) and its size(s). */
@@ -153,7 +157,7 @@ namespace mdl::analysis {
 	};
 
 	/**
-	 * @brief The Markdown of a Doxygen-style doc comment (`/** ... *\/` or `///` lines): `@brief`, `@details`,
+	 * @brief The Markdown of a Doxygen-style doc comment (a block comment or `///` lines): `@brief`, `@details`,
 	 * `@param`, `@tparam`, `@return`, `@todo`, `\p`, math (`\f$...\f$`, `\f(...\f)`, `\f[...\f]`,
 	 * `\f{env}{...\f}`, also spelled with `@`), `\cite`; other commands are dropped.
 	 */
@@ -176,6 +180,15 @@ namespace mdl::analysis {
 
 	/** @brief The `@file` doc comment of the source @p text (before its first definition) as Markdown, if any. */
 	std::string fileDocumentation(std::string_view text);
+
+	/** @brief The `@file` comment at the start of @p text as written (empty if there is none). */
+	std::string fileComment(std::string_view text);
+
+	/**
+	 * @brief The text of the doc comment @p comment without the comment markers (the opening and closing markers, the
+	 * leading `*` of each line, `///`).
+	 */
+	std::string stripCommentMarkers(std::string_view comment);
 } // namespace mdl::analysis
 
 #endif

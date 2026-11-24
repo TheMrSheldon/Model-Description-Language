@@ -1,4 +1,4 @@
-// Kernel packages: manifests (package.yml), kernel directories, and platform compatibility (see docs/kernels.md).
+// Kernel packages: manifests (package.yml), kernel directories, and platform compatibility (see docs/dev/spec/kernel-packages.md).
 #include <mdl/kernels.hpp>
 #include <mdl/kernels/expr.hpp>
 

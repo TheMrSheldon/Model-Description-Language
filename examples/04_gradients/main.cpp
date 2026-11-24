@@ -127,12 +127,14 @@ int main() {
 #else
 	// forward(x) saves the residuals; forward_backward(d_output) -> d_<weight>..., d_x. The context buffer is allocated
 	// for a larger batch than used (a buffer for the largest dimensions is reused).
+	// [backward]
 	constexpr size_t numGrads = Model::forward_backward_outputs.size();
 	auto ctx = Model::forward_ctx_alloc(4 * rows);
 	auto grads = zeros(Model::forward_backward_outputs, 0);
 	auto gradPtrs = pointers<numGrads>(grads);
 	Model::forward(x, weights, y, ctx);
 	std::apply([&](auto*... g) { Model::forward_backward(dy, weights, g..., ctx); }, gradPtrs);
+	// [backward]
 	auto objective = [&] {
 		Model::forward(x, weights, y, ctx);
 		double l = 0;
@@ -166,7 +168,9 @@ int main() {
 	auto lossScratch = zeros(Model::loss_outputs, 1);
 	auto lossPtrs = pointers<numLossGrads>(lossGrads);
 	auto scratchPtrs = pointers<numLossGrads>(lossScratch);
+	// [loss]
 	std::apply([&](auto*... g) { Model::loss(x, target, weights, loss, g...); }, lossPtrs);
+	// [loss]
 	auto lossObjective = [&] {
 		std::apply([&](auto*... g) { Model::loss(x, target, weights, loss, g...); }, scratchPtrs);
 		return double(loss.data()[0]);

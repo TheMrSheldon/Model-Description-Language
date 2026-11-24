@@ -238,7 +238,7 @@ implementations:
       layout: { x: row-major }
       where: ["$x.ndim > 1", "$out.ndim == 1", "$out.shape[0] == $x.shape[-1]"]
 
-  # Matrix products: the adapters compute the strided views (see docs/kernels.md, adapters).
+  # Matrix products: the adapters compute the strided views (see docs/dev/spec/kernel-packages.md, adapters).
   matmul-f32: &matmul
     pattern: matmul
     artifacts: [mdl-kernels]

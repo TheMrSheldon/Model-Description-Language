@@ -1,4 +1,4 @@
-// Kernel directories, package discovery, and platform compatibility (see docs/kernels.md).
+// Kernel directories, package discovery, and platform compatibility (see docs/dev/spec/kernel-packages.md).
 #include <mdl/kernels.hpp>
 #include <mdl/utils/platform.hpp>
 

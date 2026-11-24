@@ -1,0 +1,21 @@
+# Fails if a citation key is defined twice in the bibliography files BIB_FILES (a list; Doxygen merges all files into
+# one namespace, see cmake/Docs.cmake). Usage: cmake -DBIB_FILES="a.bib;b.bib" -P CheckBibKeys.cmake
+set(_seen "")
+set(_failed FALSE)
+foreach(_file IN LISTS BIB_FILES)
+	file(STRINGS "${_file}" _entries REGEX "^[ \t]*@[A-Za-z]+[ \t]*{[^,]+,")
+	foreach(_entry IN LISTS _entries)
+		string(REGEX REPLACE "^[ \t]*@[A-Za-z]+[ \t]*{[ \t]*([^, \t]+).*" "\\1" _key "${_entry}")
+		string(TOLOWER "${_key}" _lower) # BibTeX keys are case-insensitive
+		if(_lower IN_LIST _seen)
+			message(SEND_ERROR "Duplicate citation key '${_key}' in ${_file} (also in ${_where_${_lower}})")
+			set(_failed TRUE)
+		else()
+			list(APPEND _seen "${_lower}")
+			set(_where_${_lower} "${_file}")
+		endif()
+	endforeach()
+endforeach()
+if(_failed)
+	message(FATAL_ERROR "The bibliography has duplicate keys")
+endif()

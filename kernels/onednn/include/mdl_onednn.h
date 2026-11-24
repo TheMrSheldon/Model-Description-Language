@@ -4,7 +4,7 @@
 /**
  * @file
  * @brief C ABI of the oneDNN kernels (library `mdl_onednn`) of the kernel package `onednn` (see package.yml.in).
- * @details Compiled models call these symbols where the package's implementations are selected (see docs/kernels.md). All tensors are dense and row-major. Every kernel exists for float32
+ * @details Compiled models call these symbols where the package's implementations are selected (see docs/dev/spec/kernel-packages.md). All tensors are dense and row-major. Every kernel exists for float32
  * (`_f32`, `float*`), bfloat16 (`_bf16`) and float16 (`_f16`; both `uint16_t*` bit patterns); the scalar arguments are
  * float32 in all variants. 16-bit kernels compute in float32 internally where oneDNN supports the type, and otherwise
  * convert to float32 (e.g. float16 on CPUs without float16 arithmetic). Every function returns 0 on success and a
