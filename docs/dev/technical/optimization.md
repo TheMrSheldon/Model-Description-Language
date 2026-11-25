@@ -186,6 +186,30 @@ Results in BERT-base bf16 training on an A100: one kernel each for LayerNorm for
 gradient, the bias-gradient sums with their accumulation, and a normalization's `Σdy` and `Σ(dy·x̂)` (reading `dy`
 once); 600 kernel launches per step (FuseOps and the earlier special passes: 816).
 
+## Generated kernels against the oneDNN kernels (CPU)
+
+The oneDNN package still has hand-written kernels for operations that the fusion planner and the CPU schedule rules
+also generate: softmax, GELU and its gradient, layer normalization and its gradient, and row sums. A kernel is only
+removed once the generated version is measured at parity. Measured on 16 Zen 2 cores (BERT-base, float32, batch 8x128,
+median of 20 runs; the same configuration varies between 310 and 328 ms for inference and 1181 and 1221 ms for
+training from run to run), each without one kernel:
+
+| Without | Inference | Training |
+|---|---|---|
+| (all kernels) | 310 ms | 1181 ms |
+| GELU | 337 ms | 1251 ms |
+| GELU gradient | 316 ms | 1203 ms |
+| softmax | 325 ms | 1200 ms |
+| layer normalization | 323 ms | 1202 ms |
+| layer normalization gradient | 315 ms | 1209 ms |
+| row sums | 323 ms | 1219 ms |
+
+Only GELU is clearly slower when generated (6-8 %); the others are within the run-to-run variation, so they are not
+conclusively at parity either. None is removed yet.
+
+\todo Repeat the measurements interleaved (several alternating runs) for the kernels within the variation; then
+remove those at parity, and improve the CPU schedules for GELU (a vectorized `erf`).
+
 ## Patterns must not duplicate work
 
 `applyPatterns` does not rewrite a match whose intermediate values have users outside the match
