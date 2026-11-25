@@ -121,13 +121,11 @@ namespace {
 	template <>
 	__device__ inline __half fromFloat<__half>(float v) { return __float2half(v); }
 
-	__device__ inline float gelu(float v) { return 0.5f * v * (1.0f + erff(v * 0.70710678118654752f)); }
-
-	/** @brief dst = act(dst + bias) + addend over the strided result [b0, b1, M, N] (any layout). */
+	/** @brief dst = dst + bias + addend over the strided result [b0, b1, M, N] (any layout). */
 	template <typename T>
 	__global__ void epilogue(
-			T* dst, const T* bias, int has_bias, const T* addend, int has_addend, int activation, int64_t b0, int64_t b1,
-			int64_t M, int64_t N, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN
+			T* dst, const T* bias, int has_bias, const T* addend, int has_addend, int64_t b0, int64_t b1, int64_t M,
+			int64_t N, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN
 	) {
 		const int64_t total = b0 * b1 * M * N;
 		for (int64_t idx = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; idx < total;
@@ -137,22 +135,9 @@ namespace {
 			float v = toFloat(dst[at]);
 			if (has_bias)
 				v += toFloat(bias[n]);
-			if (activation == 1)
-				v = gelu(v);
 			if (has_addend)
 				v += toFloat(addend[at]);
 			dst[at] = fromFloat<T>(v);
-		}
-	}
-
-	/** @brief dst = gelu(dst) + addend for a contiguous result of @p total elements (the addend in the same layout). */
-	template <typename T>
-	__global__ void geluContiguous(T* dst, const T* addend, int has_addend, int64_t total) {
-		for (int64_t i = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; i < total; i += int64_t(gridDim.x) * blockDim.x) {
-			float v = gelu(toFloat(dst[i]));
-			if (has_addend)
-				v += toFloat(addend[i]);
-			dst[i] = fromFloat<T>(v);
 		}
 	}
 
@@ -346,7 +331,7 @@ namespace {
 			T* dst, const T* A, const T* B, const T* bias, int32_t has_bias, int64_t b0, int64_t b1, int64_t M,
 			int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0, int64_t b_s1,
 			int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN, const T* addend,
-			int32_t has_addend, int32_t activation, float alpha
+			int32_t has_addend, float alpha
 	) {
 		if (b0 <= 0 || b1 <= 0 || M <= 0 || N <= 0 || K < 0)
 			return 0 == b0 * b1 * M * N ? 0 : 1;
@@ -394,12 +379,12 @@ namespace {
 		p.first = *first, p.second = *second;
 
 		// Fused in cuBLASLt: the bias (cuBLASLt's bias is per row of D: fused when D is the transposed result, rows = N)
-		// and the addend (beta * C, unless GELU comes between the bias and the addend).
+		// and the addend (beta * C).
 		const bool fuseBias = has_bias && !p.dColumnMajor;
-		const bool fuseAddend = has_addend && activation == 0;
+		const bool fuseAddend = has_addend;
 
 		// Two batch dimensions that do not merge, without epilogue: one pointer-array batched GEMM.
-		if (b0 > 1 && !has_bias && !has_addend && activation == 0) {
+		if (b0 > 1 && !has_bias && !has_addend) {
 			const int64_t count = b0 * b1;
 			if (count > ctx->capacity) {
 				if (ctx->pointers != nullptr)
@@ -459,17 +444,13 @@ namespace {
 		}
 
 		const bool needBias = has_bias && !biasDone, needAddend = has_addend && !addendDone;
-		if (!needBias && !needAddend && activation == 0)
+		if (!needBias && !needAddend)
 			return 0;
 		const int64_t total = b0 * b1 * M * N;
 		constexpr int threads = 256;
-		const bool contiguous = d_sN == 1 && d_sM == N && (b1 == 1 || d_s1 == M * N) && (b0 == 1 || d_s0 == b1 * M * N);
-		if (contiguous && !needBias && activation == 1)
-			geluContiguous<T><<<blocksFor(total, threads), threads, 0, stream>>>(dst, addend, needAddend, total);
-		else
-			epilogue<T><<<blocksFor(total, threads), threads, 0, stream>>>(
-					dst, bias, needBias, addend, needAddend, activation, b0, b1, M, N, d_s0, d_s1, d_sM, d_sN
-			);
+		epilogue<T><<<blocksFor(total, threads), threads, 0, stream>>>(
+				dst, bias, needBias, addend, needAddend, b0, b1, M, N, d_s0, d_s1, d_sM, d_sN
+		);
 		return cudaGetLastError() == cudaSuccess ? 0 : 6;
 	}
 
@@ -480,7 +461,7 @@ namespace {
 			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
 			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
 			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	) {                                                                                                                \
 		using T = device;                                                                                              \
 		const auto offset = [](const type* p, int64_t o) {                                                             \
@@ -493,7 +474,7 @@ namespace {
 							reinterpret_cast<T*>(out) + co, offset(A, ao), offset(B, bo), offset(bias, 0),             \
 							bias != nullptr, g.b0, g.b1, g.M, g.K, g.N, g.a_s0, g.a_s1, g.a_sM, g.a_sK, g.b_s0,        \
 							g.b_s1, g.b_sK, g.b_sN, g.c_s0, g.c_s1, g.c_sM, g.c_sN, offset(addend, co),               \
-							addend != nullptr, activation, alpha                                                       \
+							addend != nullptr, alpha                                                                   \
 					);                                                                                                 \
 				}                                                                                                      \
 		);                                                                                                             \

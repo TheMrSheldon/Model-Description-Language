@@ -159,8 +159,9 @@ Strided-view helpers shared with the CPU packages are in `kernels/common/include
 - **Algorithm choice:** on the first call for a problem shape, the heuristic candidates are each timed 3 times into a
   scratch buffer, never into the output, because C may alias it. The fastest is cached.
 - **Per thread and device:** the cuBLAS and cuBLASLt handles and a 32 MiB cuBLASLt workspace.
-- Not used yet: the GELU / DGELU / BGRADB epilogues. GELU is only the tanh approximation, so it would need
-  `--fast-math`. Deferred (see the open items below).
+- **Epilogues:** only those `mdl.matmul` has (bias, scale, addend). Activations such as GELU are generated kernels,
+  which the fusion planner fuses with their neighbors (cuBLASLt's GELU is only the tanh approximation anyway). The
+  bias-gradient epilogue (BGRADB) is not used (see the open items below).
 
 ## cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
 
@@ -229,8 +230,7 @@ FlashAttention-2 (github.com/Dao-AILab/flash-attention, BSD-3-Clause, v2.7.4.pos
 # Open items
 
 \todo The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on an A100 slice
-(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions. Likewise the
-GELU and DGELU epilogues (tanh approximation only: with `--fast-math`).
+(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions.
 
 \todo ColumnReduction's second pass: the partial sums of a column over several threads (a cross-thread
 reduction), with the epilogue on one of them.

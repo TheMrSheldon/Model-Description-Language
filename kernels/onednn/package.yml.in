@@ -35,7 +35,7 @@ patterns:
     op: relax.nn.layer_norm
     args: [{ capture: x }, { capture: gamma }, { capture: beta }]
     attrs: { axes: [-1], center: true, scale: true }
-  matmul:   # mdl.matmul: permutations, bias, scale, activation and addend (see the legalizer's MatmulArgs)
+  matmul:   # mdl.matmul: permutations, bias, scale and addend (see the legalizer's MatmulArgs)
     op: mdl.matmul
     args:
       - { capture: a }
@@ -45,7 +45,6 @@ patterns:
       - { capture: perm_b }
       - { capture: perm_out }
       - { capture: alpha }
-      - { capture: activation }
       - { capture: addend }
       - { capture: scales }
       - { capture: zeros }
@@ -259,7 +258,6 @@ implementations:
         - { type: int64, value: $out.ndim }
         - { type: "int64[]", value: "unpermute($out.shape, $perm_out.values)" }
         - { type: "int64[]", value: "unpermute(strides($out.shape), $perm_out.values)" }
-        - { type: int32, value: $activation.value }
         - { type: float32, value: $alpha.real }
     applicability:
       dtype: { a: float32 }
@@ -298,7 +296,6 @@ implementations:
         - { type: int64, value: $out.ndim }
         - { type: "int64[]", value: "unpermute($out.shape, $perm_out.values)" }
         - { type: "int64[]", value: "unpermute(strides($out.shape), $perm_out.values)" }
-        - { type: int32, value: $activation.value }
         - { type: float32, value: $alpha.real }
     applicability:
       dtype: { a: float32 }

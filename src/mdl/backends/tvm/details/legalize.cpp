@@ -344,10 +344,11 @@ namespace mdl::backend::tvm {
 		}
 
 		/**
-		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, activation,
-		 * addend or PrimValue(0), scales, zeros, quant). The operands are A = permute(a, perm_a) and B = permute(b,
-		 * perm_b); the result is permute(act(alpha * A @ B + bias), perm_out) + addend (the epilogue: e.g. GELU, a
-		 * residual connection). If quant is [format, group], b holds quantized values and B is permute(dequant(b,
+		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, addend or
+		 * PrimValue(0), scales, zeros, quant). The operands are A = permute(a, perm_a) and B = permute(b, perm_b); the
+		 * result is permute(alpha * A @ B + bias, perm_out) + addend (the epilogue: e.g. a residual connection). The
+		 * epilogues are those that GEMM libraries compute natively (bias, scale, addend); others (e.g. activations) are
+		 * generated kernels, fused with their neighbors. If quant is [format, group], b holds quantized values and B is permute(dequant(b,
 		 * scales, zeros), perm_b) (see mdl.dequant); otherwise scales and zeros are PrimValue(0) and quant is empty.
 		 */
 		struct MatmulArgs {
@@ -355,7 +356,6 @@ namespace mdl::backend::tvm {
 			std::optional<Expr> bias;
 			Perm permA, permB, permOut;
 			double alpha = 1.0;
-			int64_t activation = 0; ///< 0: none, 1: GELU (erf)
 			std::optional<Expr> addend;
 			std::optional<Quantized> quant;
 
@@ -365,9 +365,9 @@ namespace mdl::backend::tvm {
 					: a(call->args[0]), b(call->args[1]),
 					  bias(tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt),
 					  permA(permOf(call->args[3])), permB(permOf(call->args[4])), permOut(permOf(call->args[5])),
-					  alpha(floatValue(call->args[6])), activation(intValue(call->args[7])),
-					  addend(tensorInfo(call->args[8]) ? std::optional<Expr>{call->args[8]} : std::nullopt),
-					  quant(quantizedOf(call, 9)) {}
+					  alpha(floatValue(call->args[6])),
+					  addend(tensorInfo(call->args[7]) ? std::optional<Expr>{call->args[7]} : std::nullopt),
+					  quant(quantizedOf(call, 8)) {}
 
 			/** @brief The shape of B before perm_b (the dequantized shape [N, K] if b is quantized). */
 			Array<PrimExpr> bShape() const {
@@ -421,20 +421,6 @@ namespace mdl::backend::tvm {
 			if (m.bias)
 				tbias = te.tensor(*m.bias, "bias");
 			te::Tensor out = matmulCompute(ta, tb, tbias, false, m.alpha, false);
-			if (m.activation == 1)
-				out = te::compute(
-						out->shape,
-						[&](const Array<::tvm::PrimVar>& i) {
-							PrimExpr v = ::tvm::prim::cast(
-									::tvm::PrimType::Float(32), out(Array<PrimExpr>{i.begin(), i.end()})
-							);
-							auto c = [](double d) { return ::tvm::prim::MakeConst(::tvm::PrimType::Float(32), d); };
-							return ::tvm::prim::cast(
-									out->dtype, v * c(0.5) * (c(1.0) + ::tvm::prim::erf(v * c(M_SQRT1_2)))
-							);
-						},
-						"T_gelu", topi::kElementWise
-				);
 			if (!m.permOut.empty() && !isIdentity(m.permOut))
 				out = topi::transpose(out, axes(m.permOut));
 			if (m.addend)
@@ -461,15 +447,14 @@ namespace mdl::backend::tvm {
 			return Call(
 					::tvm::Type::Missing(), op,
 					{m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
-					 ::tvm::FloatImm(::tvm::PrimType::Float(64), m.alpha),
-					 ::tvm::IntImm(::tvm::PrimType::Int(64), m.activation), addend, scales, zeros, quant}
+					 ::tvm::FloatImm(::tvm::PrimType::Float(64), m.alpha), addend, scales, zeros, quant}
 			);
 		}
 
 		/**
 		 * @brief Folds permutations and epilogues into mdl.matmul (see MatmulArgs): `permute(x) @ y` reads x through
-		 * strides; if the product has no other use, `permute(a @ b)` writes the result in the permuted layout,
-		 * `gelu(a @ b)` and `a @ b + r` are computed by the matrix product's epilogue.
+		 * strides; if the product has no other use, `permute(a @ b)` writes the result in the permuted layout, and
+		 * `a @ b + r` is computed by the matrix product's epilogue.
 		 */
 		class FoldPermutes : public ::tvm::relax::ExprMutator {
 		public:
@@ -519,19 +504,7 @@ namespace mdl::backend::tvm {
 					}
 					return changed ? makeCall(m) : call;
 				}
-				static const auto& gelu = ::tvm::Op::Get("relax.nn.gelu");
 				static const auto& add = ::tvm::Op::Get("relax.add");
-				// The product's single use: an activation (before a permutation or an addend is applied).
-				if (call->op.same_as(gelu) && singleUse(op->args[0])) {
-					const ::tvm::CallNode* matmulOp = boundCall(call->args[0], matmul);
-					if (matmulOp == nullptr)
-						return call;
-					MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
-					if (m.activation != 0 || m.addend || (!m.permOut.empty() && !isIdentity(m.permOut)))
-						return call;
-					m.activation = 1;
-					return makeCall(m);
-				}
 				// The product's single use: an addition of a tensor of the result's shape (e.g. a residual connection).
 				if (call->op.same_as(add)) {
 					for (size_t i = 0; i < 2; ++i) {
@@ -703,7 +676,7 @@ namespace mdl::backend::tvm {
 	}
 
 	TVM_REGISTER_OP("mdl.matmul")
-			.set_num_inputs(12)
+			.set_num_inputs(11)
 			.add_argument("a", "Tensor", "The left operand A = permute(a, perm_a): [..., M, K].")
 			.add_argument("b", "Tensor", "The right operand B = permute(b, perm_b): [K, N], possibly batched.")
 			.add_argument("bias", "Tensor | PrimValue", "The bias [N] or PrimValue(0) for no bias.")
@@ -711,7 +684,6 @@ namespace mdl::backend::tvm {
 			.add_argument("perm_b", "ShapeExpr", "The permutation of b (empty: none).")
 			.add_argument("perm_out", "ShapeExpr", "The permutation of the result (empty: none).")
 			.add_argument("alpha", "PrimValue", "Scale applied to the product.")
-			.add_argument("activation", "PrimValue", "The activation of the epilogue: 0 none, 1 GELU (erf).")
 			.add_argument("addend", "Tensor | PrimValue", "A tensor of the result's shape added last, or PrimValue(0).")
 			.add_argument(
 					"scales", "Tensor | PrimValue", "If b is quantized: the scales of mdl.dequant, else PrimValue(0)."

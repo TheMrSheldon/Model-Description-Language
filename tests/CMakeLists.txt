@@ -88,7 +88,7 @@ if(TARGET mdl_kernel_package_onednn)
 	add_test(NAME mdl_kernels_check_build COMMAND mdl-kernels --kernels-dir "${MDL_KERNELS_BUILD_DIR}" check
 		"${_quantized}/model.dlm" -a "${_quantized}/model.yml" --build mixed --kernel-package onednn)
 	set_tests_properties(mdl_kernels_check_build PROPERTIES PASS_REGULAR_EXPRESSION
-		"onednn/matmul-quantized-f32.*2 selected")
+		"onednn/matmul-quantized-f32.*3 selected")
 endif()
 add_test(NAME mdl_kernels_dump COMMAND mdl-kernels dump "${_model}")
 set_tests_properties(mdl_kernels_dump PROPERTIES PASS_REGULAR_EXPRESSION "R.multiply\\(x, T.float32\\(2.0\\)\\)")

@@ -18,21 +18,20 @@ extern "C" {
 #endif
 
 /**
- * @brief Matrix multiplication `C = act(alpha * A @ B + bias) + addend` of strided views (rank, shape, strides in
+ * @brief Matrix multiplication `C = alpha * A @ B + bias + addend` of strided views (rank, shape, strides in
  * elements), batched over leading dimensions that broadcast like numpy's.
  * @details A [..., M, K], B [..., K, N], and C [..., M, N] are given in the product's logical layout, so permuted
  * operands and results (e.g. the heads of attention, transposed weights) are read and written in place; C's batch
  * dimensions are the broadcast ones of A and B. Batch dimensions are merged where the layout allows it.
  * @param bias [N] (contiguous), or NULL
  * @param addend a tensor at C's positions (C's strides), e.g. a residual, or NULL
- * @param activation 0: none, 1: GELU (erf)
  */
 #define MDL_MATMUL_DECLARE(suffix, type)                                                                               \
 	int mdl_matmul_##suffix(                                                                                           \
 			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
 			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
 			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	);
 MDL_MATMUL_DECLARE(f32, float)
 MDL_MATMUL_DECLARE(bf16, uint16_t)
@@ -40,7 +39,7 @@ MDL_MATMUL_DECLARE(f16, uint16_t)
 #undef MDL_MATMUL_DECLARE
 
 /**
- * @brief Matrix multiplication with quantized weights (a linear layer): `C = act(alpha * A @ W^T + bias) + addend`
+ * @brief Matrix multiplication with quantized weights (a linear layer): `C = alpha * A @ W^T + bias + addend`
  * with W [N, K] the dequantization of @p q: `W[n, k] = scales[k / group, n] * (q[n, k] - zeros[k / group, n])`.
  * @details A [..., M, K] and C [..., M, N] are strided views as for mdl_matmul.
  * @param q [N, K] int8 values (format 1), or [N, K/2] bytes of two 4-bit values (low nibble: even k), signed (format
@@ -53,7 +52,7 @@ MDL_MATMUL_DECLARE(f16, uint16_t)
 			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
 			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
 			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	);
 MDL_MATMUL_Q_DECLARE(f32, float)
 MDL_MATMUL_Q_DECLARE(bf16, uint16_t)
