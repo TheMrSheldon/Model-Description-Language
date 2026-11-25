@@ -69,6 +69,12 @@ namespace mdl {
 		 */
 		std::map<std::string, unsigned> inputEllipsisRanks;
 
+		/**
+		 * The device to compile for, as a TVM target string (`llvm`, `cuda -arch=sm_80`). Only the backend interprets
+		 * it (see backends/tvm/targets/); the frontend and the model are independent of it.
+		 */
+		std::string target = "llvm";
+
 		/** Enable fast-math (approximate exp/erf/...); trades accuracy for speed. */
 		bool fastMath = false;
 
@@ -114,6 +120,17 @@ namespace mdl {
 	 * generators must use this function so that generated bindings can resolve the correct symbol
 	 * at runtime.
 	 */
+	/**
+	 * @brief The symbol prefix of the object file @p output (`mdl_<stem>_`): the prefix of its kernels and of its TVM
+	 * system library, which the C++ binding loads to attach device code (see mdl_detail::loadSystemLib).
+	 */
+	inline std::string systemLibPrefix(const std::filesystem::path& output) {
+		std::string prefix = "mdl_";
+		for (char c : output.stem().string())
+			prefix += (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? c : '_';
+		return prefix + "_";
+	}
+
 	inline std::string mangledName(std::string_view moduleName, std::string_view funcName) {
 		return std::string{moduleName} + "__" + std::string{funcName};
 	}

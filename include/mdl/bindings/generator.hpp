@@ -29,6 +29,9 @@ namespace mdl::bindings {
 		 * @see mdl::exportedFunctions for the calling convention of the compiled functions.
 		 */
 		virtual void generate(const std::vector<ExportedFunction>& exports, const std::filesystem::path& output) = 0;
+
+		/** @brief The symbol prefix of the object file (mdl::systemLibPrefix), set before generate. */
+		std::string libraryPrefix;
 	};
 
 	using GeneratorFactory = std::function<std::unique_ptr<BindingGenerator>()>;

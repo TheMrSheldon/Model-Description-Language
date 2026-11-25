@@ -88,7 +88,12 @@ namespace mdl::backend::tvm {
 				Array<relax::DFPattern> args;
 				for (const auto& arg : node.args)
 					args.push_back(compileNode(arg, out));
-				relax::DFPattern p = relax::IsOp(node.op)(args); // throws for an unknown operator
+				const auto& op = ::tvm::Op::Get(node.op); // (throws for an unknown operator)
+				if (op->num_inputs >= 0 && static_cast<size_t>(op->num_inputs) != node.args.size())
+					throw std::runtime_error(std::format(
+							"{} has {} argument(s), the pattern {}", node.op, op->num_inputs, node.args.size()
+					));
+				relax::DFPattern p = relax::IsOp(node.op)(args);
 				if (!node.attrs.empty()) {
 					Map<::tvm::ffi::String, ::tvm::ffi::Any> attrs;
 					for (const auto& [name, value] : node.attrs)
@@ -162,6 +167,16 @@ namespace mdl::backend::tvm {
 				}
 				case K::access:
 					return access(n);
+				case K::conditional: {
+					const auto cond = ::tvm::sym::Analyzer()->Simplify(eval(*n.args[0]).scalar);
+					const auto* imm = cond.as<::tvm::IntImmNode>();
+					if (imm != nullptr)
+						return eval(*n.args[intValue(imm) != 0 ? 1 : 2]); // (the other branch may not be computable)
+					auto a = eval(*n.args[1]), b = eval(*n.args[2]);
+					if (n.type == expr::Type::shape || n.type == expr::Type::dtype || n.type == expr::Type::pointer)
+						throw EvalError{"a condition that decides a shape, element type, or pointer must be constant"};
+					return {.type = n.type, .scalar = ::tvm::prim::Select(cond, a.scalar, b.scalar)};
+				}
 				case K::unary: {
 					auto x = eval(*n.args[0]);
 					if (n.op == "not")
@@ -208,6 +223,22 @@ namespace mdl::backend::tvm {
 				}
 				case K::call: {
 					auto shape = eval(*n.args[0]).shape;
+					if (n.name == "strides") {
+						Value v{.type = expr::Type::shape};
+						for (const auto& stride : contiguousStrides(shape))
+							v.shape.push_back(stride);
+						return v;
+					}
+					if (n.name == "permute" || n.name == "unpermute") {
+						const auto perm = constants(eval(*n.args[1]).shape, "a permutation");
+						if (!perm.empty() && perm.size() != shape.size())
+							throw EvalError{std::format(
+									"a permutation of {} entries for {} dimension(s)", perm.size(), shape.size()
+							)};
+						Value v{.type = expr::Type::shape};
+						v.shape = n.name == "permute" ? permuted(shape, perm) : permuted(shape, inverse(perm));
+						return v;
+					}
 					if (n.name == "len")
 						return {.type = expr::Type::integer, .scalar = i64(static_cast<int64_t>(shape.size()))};
 					PrimExpr p = i64(1);
@@ -246,6 +277,18 @@ namespace mdl::backend::tvm {
 				return {.type = expr::Type::real, .scalar = ::tvm::FloatImm(::tvm::PrimType::Float(64), *value)};
 			}
 
+			/** @brief The integer values of @p values (which must be constants). */
+			static Perm constants(const Array<PrimExpr>& values, const char* what) {
+				Perm r;
+				for (const auto& v : values) {
+					const auto* imm = ::tvm::sym::Analyzer()->Simplify(v).as<::tvm::IntImmNode>();
+					if (imm == nullptr)
+						throw EvalError{std::format("{} must be constant", what)};
+					r.push_back(intValue(imm));
+				}
+				return r;
+			}
+
 			Value access(const expr::Node& n) {
 				if (n.field.starts_with("attr."))
 					return attribute(n.name, n.field.substr(5));
@@ -254,7 +297,28 @@ namespace mdl::backend::tvm {
 					throw EvalError{std::format("${} is not available", n.name)};
 				const auto* info = tensorInfo(it->second);
 				if (n.field == "data")
-					return {.type = expr::Type::pointer};
+					return {.type = expr::Type::pointer}; // (NULL if the capture is not a tensor)
+				if (n.field == "is_tensor")
+					return {.type = expr::Type::boolean, .scalar = boolean(info != nullptr)};
+				// Values that are not tensors: a shape (e.g. a permutation), an integer, or a number.
+				if (n.field == "values") {
+					const auto* shape = it->second.as<::tvm::relax::ShapeExprNode>();
+					if (shape == nullptr)
+						throw EvalError{std::format("${} is not a list of values", n.name)};
+					return {.type = expr::Type::shape, .shape = shape->values};
+				}
+				if (n.field == "value") {
+					const auto* imm = it->second.as<::tvm::IntImmNode>();
+					if (imm == nullptr)
+						throw EvalError{std::format("${} is not an integer", n.name)};
+					return {.type = expr::Type::integer, .scalar = i64(intValue(imm))};
+				}
+				if (n.field == "real") {
+					const auto value = scalarConstant(it->second);
+					if (!value)
+						throw EvalError{std::format("${} is not a number", n.name)};
+					return {.type = expr::Type::real, .scalar = ::tvm::FloatImm(::tvm::PrimType::Float(64), *value)};
+				}
 				if (info == nullptr)
 					throw EvalError{std::format("${} is not a tensor", n.name)};
 				if (n.field == "dtype") {
@@ -273,13 +337,18 @@ namespace mdl::backend::tvm {
 			}
 
 			Value binary(const expr::Node& n) {
-				auto a = eval(*n.args[0]), b = eval(*n.args[1]);
 				const auto& op = n.op;
 				auto result = [](PrimExpr e, expr::Type t) { return Value{.type = t, .scalar = std::move(e)}; };
-				if (op == "and")
-					return result(a.scalar && b.scalar, expr::Type::boolean);
-				if (op == "or")
-					return result(a.scalar || b.scalar, expr::Type::boolean);
+				// `and` and `or` short-circuit on a constant left operand (e.g. `not $x.is_tensor or $x.shape == ...`).
+				if (op == "and" || op == "or") {
+					auto a = eval(*n.args[0]);
+					const auto* imm = ::tvm::sym::Analyzer()->Simplify(a.scalar).as<::tvm::IntImmNode>();
+					if (imm != nullptr && (intValue(imm) != 0) == (op == "or"))
+						return result(boolean(op == "or"), expr::Type::boolean);
+					auto b = eval(*n.args[1]);
+					return result(op == "and" ? a.scalar && b.scalar : a.scalar || b.scalar, expr::Type::boolean);
+				}
+				auto a = eval(*n.args[0]), b = eval(*n.args[1]);
 				if (a.type == expr::Type::dtype)
 					return result(boolean((a.dtype == b.dtype) == (op == "==")), expr::Type::boolean);
 				if (a.type == expr::Type::shape) {
@@ -369,7 +438,10 @@ namespace mdl::backend::tvm {
 			for (const auto& id : impl.artifacts) {
 				const auto* a = p.artifact(id);
 				std::error_code ec;
-				std::string reason = !a->supported() ? "CUDA artifacts are not supported yet"
+				std::string reason = !kernels::forDevice(*a, target)
+											 ? (a->deviceArch.empty() ? std::string("not for the device ") + target.deviceArch
+																	  : "not for " + (target.deviceArch.empty() ? std::string("the CPU") : target.deviceArch))
+									 : !a->supported() ? "cubin and PTX artifacts are not supported yet"
 									 : !kernels::compatible(a->platform, target)	  ? "not for " + target.str()
 									 : !std::filesystem::is_regular_file(a->path, ec) ? "missing " + a->path.string()
 																					  : "";
@@ -378,19 +450,6 @@ namespace mdl::backend::tvm {
 				why += (why.empty() ? "" : "; ") + id + ": " + reason;
 			}
 			return {"", why};
-		}
-	} // namespace
-
-	namespace {
-		/** @brief The plan of a named adapter (see `adapter:` in docs/dev/spec/kernel-packages.md) for the root call of a region. */
-		std::expected<ExternPlan, std::string> adapterPlan(const std::string& adapter, const Expr& root) {
-			const auto* call = root.as<::tvm::CallNode>();
-			if (call == nullptr)
-				return std::unexpected("the region's result is not an operator call");
-			const auto c = ::tvm::ffi::GetRef<Call>(call);
-			if (adapter == "matmul-strided" || adapter == "matmul-quantized")
-				return matmulAdapter(c, adapter == "matmul-quantized");
-			return std::unexpected("unknown adapter " + adapter);
 		}
 	} // namespace
 
@@ -466,6 +525,9 @@ namespace mdl::backend::tvm {
 							c.captures.emplace_back(name, value);
 						}
 						captures["out"] = vb->var;
+						if (const auto* tuple = relax::GetType(vb->var).as<::tvm::TupleTypeNode>()) // ($out0, $out1, ...)
+							for (size_t i = 0; i < tuple->fields.size(); ++i)
+								captures["out" + std::to_string(i)] = Var("out" + std::to_string(i), tuple->fields[i]);
 
 						// Captures that must not be produced by certain operators.
 						for (const auto& [name, op] : e.compiled.notOps) {
@@ -592,16 +654,12 @@ namespace mdl::backend::tvm {
 						for (const auto& w : e.impl->where)
 							evaluate(w, "where " + w);
 						// The arguments: integers must be computable, and fit their type (a checked conversion).
-						if (!e.impl->adapter.empty()) {
-							auto plan = adapterPlan(e.impl->adapter, vb->value);
-							c.verdicts.push_back(
-									{"the argument adapter " + e.impl->adapter + " applies",
-									 plan ? Verdict::Result::proven : Verdict::Result::refuted,
-									 plan ? "" : plan.error(),
-									 {}}
-							);
-						}
-						for (size_t i = 0; i < e.impl->arguments.size(); ++i) {
+						// (Only for an implementation that applies otherwise: the arguments of e.g. quantized weights
+						// cannot be computed for other matrix products.)
+						const bool refuted = std::ranges::any_of(c.verdicts, [](const Verdict& v) {
+							return v.result == Verdict::Result::refuted;
+						});
+						for (size_t i = 0; i < (refuted ? 0 : e.impl->arguments.size()); ++i) {
 							const auto& arg = e.impl->arguments[i];
 							if (arg.type == "pointer")
 								continue;
@@ -632,19 +690,19 @@ namespace mdl::backend::tvm {
 							}
 							if (arg.type == "int32")
 								evaluate(
-										std::format("{} >= -2147483648 and {} <= 2147483647", arg.value, arg.value),
+										std::format("({}) >= -2147483648 and ({}) <= 2147483647", arg.value, arg.value),
 										std::format("argument {} ({}) fits int32", i + 1, arg.value)
 								);
 							else
 								evaluate(
-										std::format("{} == {}", arg.value, arg.value),
+										std::format("({}) == ({})", arg.value, arg.value),
 										std::format("argument {} ({}) can be computed", i + 1, arg.value)
 								);
 						}
 						if (!e.impl->outputs.empty()) {
 							const auto& [shape, dtype] = e.impl->outputs.front();
-							evaluate(std::format("{} == $out.shape", shape), "the result's shape is " + shape);
-							evaluate(std::format("{} == $out.dtype", dtype), "the result's element type is " + dtype);
+							evaluate(std::format("({}) == $out.shape", shape), "the result's shape is " + shape);
+							evaluate(std::format("({}) == $out.dtype", dtype), "the result's element type is " + dtype);
 						}
 
 						// Unknown shape arithmetic becomes a runtime guard (the original region is the fallback).
@@ -819,49 +877,54 @@ namespace mdl::backend::tvm {
 				std::map<std::string, Expr> captures;
 				for (const auto& [name, value] : c.captures)
 					captures[name] = value;
-				captures["out"] = root;
+				ExternCall ext{builder_, impl.symbol};
+				// The results: `$out`, or `$out0`, `$out1`, ... of an operator with several (a tuple).
+				std::map<std::string, Expr> outs;
+				auto addOutput = [&](const std::string& name, const ::tvm::Type& type) {
+					const auto* info = type.as<relax::TensorTypeNode>();
+					if (info == nullptr || !info->GetShape().defined())
+						throw std::runtime_error("mdl kernels: a result without a known shape");
+					outs[name] = ext.output(info->GetShape().value(), info->dtype.value());
+					captures[name] = Var(name, type); // (for the expressions over its shape)
+				};
+				if (const auto* tuple = relax::GetType(root).as<::tvm::TupleTypeNode>()) {
+					for (size_t i = 0; i < tuple->fields.size(); ++i)
+						addOutput("out" + std::to_string(i), tuple->fields[i]);
+				} else {
+					addOutput("out", relax::GetType(root));
+				}
 				std::vector<std::string> names;
 				for (const auto& [name, _] : captures)
 					names.push_back(name);
 				std::map<std::string, Expr> calls(c.calls.begin(), c.calls.end());
 				Evaluator eval{captures, calls};
 
-				ExternCall ext{builder_, impl.symbol};
-				if (!impl.adapter.empty()) {
-					auto plan = adapterPlan(impl.adapter, valueOf.at(root.get())).value(); // (checked when matching)
-					std::vector<Expr> pointers;
-					for (const auto& input : plan.inputs)
-						pointers.push_back(ext.input(VisitExpr(input), "in" + std::to_string(pointers.size())));
-					auto out = ext.output(plan.outShape, plan.outDtype);
-					std::vector<Expr> args;
-					std::vector<PrimExpr> scalars;
-					for (const auto& arg : plan.args)
-						switch (arg.kind) {
-						case ExternPlan::Arg::Kind::input:
-							args.push_back(pointers[arg.input]);
-							break;
-						case ExternPlan::Arg::Kind::output:
-							args.push_back(out);
-							break;
-						case ExternPlan::Arg::Kind::scalar:
-							scalars.push_back(arg.value);
-							args.push_back(arg.value);
-							break;
-						}
-					return ext.finish(std::move(args), scalars);
-				}
-				const auto outShape = knownShape(root).value();
-				const auto outDtype = tensorInfo(root)->dtype.value();
-				auto out = ext.output(outShape, outDtype);
 				std::map<std::string, Expr> pointers; // one buffer per captured tensor
 				std::vector<Expr> args;
 				std::vector<PrimExpr> scalars;
+				const auto i64 = ::tvm::PrimType::Int(64);
 				for (const auto& arg : impl.arguments) {
 					auto parsed = expr::parse(arg.value, names).value(); // checked when the package was loaded
 					if (arg.type == "pointer") {
-						const auto& name = parsed->name;
-						if (name == "out") {
-							args.push_back(out);
+						// The capture it points to: `$x.data`, `null`, or a choice between them (a constant condition).
+						const expr::Node* target = parsed.get();
+						while (target->kind == expr::Node::Kind::conditional) {
+							const auto c = ::tvm::sym::Analyzer()->Simplify(eval.eval(*target->args[0]).scalar);
+							const auto* imm = c.as<::tvm::IntImmNode>();
+							if (imm == nullptr)
+								throw std::runtime_error("mdl kernels: a pointer chosen by a condition that is not constant");
+							target = target->args[intValue(imm) != 0 ? 1 : 2].get();
+						}
+						const std::string name = target->kind == expr::Node::Kind::access ? target->name : std::string();
+						if (auto out = outs.find(name); out != outs.end()) {
+							args.push_back(out->second);
+							continue;
+						}
+						if (name.empty() || tensorInfo(captures.at(name)) == nullptr) { // (null, e.g. an absent bias)
+							args.push_back(Call(
+									::tvm::PointerType::VoidPointerTy(), tirx::builtin::reinterpret(),
+									{::tvm::IntImm(::tvm::PrimType::UInt(64), 0)}
+							));
 							continue;
 						}
 						auto [p, inserted] = pointers.try_emplace(name);
@@ -870,11 +933,21 @@ namespace mdl::backend::tvm {
 						args.push_back(p->second);
 						continue;
 					}
+					if (arg.type == "int64[]") { // a pointer to the values (on the caller's stack)
+						std::vector<PrimExpr> values;
+						for (const auto& v : eval.eval(*parsed).shape) {
+							const PrimExpr value = ::tvm::prim::cast(i64, ::tvm::sym::Analyzer()->Simplify(v));
+							scalars.push_back(value);
+							values.push_back(value);
+						}
+						args.push_back(ext.array(Array<PrimExpr>(values.begin(), values.end())));
+						continue;
+					}
 					PrimExpr value = eval.eval(*parsed).scalar;
 					const auto type = arg.type == "int32"	  ? ::tvm::PrimType::Int(32)
 									  : arg.type == "float32" ? ::tvm::PrimType::Float(32)
 									  : arg.type == "float64" ? ::tvm::PrimType::Float(64)
-															  : ::tvm::PrimType::Int(64);
+															  : i64;
 					value = ::tvm::prim::cast(type, ::tvm::sym::Analyzer()->Simplify(value));
 					scalars.push_back(value);
 					args.push_back(value);

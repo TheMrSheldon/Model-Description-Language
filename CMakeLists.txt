@@ -13,6 +13,9 @@ option(MDL_BENCHMARKS "Build the benchmarks of scripts/benchmark.sh (with the ex
 add_feature_info(examples MDL_BUILD_EXAMPLES "Build the MDL examples")
 option(MDL_BUILD_DOCS "Build the documentation (target mdl_docs; needs Doxygen, Graphviz, and BibTeX)" OFF)
 add_feature_info(docs MDL_BUILD_DOCS "Build the MDL documentation")
+option(MDL_ENABLE_CUDA "Build the CUDA target of the TVM backend (needs the CUDA toolkit)" OFF)
+add_feature_info(cuda MDL_ENABLE_CUDA "The CUDA target of the compiler (mdlc --target cuda)")
+set(MDL_CUDA_ARCH "sm_80" CACHE STRING "GPU architecture of the CUDA tests and benchmarks (mdlc --target 'cuda -arch=...')")
 
 
 ##########################################################################################

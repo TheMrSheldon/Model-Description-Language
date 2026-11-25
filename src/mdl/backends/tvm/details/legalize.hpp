@@ -14,14 +14,27 @@
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/transform.h>
+#include <tvm/relax/block_builder.h>
 #include <tvm/relax/expr.h>
+#include <tvm/relax/type.h>
+#include <tvm/tirx/function.h>
 
 #include <expected>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "./permutations.hpp"
+
 namespace mdl::backend::tvm {
+
+	/**
+	 * @brief A call of `mdl.matmul`: `permute(alpha * permute(a, permA) @ permute(b, permB), permOut)` (see the
+	 * legalizer's MatmulArgs).
+	 */
+	::tvm::relax::Expr
+	makeMatmul(::tvm::relax::Expr a, ::tvm::relax::Expr b, Perm permA, Perm permB, Perm permOut, double alpha);
 
 	/**
 	 * @brief Creates a call of the backend operator `mdl.matmul`: `alpha * (op(a) @ op(b)) + bias` with
@@ -42,6 +55,30 @@ namespace mdl::backend::tvm {
 			::tvm::relax::Expr q, ::tvm::relax::Expr scales, ::tvm::relax::Expr zeros, int64_t format, int64_t group
 	);
 
+	/**
+	 * @brief Creates a call of the backend operator `mdl.scatter_add_rows`: zeros [rows, R] (float32), then
+	 * `out[ids[n]] += g[n]` for every n (g: [N, R] float32, ids: [N]; indices clipped). Targets may override its kernel
+	 * (see Target::overrideLegalizations).
+	 */
+	::tvm::relax::Expr makeScatterAddRows(::tvm::relax::Expr g, ::tvm::relax::Expr ids, ::tvm::PrimExpr rows);
+
+	/** @brief A handler for LegalizeOps (see legalizeMap). */
+	::tvm::ffi::Function legalizeHandler(
+			std::function<::tvm::relax::Expr(const ::tvm::relax::BlockBuilder&, const ::tvm::Call&)> fn
+	);
+
+	/** @brief `call_tir` of @p func (added to the module as @p name) with @p inputs and the result @p out. */
+	::tvm::relax::Expr callPrimFunc(
+			const ::tvm::relax::BlockBuilder& bb, ::tvm::tirx::PrimFunc func, const std::string& name,
+			::tvm::ffi::Array<::tvm::relax::Expr> inputs, const ::tvm::relax::TensorType& out
+	);
+
+	/**
+	 * @brief Creates a call of the backend operator `mdl.suffix_mask`: bool [batch..., S], true at the positions
+	 * s < lengths[batch...] (lengths: [batch...] integer; S: the next dimension of @p like, which is not read).
+	 */
+	::tvm::relax::Expr makeSuffixMask(::tvm::relax::Expr lengths, ::tvm::relax::Expr like);
+
 	/** @brief Creates a call of the backend operator `mdl.gelu_backward`: dy * GELU'(x) (exact GELU). */
 	::tvm::relax::Expr makeGeluBackward(::tvm::relax::Expr x, ::tvm::relax::Expr dy);
 
@@ -50,36 +87,6 @@ namespace mdl::backend::tvm {
 	 * (without other uses) is written in the permuted layout (e.g. the heads of attention), instead of transposing.
 	 */
 	::tvm::transform::Pass foldPermutesIntoMatmul();
-
-	/**
-	 * @brief The arguments of an extern kernel call, computed by an adapter (see kernel packages, `adapter:`): the
-	 * tensors it reads (in the order of their buffers), and the kernel's arguments in order.
-	 */
-	struct ExternPlan {
-		struct Arg {
-			enum class Kind { input, output, scalar } kind;
-			size_t input = 0;	   ///< the index into inputs
-			::tvm::PrimExpr value; ///< a scalar
-		};
-		std::vector<::tvm::relax::Expr> inputs;
-		std::vector<Arg> args;
-		::tvm::ffi::Array<::tvm::PrimExpr> outShape;
-		::tvm::PrimType outDtype = ::tvm::PrimType::Void();
-
-		Arg input(size_t i) const { return {.kind = Arg::Kind::input, .input = i}; }
-		Arg add(const ::tvm::relax::Expr& e) {
-			inputs.push_back(e);
-			return input(inputs.size() - 1);
-		}
-		static Arg output() { return {.kind = Arg::Kind::output}; }
-		static Arg scalar(::tvm::PrimExpr v) { return {.kind = Arg::Kind::scalar, .value = std::move(v)}; }
-	};
-
-	/**
-	 * @brief The adapters `matmul-strided` (@p quantized false: mdl_matmul_<type>) and `matmul-quantized`
-	 * (mdl_matmul_q_<type>) for a call of mdl.matmul or relax.matmul, or why the kernel does not cover it.
-	 */
-	std::expected<ExternPlan, std::string> matmulAdapter(const ::tvm::Call& call, bool quantized);
 
 	/** @brief The handlers for tvm::relax::transform::LegalizeOps (operator name → handler). */
 	::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function> legalizeMap(const mdl::CompileOptions& opts);

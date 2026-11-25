@@ -115,6 +115,61 @@ namespace mdl::autodiff {
 			}
 		};
 
+		/**
+		 * @brief The template arguments of a call of @p func with @p arguments, as a parsed call infers them (see the
+		 * parser's inferTemplateValues): a template parameter that is a dimension of a parameter's type (e.g. N in
+		 * `x: float[..., N]`) takes the argument's size there (dimensions before `...` from the front, those after it
+		 * from the back). Empty unless every template parameter is determined by a constant or compile-time size (a
+		 * runtime size, e.g. a sequence length, leaves the parameters unbound, as for a parsed call).
+		 */
+		std::vector<Computegraph::NodeRef> templateArguments(
+				Builder& b, Computegraph& graph, const FunctionDecl& func, const std::vector<Computegraph::NodeRef>& arguments
+		) {
+			std::vector<const Node*> values(func.templateParameters.size(), nullptr);
+			auto index = [&](const TensorType::Shape::value_type& dim) -> std::optional<size_t> {
+				const auto* node = std::get_if<const Node*>(&dim);
+				const auto* hp = node ? std::get_if<HyperparameterNode>(*node) : nullptr;
+				for (size_t i = 0; i < func.templateParameters.size(); ++i)
+					if (hp == &func.templateParameters[i].second.get())
+						return i;
+				return std::nullopt;
+			};
+			auto sizeNode = [&](const shapes::Dim& d) -> const Node* {
+				if (d.isConstant())
+					return &graph.addConstNode(Atomic{static_cast<int>(d.factor)});
+				return d.known && !d.group && d.symbols.empty() && d.factor == 1 ? d.node : nullptr;
+			};
+			for (size_t i = 0; i < func.parameters.size() && i < arguments.size(); ++i) {
+				const auto* p = std::get_if<TensorType>(&func.parameters[i].second.get().type);
+				std::optional<shapes::Shape> a;
+				if (const shapes::Shape* exact = b.shapeOf(arguments[i].get()))
+					a = *exact;
+				else
+					a = shapes::shapeOfType(getDataType(arguments[i].get()));
+				if (p == nullptr || !a)
+					continue;
+				auto bind = [&](const auto& pdim, const shapes::Dim& adim) {
+					if (auto t = index(pdim); t && values[*t] == nullptr)
+						values[*t] = sizeNode(adim);
+				};
+				const auto ellipsis =
+						std::ranges::find_if(p->shape, [](const auto& d) { return std::holds_alternative<Elipsis>(d); });
+				const size_t before = static_cast<size_t>(ellipsis - p->shape.begin());
+				for (size_t k = 0; k < before && k < a->size(); ++k)
+					bind(p->shape[k], (*a)[k]);
+				if (ellipsis != p->shape.end())
+					for (size_t k = 1; k + before < p->shape.size() && k <= a->size(); ++k)
+						bind(p->shape[p->shape.size() - k], (*a)[a->size() - k]);
+			}
+			std::vector<Computegraph::NodeRef> result;
+			for (const Node* v : values) {
+				if (v == nullptr)
+					return {};
+				result.push_back(std::cref(*v));
+			}
+			return result;
+		}
+
 		/** @brief The size of the last dimension of @p type as a node (for the gradient of mean), if known. */
 		const Node* lastDimSize(Computegraph& graph, const DataType& type) {
 			const auto* tensor = std::get_if<TensorType>(&type);
@@ -200,6 +255,16 @@ namespace mdl::autodiff {
 				const Node& ones = b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x});
 				return b.div(spread, keep(b.op(FIDs::SUM, {ones})));
 			}
+			case FIDs::VAR: { // var = sum((x - mean(x))^2) / (N - dof): dx = g * 2 (x - mean(x)) / (N - dof)
+				const Node& group = graph.addConstNode(Atomic{std::vector<int>{0, 0}}); // all dims (see RESHAPE)
+				auto keep = [&](const Node& v) -> const Node& {
+					return b.op(FIDs::RESHAPE, {v, group, graph.addConstNode(Atomic{1})});
+				};
+				const Node* n = lastDimSize(graph, getDataType(x));
+				const Node& count = n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
+				const Node& centered = b.sub(x, keep(b.op(FIDs::MEAN, {x})));
+				return b.div(b.mul(b.mul(keep(g), centered), b.constant(2.0)), b.sub(count, *other));
+			}
 			case FIDs::EXP:
 				return b.mul(g, node);
 			case FIDs::LOG:
@@ -251,6 +316,21 @@ namespace mdl::autodiff {
 				return b.op(FIDs::TAKE, {g, *other});
 			case FIDs::CAST: // the gradient in the argument's type
 				return b.castLike(g, x);
+			case FIDs::ATTENTION: { // see ATTENTION_GRAD (and passes/attention.hpp)
+				if (arg == 4)
+					throw NoGradientRule{inv.id}; // \todo the gradient of the bias (the scores' gradient, summed)
+				std::vector<Computegraph::NodeRef> operands(inv.arguments.begin(), inv.arguments.begin() + 4);
+				auto withBias = [&](std::vector<Computegraph::NodeRef> args) { // (and the lengths of a suffix mask)
+					args.insert(args.end(), inv.arguments.begin() + 4, inv.arguments.end());
+					return args;
+				};
+				std::vector<Computegraph::NodeRef> args = operands;
+				for (const Node* n :
+					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)), &b.op(FIDs::ATTENTION_PROBS, withBias(operands)),
+					  &g, &graph.addConstNode(Atomic{static_cast<int>(arg)})})
+					args.push_back(std::cref(*n));
+				return b.op(FIDs::ATTENTION_GRAD, withBias(std::move(args)));
+			}
 			case FIDs::STACK: // the slice of the stacked tensor
 				return b.op(
 						FIDs::SELECT,
@@ -273,9 +353,18 @@ namespace mdl::autodiff {
 			case FIDs::PERMUTE_INVERSE:
 				return arg == 0;
 			case FIDs::EQUAL_MASK:
+			case FIDs::SUFFIX_MASK:
 				return false; // piecewise constant
+			case FIDs::VAR:
+				return arg == 0; // not the degrees of freedom
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
+			case FIDs::ATTENTION:
+				return arg != 3 && arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
+			case FIDs::ATTENTION_LSE:
+			case FIDs::ATTENTION_PROBS:
+			case FIDs::ATTENTION_GRAD:
+				return false; // (only in gradients; no higher-order derivatives)
 			case FIDs::STOP_GRADIENT:
 			case FIDs::ONE_HOT_LIKE:
 				return false;
@@ -387,8 +476,10 @@ namespace mdl::autodiff {
 				return {};
 
 			auto results = [&] {
-				if (call.module == nullptr)
-					return graph.addInvocationNode(gradient, std::move(arguments));
+				if (call.module == nullptr) {
+					auto templateArgs = templateArguments(b, graph, gradient, arguments);
+					return graph.addInvocationNode(gradient, std::move(arguments), std::move(templateArgs));
+				}
 				BoundModuleType bound{.definition = *call.module, .hyperparamValues = call.hyperparameters};
 				return graph.addModuleInvocationNode(bound, call.scope, call.path, gradient, std::move(arguments));
 			}();
@@ -782,9 +873,11 @@ namespace mdl::autodiff {
 		// elementwise result is at least as large as its arguments), and the forward pass does not compute values just to
 		// save them (which would also keep backends from replacing the forward computation by a fused kernel). The
 		// backward pass recomputes the elementwise computation, where it fuses with the operations that use it.
-		// Only values that the forward pass would not store anyway are moved: those it does not compute, and those whose
-		// forward uses are all elementwise arithmetic (fused away), unlike e.g. `tanh(h)` that a matrix product takes
-		// (also through reshapes and permutations, which materialize their argument as well).
+		// Only values that the forward pass would not store anyway are moved to their source (moving adds the source as
+		// a saved value): those it does not compute, and those whose forward uses are all elementwise arithmetic (fused
+		// away), unlike e.g. `tanh(h)` that a matrix product takes (also through reshapes and permutations, which
+		// materialize their argument as well). Such a value may still be recomputed instead of saved by the next step
+		// (if it is elementwise in values that are saved anyway).
 		std::unordered_set<const Node*> stored;
 		for (size_t i = 0; i < numOutputs; ++i)
 			stored.insert(&vjp.outputs[i].get());
@@ -893,6 +986,10 @@ namespace mdl::autodiff {
 			residuals = std::move(moved);
 		}
 
+		// Residuals that are elementwise in other residuals (and weights and constants) are not saved: the backward pass
+		// recomputes them from those, which costs no memory, also if the forward pass materializes them (e.g. `gelu(h)`
+		// for a matrix product when `h` is saved for the derivative). The recomputation and the other uses of its inputs
+		// become one kernel in the backends (sibling fusion: `gelu(h)` and `gelu_backward(h, dy)` read `h` once).
 		std::unordered_set<const Node*> saved(residuals.begin(), residuals.end());
 		std::function<bool(const Node&, const Node*)> recomputable = [&](const Node& node, const Node* self) {
 			if (&node != self && saved.contains(&node))

@@ -33,11 +33,12 @@ public template<N: uint>
 float[...] mean(x: float[..., N]) => __builtin_mean(x);
 
 /**
- * @brief Variance over the last dimension.
+ * @brief Variance over the last dimension: `sum((x - mean(x))^2) / (N - dof)`.
+ * @param dof the delta degrees of freedom: 0 for the population variance, 1 for the unbiased sample variance.
  * @ingroup Statistics
- * \todo `dof` is not yet forwarded (default values are not yet supported).
  */
-public float[...] var(x: float[...], dof: uint) => __builtin_var(x, dof);
+public template<N: uint>
+float[...] var(x: float[..., N], dof: uint) => __builtin_var(x, dof);
 
 /**
  * @brief Sum of all elements (a scalar), e.g. for objectives: the sum of the flattened tensor.

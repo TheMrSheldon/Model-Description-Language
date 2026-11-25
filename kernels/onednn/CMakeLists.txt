@@ -23,6 +23,7 @@ CPMAddPackage(
 
 add_library(mdl_onednn STATIC src/onednn.cpp src/layer_norm_backward.cpp)
 target_include_directories(mdl_onednn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(mdl_onednn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include) # (mdl_strided.hpp)
 target_compile_features(mdl_onednn PUBLIC cxx_std_20)
 set_property(TARGET mdl_onednn PROPERTY POSITION_INDEPENDENT_CODE ON)
 # The static oneDNN library uses OpenMP (DNNL_CPU_RUNTIME OMP) but does not propagate it to consumers.

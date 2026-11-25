@@ -1,0 +1,151 @@
+#include "./column_reduction.hpp"
+
+#include <tvm_ported/s_tir/dlight/analysis/common_analysis.hpp>
+#include <tvm_ported/s_tir/dlight/base/common_schedules.hpp>
+#include <tvm_ported/s_tir/dlight/base/utils.hpp>
+
+#include <tvm/tirx/analysis.h>
+
+#include <exception>
+#include <unordered_set>
+
+namespace mdl::backend::tvm::gpu {
+
+	namespace {
+		namespace dl = mdl::tvm_ported::dlight;
+		using ::tvm::PrimExpr;
+		using ::tvm::ffi::Array;
+		using ::tvm::s_tir::LoopRV;
+		using ::tvm::s_tir::SBlockRV;
+
+		Array<::tvm::ffi::Optional<PrimExpr>> factors(int64_t inner) {
+			return {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(inner)};
+		}
+
+		std::optional<int64_t> product(const std::vector<PrimExpr>& doms) {
+			int64_t p = 1;
+			for (const auto& d : doms) {
+				const auto* imm = d.as<::tvm::IntImmNode>();
+				if (imm == nullptr)
+					return std::nullopt;
+				p *= static_cast<int64_t>(imm->value);
+			}
+			return p;
+		}
+	} // namespace
+
+	std::optional<::tvm::s_tir::Schedule>
+	ColumnReduction::apply(const ::tvm::tirx::PrimFunc& func, const ::tvm::Target& target, bool /*tunable*/) const {
+		if (!is_target_available(target))
+			return std::nullopt;
+		auto sch = dl::schedule_of(func);
+		auto infos = dl::try_inline_contiguous_spatial(sch, dl::analysis::normalize_prim_func(sch));
+		if (!infos || infos->empty() || infos->size() > 2)
+			return std::nullopt;
+		// One reduction (dom kind S..SR..R), optionally followed by an elementwise epilogue.
+		const auto& info = (*infos)[0];
+		const std::string kind = info.dom_kind();
+		const size_t numS = kind.find_first_not_of('S');
+		if (numS == std::string::npos || numS == 0 || kind.find_first_not_of('R', numS) != std::string::npos)
+			return std::nullopt;
+		if (infos->size() == 2 && !(*infos)[1].is_injective())
+			return std::nullopt;
+		std::vector<PrimExpr> rowDoms;
+		for (size_t i = numS; i < kind.size(); ++i)
+			rowDoms.push_back(info.iters[i].dom);
+		if (const auto rows = product(rowDoms); rows && *rows < kMinRows)
+			return std::nullopt;
+		std::vector<PrimExpr> columnDoms;
+		for (size_t i = 0; i < numS; ++i)
+			columnDoms.push_back(info.iters[i].dom);
+		const auto columns = product(columnDoms);
+
+		// Columns: every read that depends on the reduction has a spatial (not reduced) innermost index.
+		const auto block = sch->Get(info.block_rv);
+		std::unordered_set<const void*> reductionVars;
+		for (const auto& iv : block->iter_vars)
+			if (iv->iter_type == ::tvm::tirx::kCommReduce)
+				reductionVars.insert(iv->var.get());
+		bool reads = false;
+		for (const auto& read : block->reads) {
+			if (read->region.empty())
+				continue;
+			bool dependsOnReduction = false;
+			for (const auto& range : read->region)
+				for (const auto& v : ::tvm::tirx::UndefinedVars(range->min))
+					dependsOnReduction |= reductionVars.contains(v.get());
+			if (!dependsOnReduction)
+				continue;
+			reads = true;
+			for (const auto& v : ::tvm::tirx::UndefinedVars(read->region.back()->min))
+				if (reductionVars.contains(v.get()))
+					return std::nullopt; // (a row reduction: RowReduction, DLight)
+		}
+		if (!reads)
+			return std::nullopt;
+
+		// The threads of the second pass: a divisor of the (static) number of columns.
+		int64_t threads = kThreads;
+		if (columns) {
+			while (threads > kWarp && *columns % threads != 0)
+				threads /= 2;
+			if (*columns % threads != 0)
+				threads = *columns <= kThreads ? *columns : 0;
+			if (threads == 0)
+				return std::nullopt; // (DLight's rules)
+		}
+		try {
+			const SBlockRV red = info.block_rv;
+			auto loops = sch->GetLoops(red);
+			const auto split = static_cast<std::ptrdiff_t>(numS);
+			const LoopRV s = split == 1 ? loops[0] : sch->Fuse(Array<LoopRV>(loops.begin(), loops.begin() + split));
+			const LoopRV r = loops.size() - numS == 1 ? loops.back()
+													  : sch->Fuse(Array<LoopRV>(loops.begin() + split, loops.end()));
+			const auto chunks = sch->Split(r, factors(kChunk)); // [chunk, row in chunk]
+			const SBlockRV rf = sch->RFactor(chunks[0], 0);	   // partial sums [chunks, columns]
+
+			// The partial sums: threadIdx.x on adjacent columns, threadIdx.y on chunks; each thread sums its chunk.
+			{
+				auto l = sch->GetLoops(rf); // [s, chunk, row]
+				if (l.size() != 3)
+					return std::nullopt;
+				// kVector adjacent columns per thread (vector loads) if the columns divide evenly.
+				const int64_t vector = columns && *columns % (kWarp * kVector) == 0 ? kVector : 1;
+				const auto cols = sch->Split(l[0], {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(kWarp),
+													::tvm::IntImm::Int32(vector)});
+				const auto chs = sch->Split(l[1], factors(kChunksPerBlock));
+				sch->Reorder({cols[0], chs[0], chs[1], cols[1], l[2], cols[2]});
+				sch->Bind(cols[0], "blockIdx.x");
+				sch->Bind(chs[0], "blockIdx.y");
+				sch->Bind(chs[1], "threadIdx.y");
+				sch->Bind(cols[1], "threadIdx.x");
+				if (vector > 1)
+					sch->Vectorize(cols[2]);
+			}
+			// The write-back: a thread per column sums the chunks; with an epilogue (e.g. a conversion to bfloat16), in a
+			// register of the reduction's type (e.g. float32), which the epilogue then reads per column.
+			{
+				auto l = sch->GetLoops(red); // [s, chunk]
+				if (l.empty())
+					return std::nullopt;
+				// (threads that divide the columns: the write-back after the loop is not predicated)
+				const auto cols = sch->Split(l[0], factors(threads));
+				sch->Bind(cols[0], "blockIdx.x");
+				sch->Bind(cols[1], "threadIdx.x");
+				// (A local accumulator also avoids accumulating in a 16-bit output: local bfloat16 buffers are computed in
+				// float32.)
+				if (infos->size() == 2) {
+					sch->SetScope(red, 0, "local");
+					sch->ReverseComputeAt((*infos)[1].block_rv, cols[1], /*preserve_unit_loops=*/false);
+				} else {
+					const SBlockRV store = sch->CacheWrite(red, 0, "local");
+					sch->ReverseComputeAt(store, cols[1], /*preserve_unit_loops=*/false);
+				}
+			}
+		} catch (const std::exception&) {
+			return std::nullopt; // (DLight's rules schedule it)
+		}
+		return sch;
+	}
+
+} // namespace mdl::backend::tvm::gpu

@@ -194,7 +194,10 @@ namespace mdl::bindings::detail {
 		return init;
 	}
 
-	inline void generateCppModule(std::ostream& out, const std::vector<const ExportedFunction*>& fns) {
+	/** @param load the function that loads the object's system library (called before every compiled function). */
+	inline void generateCppModule(
+			std::ostream& out, const std::vector<const ExportedFunction*>& fns, const std::string& load
+	) {
 		const auto& module = fns.front()->module;
 		std::map<std::string, const TensorSignature*> sigs;
 		for (const auto* fn : fns)
@@ -294,13 +297,16 @@ namespace mdl::bindings::detail {
 				} else {
 					out << "        const TVMFFIAny* args = nullptr;\n";
 				}
-				out << "        return static_cast<size_t>(mdl_detail::callInt(__tvm_ffi_" << context->sizeSymbol
+				out << "        " << load << "();\n"
+					<< "        return static_cast<size_t>(mdl_detail::callInt(__tvm_ffi_" << context->sizeSymbol
 					<< ", args, " << context->ellipsisRank << ", \"" << context->sizeSymbol << "\"));\n"
 					<< "    }\n"
 					<< "    /// Allocates a context buffer for the given dimensions of `...` (free it with "
 					<< context->name << "_free).\n"
-					<< "    static Context " << context->name << "_alloc(" << dims << ") {\n"
-					<< "        return mdl_detail::allocContext(" << context->name << "_size(" << dimArgs << "));\n"
+					<< "    /// `device`: the device of the tensors that will be passed (the CPU by default).\n"
+					<< "    static Context " << context->name << "_alloc(" << dims << (dims.empty() ? "" : ", ")
+					<< "DLDevice device = {kDLCPU, 0}) {\n"
+					<< "        return mdl_detail::allocContext(" << context->name << "_size(" << dimArgs << "), device);\n"
 					<< "    }\n"
 					<< "    static void " << context->name << "_free(Context& ctx) { mdl_detail::freeContext(ctx); }\n";
 			}
@@ -314,9 +320,8 @@ namespace mdl::bindings::detail {
 			out << "`\n"
 				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must "
 				   "be\n"
-				<< "    /// contiguous CPU tensors of the declared type (float32, or int32 for `int`) whose data is "
-				   "aligned to\n"
-				<< "    /// 64 bytes (e.g. mdl::runtime::Tensor / mdl::runtime::IntTensor).\n"
+				<< "    /// contiguous tensors of the declared type (float32, or int32 for `int`) on the device the model was\n"
+				<< "    /// compiled for, whose data is aligned to 64 bytes (e.g. mdl::runtime::Tensor on the CPU).\n"
 				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all "
 				   "tensors).\n";
 			if (context)
@@ -337,7 +342,7 @@ namespace mdl::bindings::detail {
 			out << ") {\n";
 			if (context)
 				out << "        int64_t ctx_shape[1] = {static_cast<int64_t>(ctx.bytes)};\n"
-					<< "        DLTensor ctx_tensor{ctx.data, {kDLCPU, 0}, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, "
+					<< "        DLTensor ctx_tensor{ctx.data, ctx.device, 1, {kDLUInt, 8, 1}, ctx_shape, nullptr, "
 					   "0};\n";
 			out << "        TVMFFIAny args[] = {\n";
 			for (const auto* in : inputs)
@@ -352,6 +357,7 @@ namespace mdl::bindings::detail {
 			if (context)
 				out << "            mdl_detail::tensorArg(&ctx_tensor, \"ctx\", {kDLUInt, 8, 1}),\n";
 			out << "        };\n"
+				<< "        " << load << "();\n"
 				<< "        mdl_detail::call(__tvm_ffi_" << fn->symbol << ", args, \"" << fn->symbol << "\");\n"
 				<< "    }\n";
 			auto emitInfos = [&](const char* suffix, const std::vector<const TensorSignature*>& tensors) {
@@ -384,7 +390,11 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "#include <stdexcept>\n"
 		<< "#include <string>\n"
 		<< "#include <string_view>\n\n"
-		<< "extern \"C\" {\n";
+		<< "extern \"C\" {\n"
+		<< "// Device memory of context buffers (TVM runtime; see mdl_detail::allocContext).\n"
+		<< "void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t nbytes, int dtype_code_hint,\n"
+		<< "                               int dtype_bits_hint);\n"
+		<< "int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr);\n";
 	for (const auto& fn : exports) {
 		out << "int __tvm_ffi_" << fn.symbol
 			<< "(void* self, const TVMFFIAny* args, int32_t num_args, TVMFFIAny* result);\n";
@@ -429,21 +439,30 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "        return any;\n"
 		<< "    }\n\n"
 		<< "    /// An opaque buffer that carries values from one compiled function to another (e.g. from\n"
-		<< "    /// `forward_train` to `forward_backward`). `data` must be aligned to kTensorAlignment.\n"
+		<< "    /// `forward_train` to `forward_backward`), on the device of the tensors. `data` must be aligned to\n"
+		<< "    /// kTensorAlignment.\n"
 		<< "    struct Context {\n"
 		<< "        void* data = nullptr;\n"
 		<< "        size_t bytes = 0;\n"
+		<< "        DLDevice device{kDLCPU, 0};\n"
 		<< "    };\n\n"
-		<< "    inline Context allocContext(size_t bytes) {\n"
+		<< "    inline Context allocContext(size_t bytes, DLDevice device) {\n"
 		<< "        const size_t rounded = (bytes + kTensorAlignment - 1) / kTensorAlignment * kTensorAlignment;\n"
-		<< "        Context ctx{std::aligned_alloc(kTensorAlignment, rounded > 0 ? rounded : kTensorAlignment), "
-		   "bytes};\n"
+		<< "        const size_t size = rounded > 0 ? rounded : kTensorAlignment;\n"
+		<< "        Context ctx{nullptr, bytes, device};\n"
+		<< "        // Host memory directly; device memory through the TVM runtime (which the model links anyway).\n"
+		<< "        ctx.data = device.device_type == kDLCPU\n"
+		<< "                       ? std::aligned_alloc(kTensorAlignment, size)\n"
+		<< "                       : TVMBackendAllocWorkspace(device.device_type, device.device_id, size, kDLUInt, 8);\n"
 		<< "        if (ctx.data == nullptr)\n"
 		<< "            throw std::bad_alloc();\n"
 		<< "        return ctx;\n"
 		<< "    }\n\n"
 		<< "    inline void freeContext(Context& ctx) {\n"
-		<< "        std::free(ctx.data);\n"
+		<< "        if (ctx.device.device_type == kDLCPU)\n"
+		<< "            std::free(ctx.data);\n"
+		<< "        else if (ctx.data != nullptr)\n"
+		<< "            TVMBackendFreeWorkspace(ctx.device.device_type, ctx.device.device_id, ctx.data);\n"
 		<< "        ctx = Context{};\n"
 		<< "    }\n\n"
 		<< "    using Function = int (*)(void*, const TVMFFIAny*, int32_t, TVMFFIAny*);\n\n"
@@ -472,9 +491,45 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "        if (result.type_index != kTVMFFIInt)\n"
 		<< "            throw std::runtime_error(std::string{name} + \" did not return an integer\");\n"
 		<< "        return result.v_int64;\n"
+		<< "    }\n\n"
+		<< "    /// Loads the TVM system library `prefix` (the compiled object), which attaches its device code (e.g.\n"
+		<< "    /// CUDA kernels) to its functions; nothing to do on the CPU, but harmless.\n"
+		<< "    inline bool loadSystemLib(const char* prefix) {\n"
+		<< "        static constexpr char kName[] = \"ffi.SystemLib\";\n"
+		<< "        TVMFFIByteArray name{kName, sizeof(kName) - 1};\n"
+		<< "        TVMFFIObjectHandle fn = nullptr;\n"
+		<< "        if (TVMFFIFunctionGetGlobal(&name, &fn) != 0 || fn == nullptr)\n"
+		<< "            throw std::runtime_error(\"the TVM runtime has no ffi.SystemLib\");\n"
+		<< "        TVMFFIAny arg{};\n"
+		<< "        arg.type_index = kTVMFFIRawStr;\n"
+		<< "        arg.v_c_str = prefix;\n"
+		<< "        TVMFFIAny result{};\n"
+		<< "        result.type_index = kTVMFFINone;\n"
+		<< "        const int status = TVMFFIFunctionCall(fn, &arg, 1, &result);\n"
+		<< "        TVMFFIObjectDecRef(fn);\n"
+		<< "        if (status != 0) {\n"
+		<< "            std::string message = std::string{\"loading the system library \"} + prefix + \" failed\";\n"
+		<< "            TVMFFIObjectHandle error = nullptr;\n"
+		<< "            TVMFFIErrorMoveFromRaised(&error);\n"
+		<< "            if (error != nullptr) {\n"
+		<< "                const TVMFFIErrorCell* cell = TVMFFIErrorGetCellPtr(error);\n"
+		<< "                message += \": \" + std::string{cell->message.data, cell->message.size};\n"
+		<< "                TVMFFIObjectDecRef(error);\n"
+		<< "            }\n"
+		<< "            throw std::runtime_error(message);\n"
+		<< "        }\n"
+		<< "        if (result.type_index >= kTVMFFIStaticObjectBegin)\n"
+		<< "            TVMFFIObjectDecRef(result.v_obj); // the runtime keeps the library alive\n"
+		<< "        return true;\n"
 		<< "    }\n"
 		<< "} // namespace mdl_detail\n"
 		<< "#endif\n\n";
+	const std::string load = "mdl_lib_" + libraryPrefix + "load";
+	out << "/// Loads the compiled object (its TVM system library), once.\n"
+		<< "inline void " << load << "() {\n"
+		<< "    static const bool loaded = mdl_detail::loadSystemLib(\"" << libraryPrefix << "\");\n"
+		<< "    (void)loaded;\n"
+		<< "}\n\n";
 
 	// Group the exported functions by module (preserving order).
 	std::vector<std::vector<const ExportedFunction*>> modules;
@@ -488,7 +543,7 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 			it->push_back(&fn);
 	}
 	for (const auto& fns : modules)
-		detail::generateCppModule(out, fns);
+		detail::generateCppModule(out, fns, load);
 
 	out << "} // namespace mdl::models\n";
 }

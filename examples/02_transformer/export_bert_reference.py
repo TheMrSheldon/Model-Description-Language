@@ -6,6 +6,7 @@ Exports a randomly initialized Hugging Face BertModel (without pooler) for the c
     python export_bert_reference.py --base --out bert_base.safetensors            # BERT-base (vocabulary 30522)
     python export_bert_reference.py --lengths 7 4 --out data/bert_tiny_padded.safetensors  # padded sequences
     python export_bert_reference.py --classes 3 --out data/bert_tiny_cls.safetensors  # BertForSequenceClassification
+    python export_bert_reference.py --grad --out data/bert_tiny_grad.safetensors     # gradients (training)
 
 Keys: the MDL weight paths (float32), `input.ids`, `input.types`, `input.positions` (int32, [batch, seq]),
 `reference.output` (float32, [batch, seq, hidden]), `reference.pooled` (float32, [batch, hidden]), and with --lengths
@@ -13,6 +14,8 @@ Keys: the MDL weight paths (float32), `input.ids`, `input.types`, `input.positio
 With --classes, the model is BertForSequenceClassification (the MDL weight paths of BERT get the prefix `bert.`, plus
 `classifier.W/b`), and the file also contains `input.labels` (int32, [batch]), `reference.logits` (float32,
 [batch, classes]), and `reference.loss` (float32, the mean cross-entropy of the logits and labels).
+With --grad, the file also contains a cotangent `input.dy` of the output and the gradients of L = sum(output * dy)
+w.r.t. the weights used by the output (`grad.<MDL weight path>`, float32).
 """
 
 import argparse
@@ -22,18 +25,21 @@ from safetensors.torch import save_file
 from transformers import BertConfig, BertForSequenceClassification, BertModel
 
 
-def mdl_weights(model: BertModel, layers: int) -> dict[str, torch.Tensor]:
-    """Maps the Hugging Face parameters onto the MDL weight paths of `Bert` (Linear.W is [out, in] like HF)."""
-    hf = {name: p.detach().float().contiguous() for name, p in model.named_parameters()}
+def mdl_weights(model: BertModel, layers: int, grads: bool = False) -> dict[str, torch.Tensor]:
+    """Maps the Hugging Face parameters (or their gradients) onto the MDL weight paths of `Bert` (Linear.W is [out, in]
+    like HF); parameters without a gradient are left out."""
+    hf = {name: (p.grad if grads else p).detach().float().contiguous() for name, p in model.named_parameters()
+          if not grads or p.grad is not None}
     weights = {
         "embeddings.word.table": hf["embeddings.word_embeddings.weight"],
         "embeddings.position.table": hf["embeddings.position_embeddings.weight"],
         "embeddings.tokenType.table": hf["embeddings.token_type_embeddings.weight"],
         "embeddings.norm.gamma": hf["embeddings.LayerNorm.weight"],
         "embeddings.norm.beta": hf["embeddings.LayerNorm.bias"],
-        "pooler.dense.W": hf["pooler.dense.weight"],
-        "pooler.dense.b": hf["pooler.dense.bias"],
     }
+    if "pooler.dense.weight" in hf:
+        weights["pooler.dense.W"] = hf["pooler.dense.weight"]
+        weights["pooler.dense.b"] = hf["pooler.dense.bias"]
     linears = {
         "weightQuery": "attention.self.query",
         "weightKey": "attention.self.key",
@@ -68,6 +74,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lengths", type=int, nargs="+", help="valid length of each sequence (padding after it)")
     parser.add_argument("--classes", type=int, help="export BertForSequenceClassification with this many classes")
+    parser.add_argument("--grad", action="store_true", help="export the gradients of sum(output * dy)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -129,6 +136,15 @@ def main() -> None:
     tensors["input.positions"] = positions.to(torch.int32).contiguous()
     tensors["reference.output"] = output.float().contiguous()
     tensors["reference.pooled"] = result.pooler_output.float().contiguous()
+    if args.grad:
+        dy = torch.randn_like(output)
+        if mask is not None:  # (the masked function's output is zero at the padding: no cotangent there)
+            dy = dy * mask[:, :, None]
+        out = model(input_ids=ids, token_type_ids=types, position_ids=positions,
+                    attention_mask=None if mask is None else mask.to(torch.long)).last_hidden_state
+        (out * dy).sum().backward()
+        tensors["input.dy"] = dy.float().contiguous()
+        tensors.update({"grad." + path: g for path, g in mdl_weights(model, config.num_hidden_layers, True).items()})
     if mask is not None:
         tensors["input.mask"] = mask.contiguous()
     save_file(tensors, args.out)

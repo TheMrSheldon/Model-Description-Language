@@ -9,6 +9,9 @@
 #include <tvm/tirx/stmt.h>
 
 #include <exception>
+#include <optional>
+#include <stdexcept>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -89,14 +92,11 @@ namespace mdl::backend::tvm {
 			sch->Parallel(par);
 		}
 
-		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
-			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
-			Schedule sch = Schedule::Concrete(
-					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
-			);
-			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
-			// Fused kernels consist of one block per operation: inline the elementwise producers into their consumers,
-			// so that intermediates are not materialized (one pass over the data instead of one per operation).
+		/**
+		 * @brief Fused kernels consist of one block per operation: inlines the elementwise producers into their
+		 * consumers, so that intermediates are not materialized (one pass over the data instead of one per operation).
+		 */
+		void inlineElementwise(Schedule& sch, const SBlockRV& root) {
 			for (const auto& block : sch->GetChildBlocks(root)) {
 				bool spatialOnly = true;
 				for (const auto& iv : sch->Get(block)->iter_vars)
@@ -108,22 +108,43 @@ namespace mdl::backend::tvm {
 				} catch (const std::exception&) {
 				}
 			}
-			for (const auto& block : sch->GetChildBlocks(root)) {
-				size_t numSpatial = 0;
-				bool reductionSeen = false, spatialAfterReduction = false, other = false;
-				for (const auto& iv : sch->Get(block)->iter_vars) {
-					if (iv->iter_type == tirx::kDataPar) {
-						++numSpatial;
-						spatialAfterReduction |= reductionSeen;
-					} else if (iv->iter_type == tirx::kCommReduce) {
-						reductionSeen = true;
-					} else {
-						other = true;
-					}
+		}
+
+		/**
+		 * @brief (number of spatial iterators, whether there are reductions) of a simple loop nest: one loop per block
+		 * iterator, spatial iterators first; nullopt otherwise.
+		 */
+		std::optional<std::pair<size_t, bool>> shapeOf(const Schedule& sch, const SBlockRV& block) {
+			size_t numSpatial = 0;
+			bool reductionSeen = false, spatialAfterReduction = false, other = false;
+			for (const auto& iv : sch->Get(block)->iter_vars) {
+				if (iv->iter_type == tirx::kDataPar) {
+					++numSpatial;
+					spatialAfterReduction |= reductionSeen;
+				} else if (iv->iter_type == tirx::kCommReduce) {
+					reductionSeen = true;
+				} else {
+					other = true;
 				}
-				// Only simple loop nests (one loop per block iterator, spatial iterators first).
-				if (other || spatialAfterReduction || sch->GetLoops(block).size() != sch->Get(block)->iter_vars.size())
+			}
+			if (other || spatialAfterReduction || sch->GetLoops(block).size() != sch->Get(block)->iter_vars.size())
+				return std::nullopt;
+			return std::pair{numSpatial, reductionSeen};
+		}
+
+		tirx::PrimFunc schedule(const tirx::PrimFunc& func) {
+			auto mod = ::tvm::IRModule({{::tvm::GlobalVar("main"), func}});
+			Schedule sch = Schedule::Concrete(
+					mod, /*seed=*/0, /*debug_mask=*/0, ::tvm::s_tir::ScheduleErrorRenderLevel::kNone
+			);
+			SBlockRV root = sch->GetSBlock("root", ::tvm::ffi::String("main"));
+			inlineElementwise(sch, root);
+			for (const auto& block : sch->GetChildBlocks(root)) {
+				const auto shape = shapeOf(sch, block);
+				if (!shape)
 					continue;
+				const size_t numSpatial = shape->first;
+				const bool reductionSeen = shape->second;
 				if (reductionSeen)
 					scheduleReduction(sch, block, numSpatial);
 				else
@@ -131,6 +152,7 @@ namespace mdl::backend::tvm {
 			}
 			return sch->mod()->Lookup("main").as_or_throw<tirx::PrimFunc>();
 		}
+
 	} // namespace
 
 	::tvm::IRModule applyDefaultCPUSchedule(::tvm::IRModule mod) {
@@ -155,3 +177,4 @@ namespace mdl::backend::tvm {
 	}
 
 } // namespace mdl::backend::tvm
+

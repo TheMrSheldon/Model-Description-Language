@@ -75,6 +75,27 @@ namespace mdl::builtins {
 		STACK, /**< (x_0, ..., x_{n-1}): the tensors (of equal shapes) stacked along a new first dimension [n, ...] */
 		/** Quantization **/
 		DEQUANT, /**< (q, scales, zeros, format, group): the float weight [N, K] of a quantized one (see QuantFormat) */
+		/** Attention (formed by the attention pass from `softmax(scale * q @ k^T) @ v`; see passes/attention.hpp) **/
+		/**
+		 * (q [..., Sq, D], k [..., Skv, D], v [..., Skv, Dv], scale[, bias[, lengths]]): softmax(scale * q @ k^T + bias)
+		 * @ v (bias: of the scores' rank, broadcast to [..., Sq, Skv], e.g. a mask; lengths: if the bias is the mask of a
+		 * suffix mask of the queries' and keys' positions, its lengths, so that kernels can skip the masked suffix)
+		 */
+		ATTENTION,
+		ATTENTION_LSE,	 /**< (q, k, v, scale[, bias[, lengths]]): the log-sum-exp of the rows of the biased scores ([..., Sq], float32) */
+		ATTENTION_PROBS, /**< (q, k, v, scale[, bias[, lengths]]): the probabilities softmax(scale * q @ k^T + bias) */
+		/**
+		 * (q, k, v, scale, out, lse, probs, dy, which[, bias[, lengths]]): the gradient of ATTENTION w.r.t. q, k, or v (which: 0..2) for
+		 * the cotangent dy, from the forward's results: a fused kernel uses out and lse, the unfused operations probs
+		 * (the backend saves only what the selected computation reads).
+		 */
+		ATTENTION_GRAD,
+		/** Masks **/
+		/**
+		 * (lengths int[batch...], like [batch..., S, ...]): bool [batch..., S], true at the positions s < lengths[batch...]
+		 * (a suffix mask: the valid elements first, the masked ones after; e.g. padded sequences of different lengths)
+		 */
+		SUFFIX_MASK,
 
 		COUNT
 	};

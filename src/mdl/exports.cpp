@@ -6,6 +6,7 @@
 #include <mdl/compiler.hpp>
 #include <mdl/computegraphv2/function.hpp>
 #include <mdl/parserv2/compilation_unit.hpp>
+#include <mdl/passes/attention.hpp>
 #include <mdl/passes/masking.hpp>
 #include <mdl/passes/shapes.hpp>
 #include <mdl/utils/overload.hpp>
@@ -295,9 +296,26 @@ static void quantizeWeights(
 
 std::vector<ExportedFunction> mdl::exportedFunctions(
 		const CompilationUnit& unit, const ArgVals& argvals, unsigned ellipsisRank, const GradientRequest& gradients,
-		const std::vector<std::string>& masked, const std::map<std::string, unsigned>& inputRanks,
+		const std::vector<std::string>& maskedRequests, const std::map<std::string, unsigned>& requestedRanks,
 		const std::vector<QuantizationRule>& quantize, const std::vector<std::string>& exportOnly
 ) {
+	// Masked functions: `name` (an element mask) or `name=element|suffix` (see masking::MaskKind).
+	std::vector<std::string> masked;
+	std::map<std::string, masking::MaskKind> maskKinds;
+	for (const auto& request : maskedRequests) {
+		const auto eq = request.find('=');
+		const std::string name = request.substr(0, eq);
+		const std::string kind = eq == std::string::npos ? "element" : request.substr(eq + 1);
+		if (kind != "element" && kind != "suffix")
+			throw std::runtime_error(std::format("--mask {}: unknown mask kind '{}' (element or suffix)", request, kind));
+		masked.push_back(name);
+		maskKinds[name] = kind == "suffix" ? masking::MaskKind::suffix : masking::MaskKind::element;
+	}
+	// A suffix mask's lengths cover the dimensions of `...` but the last.
+	std::map<std::string, unsigned> inputRanks = requestedRanks;
+	if (std::ranges::any_of(maskKinds, [](const auto& k) { return k.second == masking::MaskKind::suffix; }))
+		inputRanks.try_emplace("lengths", ellipsisRank - 1);
+
 	std::vector<ExportedFunction> exports;
 	std::set<std::string> differentiated;	   // the requested gradient functions that some compiled module defines
 	std::set<std::string> exportedNames;	   // the names of --export that select a function
@@ -450,7 +468,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 			auto shapes = shapes::infer(*it->second, ellipsisRank, evaluate, knownInputs(*it->second));
 			if (!shapes)
 				throw std::runtime_error(moduleName + "." + shapes.error());
-			auto result = masking::apply(unit.graph(), *it->second, *shapes);
+			const auto kind = maskKinds.contains(name) ? maskKinds.at(name) : masking::MaskKind::element;
+			auto result = masking::apply(unit.graph(), *it->second, *shapes, kind);
 			if (!result)
 				throw std::runtime_error(moduleName + "." + result.error());
 			it->second = &unit.keep(std::move(result->function));
@@ -462,6 +481,16 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		std::map<std::string, std::string> quantizedFrom; // quantized weight -> its rule's description (diagnostics)
 		if (!quantize.empty())
 			quantizeWeights(unit, argvals, moduleName, quantize, decls, order, quantizedParts, quantizedFrom);
+
+		// Attention: `softmax(scale * q @ k^T) @ v` becomes the attention builtins (before differentiation, whose rule
+		// then yields the fused gradient; see passes/attention.hpp).
+		for (auto& [funcName, decl] : decls) {
+			FunctionDecl fused = attention::fuse(unit.graph(), *decl);
+			if (!std::ranges::equal(fused.outputs, decl->outputs, [](const auto& a, const auto& b) {
+					return &a.get() == &b.get();
+				}))
+				decl = &unit.keep(std::move(fused));
+		}
 
 		for (const auto& [funcName, decl] : decls)
 			if (!requested(funcName))

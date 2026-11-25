@@ -274,7 +274,8 @@ namespace mdl::shapes {
 				case FIDs::MAX:
 				case FIDs::MIN:
 				case FIDs::SUM:
-				case FIDs::MEAN: {
+				case FIDs::MEAN:
+				case FIDs::VAR: {
 					Shape s = arg(0);
 					if (s.empty())
 						fail("reduction of a scalar");
@@ -282,9 +283,6 @@ namespace mdl::shapes {
 						s.pop_back();
 					return s;
 				}
-				case FIDs::VAR:
-					arg(0); // (the shapes of the whole function are inferred)
-					return {};
 
 				case FIDs::RESHAPE:
 					return reshape(args, arg(0));
@@ -364,6 +362,53 @@ namespace mdl::shapes {
 					if (format == static_cast<int64_t>(builtins::QuantFormat::int4) ||
 						format == static_cast<int64_t>(builtins::QuantFormat::int4Asym))
 						s[1] = s[1] * Dim::constant(2);
+					return s;
+				}
+				case FIDs::ATTENTION: { // q [..., Sq, D], v [..., Skv, Dv] -> [..., Sq, Dv]
+					Shape s = arg(0);
+					const Shape& v = arg(2);
+					arg(1);
+					if (s.empty() || v.empty())
+						fail("attention of a vector");
+					if (!s.back().group && !v.back().group)
+						s.back() = v.back();
+					return s;
+				}
+				case FIDs::ATTENTION_LSE: {
+					Shape s = arg(0);
+					if (s.empty())
+						fail("attention of a vector");
+					if (!s.back().group)
+						s.pop_back();
+					return s;
+				}
+				case FIDs::ATTENTION_PROBS: { // [..., Sq, Skv]
+					Shape s = arg(0);
+					const Shape& k = arg(1);
+					if (s.size() < 2 || k.size() < 2)
+						fail("attention of a vector");
+					if (!s.back().group && !k[k.size() - 2].group)
+						s.back() = k[k.size() - 2];
+					return s;
+				}
+				case FIDs::ATTENTION_GRAD:
+					return arg(static_cast<size_t>(integer(args.at(8).get())));
+				case FIDs::SUFFIX_MASK: { // lengths [batch...], like [batch..., S, ...] -> [batch..., S]
+					const Shape& lengths = arg(0);
+					const Shape& like = arg(1);
+					if (std::any_of(lengths.begin(), lengths.end(), [](const Dim& d) { return d.group; }) ||
+						std::any_of(like.begin(), like.end(), [](const Dim& d) { return d.group; })) {
+						if (!symbolic)
+							fail("suffix mask of unknown rank");
+						return Shape{Dim::ellipsis()};
+					}
+					if (like.size() <= lengths.size())
+						fail("suffix mask: the reference has no dimension after the lengths' dimensions");
+					Shape s(like.begin(), like.begin() + static_cast<std::ptrdiff_t>(lengths.size() + 1));
+					if (!symbolic && Shape(s.begin(), s.end() - 1) != lengths)
+						mismatched(std::format(
+								"suffix mask: the lengths {} are not the leading dimensions of {}", str(lengths), str(like)
+						));
 					return s;
 				}
 				case FIDs::STACK: {
@@ -613,6 +658,10 @@ namespace mdl::shapes {
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::SCATTER_ADD_ROWS:
 				return of(2).value_or(PrimitiveType::float32);
+			case FIDs::ATTENTION_LSE: // (row statistics in full precision)
+				return PrimitiveType::float32;
+			case FIDs::SUFFIX_MASK:
+				return PrimitiveType::boolean;
 			case FIDs::DEQUANT: // the type of the scales
 				return of(1).value_or(PrimitiveType::float32);
 			case FIDs::UNSELECT_LIKE:

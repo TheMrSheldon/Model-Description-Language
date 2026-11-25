@@ -76,11 +76,22 @@ TEST_CASE("gradients can be differentiated again (higher order)", "[autodiff]") 
 	CHECK(second->parameters.size() == grad->parameters.size() + grad->outputs.size());
 }
 
-TEST_CASE("builtins without gradient rule are reported", "[autodiff]") {
+TEST_CASE("variance has a gradient rule", "[autodiff]") {
 	auto unit = parseOrFail(R"(
 		module M[] {
 			W: float[4]
 			float[...] forward(x: float[..., 4]) => __builtin_var(x * W, 1);
+		}
+	)");
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	CHECK(autodiff::vjp(unit.graph(), m.functions.at("forward"), weightPaths(m)).has_value());
+}
+
+TEST_CASE("builtins without gradient rule are reported", "[autodiff]") {
+	auto unit = parseOrFail(R"(
+		module M[] {
+			W: float[4]
+			float[...] forward(x: float[..., 4]) => x @ W; // (matrix-vector products have no rule yet)
 		}
 	)");
 	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));

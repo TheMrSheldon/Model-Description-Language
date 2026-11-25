@@ -29,13 +29,25 @@ namespace mdl::kernels::expr {
 			integer,   ///< a literal (value)
 			dtypeName, ///< a literal element type (name), e.g. float32
 			list,	   ///< `[a, b, ...]` of integers (a shape) or element types (for `in`)
-			access,	   ///< `$capture.field` (name = capture, field = shape, ndim, dtype, data, or `attr.NAME` (real))
+			/**
+			 * `$capture.field`: of a tensor shape, ndim, dtype, data (a pointer; NULL if the capture is not a tensor),
+			 * is_tensor; of a scalar value (integer) or real; of a shape value (e.g. a permutation) values; of an
+			 * operator `attr.NAME` (real). `$out` (or `$out0`, `$out1`, ... for several results): the result.
+			 */
+			access,
 			unary,	   ///< op: `-`, `not`
 			binary,	   ///< op: + - * // % == != < <= > >= and or
 			in,		   ///< args[0] in args[1] (a list)
 			index,	   ///< args[0][args[1]] of a shape (negative indices count from the end)
 			slice,	   ///< args[0][from:to] of a shape (absent bounds: hasFrom/hasTo false)
-			call,	   ///< name(args...): prod(shape), len(shape)
+			/**
+			 * name(args...): prod(shape), len(shape), strides(shape) (the row-major strides of a contiguous tensor),
+			 * permute(list, perm) (entry i is list[perm[i]]), unpermute(list, perm) (its inverse); an empty permutation is
+			 * the identity
+			 */
+			call,
+			conditional, ///< args[1] if args[0] else args[2] (only the chosen branch is evaluated if args[0] is constant)
+			null,		 ///< the null pointer (e.g. `null if $x.is_tensor else $y.data`)
 		};
 		Kind kind;
 		Type type;

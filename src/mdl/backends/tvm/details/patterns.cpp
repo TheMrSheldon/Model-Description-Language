@@ -189,12 +189,18 @@ namespace mdl::backend::tvm {
 			auto x = Wildcard(), gamma = Wildcard(), beta = Wildcard();
 			auto n1 = Wildcard(), n2 = Wildcard(), eps = Wildcard();
 			auto sumX = IsOp("relax.sum")(x);
-			auto mu = IsOp("relax.reshape")(IsOp("relax.divide")(sumX, n1), Wildcard());
+			auto meanX = IsOp("relax.divide")(sumX, n1);
+			auto mu = IsOp("relax.reshape")(meanX, Wildcard());
 			auto xc = IsOp("relax.subtract")(x, mu);
-			auto sumSq = IsOp("relax.sum")(IsOp("relax.multiply")(xc, xc));
-			auto var = IsOp("relax.reshape")(IsOp("relax.divide")(sumSq, n2), Wildcard());
-			auto s = IsOp("relax.rsqrt")(IsOp("relax.add")(var, eps));
-			DFPattern pattern = IsOp("relax.add")(IsOp("relax.multiply")(IsOp("relax.multiply")(xc, s), gamma), beta);
+			auto sq = IsOp("relax.multiply")(xc, xc);
+			auto sumSq = IsOp("relax.sum")(sq);
+			auto meanSq = IsOp("relax.divide")(sumSq, n2);
+			auto var = IsOp("relax.reshape")(meanSq, Wildcard());
+			auto varEps = IsOp("relax.add")(var, eps);
+			auto s = IsOp("relax.rsqrt")(varEps);
+			auto xhat = IsOp("relax.multiply")(xc, s);
+			auto scaled = IsOp("relax.multiply")(xhat, gamma);
+			DFPattern pattern = IsOp("relax.add")(scaled, beta);
 			RewriterFn rewriter = [=](Expr call, Map<DFPattern, Expr> m, const Bindings& bindings) -> Expr {
 				auto at = [&](const DFPattern& p) { return resolve(m.at(p), bindings); };
 				const Expr& in = m.at(x);

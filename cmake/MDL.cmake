@@ -12,6 +12,7 @@ Compile MDL models into object files that can be linked into C++ programs.
                   SOURCE <model.dlm>
                   [CONFIG <model.yml>]
                   [BUILD <name>]
+                  [TARGET <target>]
                   [SHARED]
                   [KERNELS packages|none]
                   [KERNEL_PACKAGES <name>...]
@@ -28,9 +29,11 @@ Compile MDL models into object files that can be linked into C++ programs.
 
   ``CONFIG``       hyperparameter values and build settings (``mdlc --arg-vals``, see docs/user/build-config.md).
   ``BUILD``        use the build settings ``builds.<name>`` of ``CONFIG`` (``mdlc --build``).
+  ``TARGET``       the device to compile for (``mdlc --target``, e.g. ``cuda -arch=sm_80``; default: the CPU). The
+                   runtime of the target (``mdl_target_<kind>``, e.g. TVM's CUDA runtime) is linked.
   ``SHARED``       build a shared library (e.g., to load it from Python with ``tvm_ffi.load_module``) instead of a
                    static one.
-  ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if it is built) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
+  ``KERNELS``      ``packages`` (default: the kernel packages, including the oneDNN package if it is built and the target is the CPU, and the cuBLAS package for CUDA targets) or ``none`` (TVM-generated kernels only). (``onednn`` and ``tvm`` are former
                    names.)
   ``KERNEL_PACKAGES`` kernel packages built with ``mdl_kernel_package`` that the model may use (see docs/dev/spec/kernel-packages.md);
                    they are linked into ``<target>``. Without it, the model uses no kernel packages.
@@ -128,7 +131,7 @@ function(mdl_import_kernel_package package)
 endfunction()
 
 function(mdl_add_model target)
-	cmake_parse_arguments(PARSE_ARGV 1 ARG "SHARED" "SOURCE;CONFIG;KERNELS;BUILD" "IMPORT_DIRS;BINDINGS;OPTIONS;KERNEL_PACKAGES")
+	cmake_parse_arguments(PARSE_ARGV 1 ARG "SHARED" "SOURCE;CONFIG;KERNELS;BUILD;TARGET" "IMPORT_DIRS;BINDINGS;OPTIONS;KERNEL_PACKAGES")
 	if(NOT ARG_SOURCE)
 		message(FATAL_ERROR "mdl_add_model(${target}): SOURCE is required")
 	endif()
@@ -150,15 +153,29 @@ function(mdl_add_model target)
 	if(ARG_BUILD)
 		list(APPEND args --build "${ARG_BUILD}")
 	endif()
+	if(ARG_TARGET)
+		list(APPEND args --target "${ARG_TARGET}")
+	endif()
 	# The kernels: as requested; the kernel packages by default (with the oneDNN package if it is built).
 	set(_none OFF)
 	if(ARG_KERNELS STREQUAL "none" OR ARG_KERNELS STREQUAL "tvm")
 		set(_none ON)
 	endif()
-	# The oneDNN kernels are a kernel package (kernels/onednn): used whenever it is built.
-	if(NOT _none AND TARGET mdl_kernel_package_onednn AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
+	# The oneDNN kernels are a kernel package (kernels/onednn): used whenever it is built, for CPU targets.
+	set(_cpu ON)
+	if(ARG_TARGET AND NOT ARG_TARGET MATCHES "^llvm")
+		set(_cpu OFF)
+	endif()
+	if(NOT _none AND _cpu AND TARGET mdl_kernel_package_onednn AND NOT "onednn" IN_LIST ARG_KERNEL_PACKAGES)
 		list(APPEND ARG_KERNEL_PACKAGES onednn)
 	endif()
+	# The cuBLAS and cuDNN kernels (kernels/cublas, kernels/cudnn), for CUDA targets.
+	foreach(package IN ITEMS cublas cudnn)
+		if(NOT _none AND ARG_TARGET MATCHES "^cuda" AND TARGET mdl_kernel_package_${package}
+				AND NOT "${package}" IN_LIST ARG_KERNEL_PACKAGES)
+			list(APPEND ARG_KERNEL_PACKAGES ${package})
+		endif()
+	endforeach()
 	# No package to link: none may be used (an unlisted package found elsewhere could not be linked).
 	if(NOT ARG_KERNEL_PACKAGES)
 		set(_none ON)
@@ -234,4 +251,13 @@ function(mdl_add_model target)
 	foreach(package IN LISTS ARG_KERNEL_PACKAGES)
 		target_link_libraries(${target} PUBLIC mdl_kernel_package_${package})
 	endforeach()
+	# The runtime of the target (the first word of TARGET, e.g. cuda).
+	if(ARG_TARGET)
+		string(REGEX MATCH "^[^ ]+" kind "${ARG_TARGET}")
+		if(TARGET mdl_target_${kind})
+			target_link_libraries(${target} PUBLIC mdl_target_${kind})
+		elseif(NOT kind STREQUAL "llvm")
+			message(FATAL_ERROR "mdl_add_model(${target}): target ${kind} is not available (MDL_ENABLE_CUDA?)")
+		endif()
+	endif()
 endfunction()

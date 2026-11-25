@@ -65,7 +65,7 @@ namespace mdl::backend::tvm {
 	 * the inputs (the PrimFunc's parameters: inputs, variables, output).
 	 */
 	inline Expr
-	callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const TensorType& out,
+	callTir(const ::tvm::GlobalVar& gv, const Array<Expr>& inputs, const ::tvm::Type& out,
 			const Array<::tvm::Var>& vars) {
 		static const auto& op = ::tvm::Op::Get("relax.call_tir");
 		Array<Expr> args = inputs;
@@ -88,11 +88,33 @@ namespace mdl::backend::tvm {
 			return buffer(*shape, tensorInfo(arg)->dtype.value(), argName, /*write=*/false);
 		}
 
+		/** @brief Adds an output (several: the call's result is a tuple); returns its pointer expression. */
 		Expr output(const Array<PrimExpr>& shape, ::tvm::PrimType dtype) {
-			outInfo = TensorType(ShapeExpr(shape), dtype);
-			auto ptr = buffer(shape, dtype, "out", /*write=*/true);
-			outputBuffer = params.back();
+			outInfos.push_back(TensorType(ShapeExpr(shape), dtype));
+			auto ptr = buffer(shape, dtype, outInfos.size() == 1 ? "out" : "out" + std::to_string(outInfos.size() - 1), true);
+			outputBuffers.push_back(params.back());
 			return ptr;
+		}
+
+		/**
+		 * @brief An int64 array with @p values on the caller's stack (an `int64[]` argument, e.g. the shape of a strided
+		 * view); returns its pointer expression.
+		 */
+		Expr array(const Array<PrimExpr>& values) {
+			const auto i64 = ::tvm::PrimType::Int(64);
+			const auto n = ::tvm::IntImm(i64, std::max<int64_t>(static_cast<int64_t>(values.size()), 1));
+			auto buffer = tirx::BufferVar(
+					"array" + std::to_string(prologue.size()),
+					tirx::BufferType("", i64, {n}, {}, ::tvm::IntImm(i64, 0), 0, 0)
+			);
+			prologue.push_back(tirx::DeclBuffer(
+					buffer, Call(::tvm::PointerType(i64), tirx::builtin::tvm_stack_alloca(), {::tvm::StringImm("shape"), n})
+			));
+			for (size_t i = 0; i < values.size(); ++i)
+				prologue.push_back(tirx::BufferStore(
+						buffer, ::tvm::prim::cast(i64, values[i]), {::tvm::IntImm(i64, static_cast<int64_t>(i))}
+				));
+			return buffer.data();
 		}
 
 		/** @param scalars the integer arguments (their symbolic variables become parameters if no buffer binds them) */
@@ -100,11 +122,11 @@ namespace mdl::backend::tvm {
 			// The parameters: the inputs, the unbound symbolic variables, then the output (destination passing style).
 			std::vector<::tvm::Var> ordered;
 			for (const auto& p : params)
-				if (!p.same_as(outputBuffer))
+				if (std::none_of(outputBuffers.begin(), outputBuffers.end(), [&](const auto& o) { return o.same_as(p); }))
 					ordered.push_back(p);
 			auto vars = unboundVars(shapes, scalars);
 			ordered.insert(ordered.end(), vars.begin(), vars.end());
-			ordered.push_back(outputBuffer);
+			ordered.insert(ordered.end(), outputBuffers.begin(), outputBuffers.end());
 			Array<Expr> callArgs{::tvm::StringImm(kernel)};
 			for (auto& arg : kernelArgs)
 				callArgs.push_back(std::move(arg));
@@ -112,13 +134,20 @@ namespace mdl::backend::tvm {
 			auto check = tirx::AssertStmt(
 					call == 0, ::tvm::StringImm("RuntimeError"), {::tvm::StringImm("mdl kernel " + kernel + " failed")}
 			);
+			std::vector<tirx::Stmt> stmts = prologue;
+			stmts.push_back(check);
 			// Wrap the call in a root block like any other (TE-generated) PrimFunc; Relax analyses expect it.
-			auto body = ::tvm::s_tir::SBlockRealize({}, ::tvm::IntImm::Bool(true), ::tvm::s_tir::SBlock("root", check));
+			auto body = ::tvm::s_tir::SBlockRealize(
+					{}, ::tvm::IntImm::Bool(true),
+					::tvm::s_tir::SBlock("root", tirx::SeqStmt::Flatten(Array<tirx::Stmt>(stmts.begin(), stmts.end())))
+			);
 			auto func = tirx::PrimFunc(Array<::tvm::Var>(ordered.begin(), ordered.end()), body, ::tvm::VoidType());
 			// Opaque (kOpaque = 8): extern calls must not be fused with other kernels.
 			func = ::tvm::WithAttr(std::move(func), "op_pattern", 8);
 			auto gv = bb->AddFunction(func, kernel);
-			return callTir(gv, inputs, outInfo.value(), vars);
+			if (outInfos.size() == 1)
+				return callTir(gv, inputs, outInfos.front(), vars);
+			return callTir(gv, inputs, ::tvm::TupleType(Array<::tvm::Type>(outInfos.begin(), outInfos.end())), vars);
 		}
 
 	private:
@@ -127,8 +156,9 @@ namespace mdl::backend::tvm {
 		Array<Expr> inputs;
 		std::vector<::tvm::Var> params; ///< the buffers
 		std::vector<Array<PrimExpr>> shapes;
-		std::optional<TensorType> outInfo;
-		::tvm::Var outputBuffer;
+		std::vector<tirx::Stmt> prologue; ///< the arrays on the stack
+		std::vector<TensorType> outInfos;
+		std::vector<::tvm::Var> outputBuffers;
 
 		Expr buffer(const Array<PrimExpr>& shape, ::tvm::PrimType dtype, const std::string& n, bool write) {
 			auto buf = tirx::decl_buffer(shape, dtype, n);

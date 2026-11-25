@@ -47,7 +47,7 @@ static std::map<std::string, std::any> initBuiltins() {
 			{"__builtin_rsqrt", FunctionIDs::RSQRT},
 			{"__builtin_log", FunctionIDs::LOG},
 			{"__builtin_tanh", FunctionIDs::TANH},
-			{"__builtin_var", FunctionIDs::VAR, {{"dof", PrimitiveType::uint}}},
+			{"__builtin_var", FunctionIDs::VAR, {{"dof", PrimitiveType::uint}}, true},
 			{"__builtin_sum_like", FunctionIDs::COLLAPSE_SUM_LIKE, {{"like", tensor}}, true},
 			{"__builtin_broadcast_like", FunctionIDs::BROADCAST_LIKE, {{"like", tensor}}, true},
 			{"__builtin_stop_gradient", FunctionIDs::STOP_GRADIENT},

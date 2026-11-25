@@ -38,6 +38,7 @@ namespace mdl::kernels {
 		std::string abi;  ///< gnu, msvc, darwin
 		std::string
 				libc; ///< a requirement like `>=2.28` (artifacts), or a version like `2.39` (the host); may be empty
+		std::string deviceArch; ///< the device of a compilation target (e.g. sm_80); empty: the CPU
 
 		std::string str() const; ///< e.g. `linux x86_64 gnu libc>=2.28`
 	};
@@ -100,7 +101,7 @@ namespace mdl::kernels {
 
 	/** @brief An argument of the C signature of an implementation. */
 	struct Argument {
-		std::string type;	///< pointer, int64, int32, float32, float64
+		std::string type;	///< pointer, int64, int32, float32, float64, int64[] (a pointer to the values of a shape)
 		std::string access; ///< pointers: read, write, readwrite
 		std::string value;	///< an expression over the match, e.g. `$x.data`, `prod($x.shape[:-1])`
 		int64_t align = 0;	///< pointers: the required alignment in bytes (0: none)
@@ -113,7 +114,6 @@ namespace mdl::kernels {
 		int64_t priority = 0;
 		std::string symbol;
 		std::string abi = "c";
-		std::string adapter; ///< a named argument adapter of the compiler (instead of `arguments`), e.g. matmul-strided
 		std::vector<Argument> arguments;
 		std::string returns = "int32";							  ///< the return type; nonzero is an error
 		std::string aliasing = "none";							  ///< or `out=<capture>` (in place)
@@ -185,6 +185,13 @@ namespace mdl::kernels {
 
 	/** @brief Whether an artifact for @p required runs on @p host (also checks a `libc: >=x.y` requirement). */
 	bool compatible(const Platform& required, const Platform& host);
+
+	/**
+	 * @brief Whether @p artifact is for the device of @p target: CPU artifacts (no device-arch) only for CPU targets,
+	 * device artifacts only for that device. A cubin runs on the same major architecture with an equal or higher minor
+	 * one (sm_80 on sm_86, not on sm_90); PTX and libraries on equal or higher architectures.
+	 */
+	bool forDevice(const Artifact& artifact, const Platform& target);
 
 } // namespace mdl::kernels
 

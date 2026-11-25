@@ -1,4 +1,5 @@
 // Kernel directories, package discovery, and platform compatibility (see docs/dev/spec/kernel-packages.md).
+#include <optional>
 #include <mdl/kernels.hpp>
 #include <mdl/utils/platform.hpp>
 
@@ -215,6 +216,32 @@ namespace mdl::kernels {
 				return false;
 		}
 		return true;
+	}
+
+	namespace {
+		/** @brief sm_XY as (X, Y); nullopt if not of that form. */
+		std::optional<std::pair<int, int>> smVersion(const std::string& arch) {
+			if (!arch.starts_with("sm_") || arch.size() < 5 ||
+				arch.find_first_not_of("0123456789", 3) < arch.size() - 1) // sm_90a: a trailing letter
+				return std::nullopt;
+			const std::string digits = arch.substr(3, arch.find_first_not_of("0123456789", 3) - 3);
+			if (digits.size() < 2)
+				return std::nullopt;
+			return std::pair{std::stoi(digits.substr(0, digits.size() - 1)), digits.back() - '0'};
+		}
+	} // namespace
+
+	bool forDevice(const Artifact& artifact, const Platform& target) {
+		if (artifact.deviceArch.empty() || target.deviceArch.empty())
+			return artifact.deviceArch.empty() && target.deviceArch.empty();
+		if (artifact.deviceArch == target.deviceArch)
+			return true;
+		const auto required = smVersion(artifact.deviceArch), device = smVersion(target.deviceArch);
+		if (!required || !device)
+			return false;
+		if (artifact.kind == Artifact::Kind::cubin)
+			return required->first == device->first && required->second <= device->second;
+		return *required <= *device;
 	}
 
 } // namespace mdl::kernels
