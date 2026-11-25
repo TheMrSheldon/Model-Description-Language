@@ -369,3 +369,52 @@ TEST_CASE("the gradient of stacked slots selects the slices of the cotangent", "
 	REQUIRE(grad.has_value());
 	CHECK(countReachable(*grad, builtins::FunctionIDs::SELECT) == 2);
 }
+
+namespace {
+	/** @brief Whether a residual of @p parts is a value computed by @p id. */
+	bool savesResult(const autodiff::Split& parts, builtins::FunctionIDs id) {
+		for (size_t i = parts.train.outputs.size() - parts.numResiduals; i < parts.train.outputs.size(); ++i)
+			if (const auto* inv = std::get_if<InvocationNode>(&parts.train.outputs[i].get()); inv && inv->id == id)
+				return true;
+		return false;
+	}
+
+	constexpr const char* mlp = R"(
+		module M[] {
+			W1: float[8, 4]
+			W2: float[4, 8]
+			float[..., 4] forward(x: float[..., 4]) {
+				auto h = x @ W1.T();
+				return (h * __builtin_erf(h)) @ W2.T(); // (GELU-like: its derivative needs h, not its result)
+			}
+		}
+	)";
+} // namespace
+
+TEST_CASE("a value that a matrix product of the backward pass reads is saved, not recomputed", "[autodiff][split]") {
+	// h * erf(h) is the operand of the weight gradient of W2: the forward pass writes it anyway (for its matrix
+	// product), so saving it costs no extra write, while recomputing it would write it again in the backward pass.
+	auto unit = parseOrFail(mlp);
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	const auto& forward = m.functions.at("forward");
+	auto grad = autodiff::vjp(unit.graph(), forward, weightPaths(m));
+	REQUIRE(grad.has_value());
+	auto parts = autodiff::split(unit.graph(), *grad, forward.outputs.size());
+	REQUIRE(parts.has_value());
+	CHECK(savesResult(*parts, builtins::FunctionIDs::TENSOR_PROD));
+}
+
+TEST_CASE("over the memory budget, values are recomputed instead of saved", "[autodiff][split]") {
+	auto unit = parseOrFail(mlp);
+	const auto& m = std::get<ModuleType>(unit.definitions.at("M"));
+	const auto& forward = m.functions.at("forward");
+	auto grad = autodiff::vjp(unit.graph(), forward, weightPaths(m));
+	REQUIRE(grad.has_value());
+	autodiff::SplitOptions options;
+	options.memoryBudget = 0;
+	auto parts = autodiff::split(unit.graph(), *grad, forward.outputs.size(), options);
+	REQUIRE(parts.has_value());
+	// (x and the matrix product h are saved; h * erf(h) is recomputed from h)
+	CHECK_FALSE(savesResult(*parts, builtins::FunctionIDs::TENSOR_PROD));
+	CHECK(savesResult(*parts, builtins::FunctionIDs::TENSOR_DOT));
+}

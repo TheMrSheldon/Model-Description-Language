@@ -103,15 +103,17 @@ namespace mdl::backend::tvm {
 			bool hasBias() const { return tensorInfo(bias) != nullptr; }
 
 			/** @brief The tensor operands (with their argument positions and permutation positions). */
-			std::vector<Operand*> operands() { return backward ? std::vector<Operand*>{&q, &k, &v, &o, &dy} : std::vector<Operand*>{&q, &k, &v}; }
+			std::vector<Operand*> operands() {
+				return backward ? std::vector<Operand*>{&q, &k, &v, &o, &dy} : std::vector<Operand*>{&q, &k, &v};
+			}
 
 			Call make() const {
 				const Expr s = ::tvm::FloatImm(::tvm::PrimType::Float(64), scale);
 				if (!backward)
 					return Call(
 							::tvm::Type::Missing(), attentionOp(),
-							{q.x, k.x, v.x, s, permExpr(q.perm), permExpr(k.perm), permExpr(v.perm), permExpr(outPerms[0]),
-							 intArg(withLse ? 1 : 0), bias, lengths}
+							{q.x, k.x, v.x, s, permExpr(q.perm), permExpr(k.perm), permExpr(v.perm),
+							 permExpr(outPerms[0]), intArg(withLse ? 1 : 0), bias, lengths}
 					);
 				return Call(
 						::tvm::Type::Missing(), attentionGradOp(),
@@ -228,7 +230,8 @@ namespace mdl::backend::tvm {
 					const auto* get = value.as<::tvm::TupleGetItemNode>();
 					const auto* tuple = get ? get->tuple.as<::tvm::VarNode>() : nullptr;
 					auto producer = tuple ? analysis.values.find(tuple) : analysis.values.end();
-					const auto* call = producer == analysis.values.end() ? nullptr : producer->second.as<::tvm::CallNode>();
+					const auto* call =
+							producer == analysis.values.end() ? nullptr : producer->second.as<::tvm::CallNode>();
 					if (!isAttention(call))
 						continue;
 					if (call->op.same_as(attentionOp()) && get->index == 1)
@@ -334,7 +337,8 @@ namespace mdl::backend::tvm {
 				auto emit = [&](const Expr& e, const char* name) { return builder_->Emit(e, name); };
 				const ::tvm::ffi::Optional<Array<int64_t>> last = Array<int64_t>{-1};
 				if (!a.backward) {
-					Expr scores = emit(makeMatmul(a.q.x, a.k.x, a.q.perm, compose(swap, a.k.perm), {}, a.scale), "scores");
+					Expr scores =
+							emit(makeMatmul(a.q.x, a.k.x, a.q.perm, compose(swap, a.k.perm), {}, a.scale), "scores");
 					if (a.hasBias())
 						scores = emit(relaxOp("relax.op.add", scores, a.bias), "biased");
 					const Expr p = emit(relaxOp("relax.op.nn.softmax", scores, -1), "probs");
@@ -344,18 +348,18 @@ namespace mdl::backend::tvm {
 						s32 = emit(relaxOp("relax.op.astype", scores, ::tvm::PrimType::Float(32)->dtype), "s32");
 					const Expr m = emit(relaxOp("relax.op.max", s32, last, true), "m");
 					const Expr e = emit(relaxOp("relax.op.exp", relaxOp("relax.op.subtract", s32, m)), "e");
-					const Expr lse = emit(
-							relaxOp("relax.op.add", relaxOp("relax.op.max", s32, last, false),
-									relaxOp("relax.op.log", relaxOp("relax.op.sum", e, last, false))),
-							"lse"
-					);
+					const Expr lse =
+							emit(relaxOp("relax.op.add", relaxOp("relax.op.max", s32, last, false),
+										 relaxOp("relax.op.log", relaxOp("relax.op.sum", e, last, false))),
+								 "lse");
 					return ::tvm::relax::Tuple({out, lse});
 				}
 				const Expr& p = a.probs; // (saved by the forward pass)
 				// dV = P^T dO, dP = dO V^T, dS = P * (dP - rowsum(dP * P)), dQ = scale dS K, dK = scale dS^T Q.
 				const Expr dv = emit(makeMatmul(p, a.dy.x, swap, a.dy.perm, a.outPerms[2], 1.0), "dv");
 				const Expr dp = emit(makeMatmul(a.dy.x, a.v.x, a.dy.perm, compose(swap, a.v.perm), {}, 1.0), "dp");
-				const Expr rowsum = emit(relaxOp("relax.op.sum", relaxOp("relax.op.multiply", dp, p), last, true), "rowsum");
+				const Expr rowsum =
+						emit(relaxOp("relax.op.sum", relaxOp("relax.op.multiply", dp, p), last, true), "rowsum");
 				const Expr ds = emit(relaxOp("relax.op.multiply", p, relaxOp("relax.op.subtract", dp, rowsum)), "ds");
 				const Expr dq = emit(makeMatmul(ds, a.k.x, {}, a.k.perm, a.outPerms[0], a.scale), "dq");
 				const Expr dk = emit(makeMatmul(ds, a.q.x, swap, a.q.perm, a.outPerms[1], a.scale), "dk");
@@ -363,12 +367,13 @@ namespace mdl::backend::tvm {
 			}
 		};
 
-		::tvm::transform::Pass functionPass(
-				std::function<::tvm::relax::Function(const ::tvm::relax::Function&)> f, const char* name
-		) {
+		::tvm::transform::Pass
+		functionPass(std::function<::tvm::relax::Function(const ::tvm::relax::Function&)> f, const char* name) {
 			return RT::CreateFunctionPass(
-					[f](::tvm::relax::Function func, ::tvm::IRModule, ::tvm::transform::PassContext) { return f(func); }, 0,
-					name, {}
+					[f](::tvm::relax::Function func, ::tvm::IRModule, ::tvm::transform::PassContext) {
+						return f(func);
+					},
+					0, name, {}
 			);
 		}
 
@@ -380,8 +385,8 @@ namespace mdl::backend::tvm {
 		const Expr none = permExpr({});
 		return Call(
 				::tvm::Type::Missing(), attentionOp(),
-				{std::move(q), std::move(k), std::move(v), ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none, none,
-				 none, none, intArg(1), bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
+				{std::move(q), std::move(k), std::move(v), ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none,
+				 none, none, none, intArg(1), bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
 		);
 	}
 
@@ -392,9 +397,9 @@ namespace mdl::backend::tvm {
 		const Expr none = permExpr({});
 		return Call(
 				::tvm::Type::Missing(), attentionGradOp(),
-				{std::move(q), std::move(k), std::move(v), std::move(out), std::move(lse), std::move(probs), std::move(dy),
-				 ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none, none, none, none, none, none, none, none,
-				 bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
+				{std::move(q), std::move(k), std::move(v), std::move(out), std::move(lse), std::move(probs),
+				 std::move(dy), ::tvm::FloatImm(::tvm::PrimType::Float(64), scale), none, none, none, none, none, none,
+				 none, none, bias ? *bias : intArg(0), lengths ? *lengths : intArg(0)}
 		);
 	}
 
@@ -409,10 +414,13 @@ namespace mdl::backend::tvm {
 			.add_argument("perm_v", "ShapeExpr", "The permutation of v (empty: none).")
 			.add_argument("perm_out", "ShapeExpr", "The permutation of the result (empty: none).")
 			.add_argument("with_lse", "PrimValue", "Whether the row statistics are used.")
-			.add_argument("bias", "Tensor | PrimValue", "Added to the scores [..., Sq, Skv] (broadcast), or PrimValue(0).")
+			.add_argument(
+					"bias", "Tensor | PrimValue", "Added to the scores [..., Sq, Skv] (broadcast), or PrimValue(0)."
+			)
 			.add_argument(
 					"lengths", "Tensor | PrimValue",
-					"If the bias is the mask of a suffix mask (of the queries' and keys' positions): its lengths [batch], "
+					"If the bias is the mask of a suffix mask (of the queries' and keys' positions): its lengths "
+					"[batch], "
 					"else PrimValue(0)."
 			)
 			.set_attr<::tvm::relax::FInferType>("FInferType", inferAttention)
@@ -454,7 +462,9 @@ namespace mdl::backend::tvm {
 
 	::tvm::transform::Pass expandAttention() {
 		return functionPass(
-				[](const ::tvm::relax::Function& f) { return Expand().VisitExpr(f).as_or_throw<::tvm::relax::Function>(); },
+				[](const ::tvm::relax::Function& f) {
+					return Expand().VisitExpr(f).as_or_throw<::tvm::relax::Function>();
+				},
 				"mdl.ExpandAttention"
 		);
 	}

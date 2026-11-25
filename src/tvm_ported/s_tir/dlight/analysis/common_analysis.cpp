@@ -93,12 +93,16 @@ namespace mdl::tvm_ported::dlight::analysis {
 		std::vector<SBlockInfo> blocks;
 		for (size_t b = 0; b < blocks_rv.size(); ++b) {
 			SBlockInfo info{
-					.name = sch->Get(blocks_rv[b])->name_hint, .iters = {}, .block_rv = blocks_rv[b],
+					.name = sch->Get(blocks_rv[b])->name_hint,
+					.iters = {},
+					.block_rv = blocks_rv[b],
 					.reduction_block = static_cast<int64_t>(is_reduction[b]->value) != 0
 			};
 			for (size_t i = 0; i < loops[b].size() && i < iters[b].size(); ++i)
 				info.iters.push_back(IterInfo{
-						.kind = iter_kind(iters[b][i]), .var = iters[b][i]->var, .dom = iters[b][i]->dom->extent,
+						.kind = iter_kind(iters[b][i]),
+						.var = iters[b][i]->var,
+						.dom = iters[b][i]->dom->extent,
 						.loop_rv = loops[b][i]
 				});
 			blocks.push_back(std::move(info));
@@ -115,8 +119,10 @@ namespace mdl::tvm_ported::dlight::analysis {
 		const auto loops = sch->GetLoops(block);
 		for (size_t i = 0; i < loops.size() && i < stmt->iter_vars.size(); ++i)
 			info.iters.push_back(IterInfo{
-					.kind = iter_kind(stmt->iter_vars[i]), .var = stmt->iter_vars[i]->var,
-					.dom = stmt->iter_vars[i]->dom->extent, .loop_rv = loops[i]
+					.kind = iter_kind(stmt->iter_vars[i]),
+					.var = stmt->iter_vars[i]->var,
+					.dom = stmt->iter_vars[i]->dom->extent,
+					.loop_rv = loops[i]
 			});
 		return info;
 	}

@@ -19,18 +19,17 @@ extern "C" {
 #endif
 
 /**
- * @brief Matrix multiplication `C = act(alpha * A @ B + bias) + addend` of strided views (see mdl_matmul_f32 of
+ * @brief Matrix multiplication `C = alpha * A @ B + bias + addend` of strided views (see mdl_matmul_f32 of
  * mdl_onednn.h: the same arguments).
  * @details Each matrix must have a unit stride in one of its two dimensions (row- or column-major; cuBLAS cannot read
  * other layouts): otherwise, the function fails.
- * @param activation 0: none, 1: GELU (erf)
  */
 #define MDL_CUBLAS_MATMUL_DECLARE(suffix, type)                                                                        \
 	int mdl_cublas_matmul_##suffix(                                                                                    \
 			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
 			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
 			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	);
 MDL_CUBLAS_MATMUL_DECLARE(f32, float)
 MDL_CUBLAS_MATMUL_DECLARE(bf16, uint16_t)

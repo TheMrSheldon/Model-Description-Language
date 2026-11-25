@@ -111,7 +111,22 @@ namespace mdl::backend::tvm {
 				return ::tvm::prim::cast(dtype, *value);
 			}
 
-			Expr finish(const te::Tensor& out) {
+			Expr finish(te::Tensor out) {
+				// Relax's int64 extents (e.g. TOPI's kept dimensions of reductions are int32): the kernels that FuseTIR
+				// fuses agree on the buffers of the tensors they pass (an identity stage, inlined).
+				if (std::any_of(out->shape.begin(), out->shape.end(), [](const PrimExpr& d) {
+						return d.ty() != ::tvm::PrimType::Int(64);
+					})) {
+					Array<PrimExpr> shape;
+					for (const auto& d : out->shape)
+						shape.push_back(::tvm::prim::cast(::tvm::PrimType::Int(64), d));
+					const te::Tensor narrow = out;
+					out = te::compute(
+							shape,
+							[&](const Array<::tvm::PrimVar>& i) { return narrow(Array<PrimExpr>(i.begin(), i.end())); },
+							narrow->op->name + "_int64"
+					);
+				}
 				shapes.push_back(out->shape);
 				auto vars = unboundVars(shapes, scalars);
 				for (const auto& v : vars)
@@ -266,7 +281,6 @@ namespace mdl::backend::tvm {
 			);
 		}
 
-
 		/** @brief A quantized operand: the arguments of mdl.dequant besides the quantized values (see QuantFormat). */
 		struct Quantized {
 			Expr scales;
@@ -330,10 +344,11 @@ namespace mdl::backend::tvm {
 		}
 
 		/**
-		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, activation,
-		 * addend or PrimValue(0), scales, zeros, quant). The operands are A = permute(a, perm_a) and B = permute(b,
-		 * perm_b); the result is permute(act(alpha * A @ B + bias), perm_out) + addend (the epilogue: e.g. GELU, a
-		 * residual connection). If quant is [format, group], b holds quantized values and B is permute(dequant(b,
+		 * @brief mdl.matmul's arguments: (a, b, bias or PrimValue(0), perm_a, perm_b, perm_out, alpha, addend or
+		 * PrimValue(0), scales, zeros, quant). The operands are A = permute(a, perm_a) and B = permute(b, perm_b); the
+		 * result is permute(alpha * A @ B + bias, perm_out) + addend (the epilogue: e.g. a residual connection). The
+		 * epilogues are those that GEMM libraries compute natively (bias, scale, addend); others (e.g. activations) are
+		 * generated kernels, fused with their neighbors. If quant is [format, group], b holds quantized values and B is permute(dequant(b,
 		 * scales, zeros), perm_b) (see mdl.dequant); otherwise scales and zeros are PrimValue(0) and quant is empty.
 		 */
 		struct MatmulArgs {
@@ -341,7 +356,6 @@ namespace mdl::backend::tvm {
 			std::optional<Expr> bias;
 			Perm permA, permB, permOut;
 			double alpha = 1.0;
-			int64_t activation = 0; ///< 0: none, 1: GELU (erf)
 			std::optional<Expr> addend;
 			std::optional<Quantized> quant;
 
@@ -351,9 +365,9 @@ namespace mdl::backend::tvm {
 					: a(call->args[0]), b(call->args[1]),
 					  bias(tensorInfo(call->args[2]) ? std::optional<Expr>{call->args[2]} : std::nullopt),
 					  permA(permOf(call->args[3])), permB(permOf(call->args[4])), permOut(permOf(call->args[5])),
-					  alpha(floatValue(call->args[6])), activation(intValue(call->args[7])),
-					  addend(tensorInfo(call->args[8]) ? std::optional<Expr>{call->args[8]} : std::nullopt),
-					  quant(quantizedOf(call, 9)) {}
+					  alpha(floatValue(call->args[6])),
+					  addend(tensorInfo(call->args[7]) ? std::optional<Expr>{call->args[7]} : std::nullopt),
+					  quant(quantizedOf(call, 8)) {}
 
 			/** @brief The shape of B before perm_b (the dequantized shape [N, K] if b is quantized). */
 			Array<PrimExpr> bShape() const {
@@ -382,7 +396,6 @@ namespace mdl::backend::tvm {
 			}
 		};
 
-
 		/** @brief @p m with a quantized b replaced by its dequantization (emitted as a kernel of its own). */
 		MatmulArgs dequantized(const BlockBuilder& bb, MatmulArgs m) {
 			if (!m.quant)
@@ -408,20 +421,6 @@ namespace mdl::backend::tvm {
 			if (m.bias)
 				tbias = te.tensor(*m.bias, "bias");
 			te::Tensor out = matmulCompute(ta, tb, tbias, false, m.alpha, false);
-			if (m.activation == 1)
-				out = te::compute(
-						out->shape,
-						[&](const Array<::tvm::PrimVar>& i) {
-							PrimExpr v = ::tvm::prim::cast(
-									::tvm::PrimType::Float(32), out(Array<PrimExpr>{i.begin(), i.end()})
-							);
-							auto c = [](double d) { return ::tvm::prim::MakeConst(::tvm::PrimType::Float(32), d); };
-							return ::tvm::prim::cast(
-									out->dtype, v * c(0.5) * (c(1.0) + ::tvm::prim::erf(v * c(M_SQRT1_2)))
-							);
-						},
-						"T_gelu", topi::kElementWise
-				);
 			if (!m.permOut.empty() && !isIdentity(m.permOut))
 				out = topi::transpose(out, axes(m.permOut));
 			if (m.addend)
@@ -448,15 +447,14 @@ namespace mdl::backend::tvm {
 			return Call(
 					::tvm::Type::Missing(), op,
 					{m.a, m.b, bias, permExpr(m.permA), permExpr(m.permB), permExpr(m.permOut),
-					 ::tvm::FloatImm(::tvm::PrimType::Float(64), m.alpha),
-					 ::tvm::IntImm(::tvm::PrimType::Int(64), m.activation), addend, scales, zeros, quant}
+					 ::tvm::FloatImm(::tvm::PrimType::Float(64), m.alpha), addend, scales, zeros, quant}
 			);
 		}
 
 		/**
 		 * @brief Folds permutations and epilogues into mdl.matmul (see MatmulArgs): `permute(x) @ y` reads x through
-		 * strides; if the product has no other use, `permute(a @ b)` writes the result in the permuted layout,
-		 * `gelu(a @ b)` and `a @ b + r` are computed by the matrix product's epilogue.
+		 * strides; if the product has no other use, `permute(a @ b)` writes the result in the permuted layout, and
+		 * `a @ b + r` is computed by the matrix product's epilogue.
 		 */
 		class FoldPermutes : public ::tvm::relax::ExprMutator {
 		public:
@@ -506,19 +504,7 @@ namespace mdl::backend::tvm {
 					}
 					return changed ? makeCall(m) : call;
 				}
-				static const auto& gelu = ::tvm::Op::Get("relax.nn.gelu");
 				static const auto& add = ::tvm::Op::Get("relax.add");
-				// The product's single use: an activation (before a permutation or an addend is applied).
-				if (call->op.same_as(gelu) && singleUse(op->args[0])) {
-					const ::tvm::CallNode* matmulOp = boundCall(call->args[0], matmul);
-					if (matmulOp == nullptr)
-						return call;
-					MatmulArgs m{::tvm::ffi::GetRef<Call>(matmulOp)};
-					if (m.activation != 0 || m.addend || (!m.permOut.empty() && !isIdentity(m.permOut)))
-						return call;
-					m.activation = 1;
-					return makeCall(m);
-				}
 				// The product's single use: an addition of a tensor of the result's shape (e.g. a residual connection).
 				if (call->op.same_as(add)) {
 					for (size_t i = 0; i < 2; ++i) {
@@ -645,7 +631,8 @@ namespace mdl::backend::tvm {
 		Array<PrimExpr> suffixMaskShape(const Call& call) {
 			const auto lengths = shapeOf(call->args[0]), like = shapeOf(call->args[1]);
 			if (like.size() <= lengths.size())
-				throw std::runtime_error("mdl.suffix_mask: the reference has no dimension after the lengths' dimensions");
+				throw std::runtime_error("mdl.suffix_mask: the reference has no dimension after the lengths' dimensions"
+				);
 			return Array<PrimExpr>(like.begin(), like.begin() + static_cast<std::ptrdiff_t>(lengths.size() + 1));
 		}
 	} // namespace
@@ -689,7 +676,7 @@ namespace mdl::backend::tvm {
 	}
 
 	TVM_REGISTER_OP("mdl.matmul")
-			.set_num_inputs(12)
+			.set_num_inputs(11)
 			.add_argument("a", "Tensor", "The left operand A = permute(a, perm_a): [..., M, K].")
 			.add_argument("b", "Tensor", "The right operand B = permute(b, perm_b): [K, N], possibly batched.")
 			.add_argument("bias", "Tensor | PrimValue", "The bias [N] or PrimValue(0) for no bias.")
@@ -697,7 +684,6 @@ namespace mdl::backend::tvm {
 			.add_argument("perm_b", "ShapeExpr", "The permutation of b (empty: none).")
 			.add_argument("perm_out", "ShapeExpr", "The permutation of the result (empty: none).")
 			.add_argument("alpha", "PrimValue", "Scale applied to the product.")
-			.add_argument("activation", "PrimValue", "The activation of the epilogue: 0 none, 1 GELU (erf).")
 			.add_argument("addend", "Tensor | PrimValue", "A tensor of the result's shape added last, or PrimValue(0).")
 			.add_argument(
 					"scales", "Tensor | PrimValue", "If b is quantized: the scales of mdl.dequant, else PrimValue(0)."
@@ -711,8 +697,10 @@ namespace mdl::backend::tvm {
 
 	Function legalizeHandler(std::function<Expr(const BlockBuilder&, const Call&)> fn) { return wrap(std::move(fn)); }
 
-	Expr callPrimFunc(const BlockBuilder& bb, tirx::PrimFunc func, const std::string& name, Array<Expr> inputs,
-					  const TensorType& out) {
+	Expr callPrimFunc(
+			const BlockBuilder& bb, tirx::PrimFunc func, const std::string& name, Array<Expr> inputs,
+			const TensorType& out
+	) {
 		static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
 		auto gv = bb->AddFunction(func, name);
 		return Call(::tvm::Type::Missing(), callTir, {gv, ::tvm::relax::Tuple(inputs)}, ::tvm::Attrs(), {out});
@@ -728,7 +716,9 @@ namespace mdl::backend::tvm {
 			using ::tvm::IntImm;
 			const auto i64 = ::tvm::PrimType::Int(64);
 			auto rootBlock = [](tirx::Stmt body) -> tirx::Stmt {
-				return ::tvm::s_tir::SBlockRealize({}, IntImm::Bool(true), ::tvm::s_tir::SBlock("root", std::move(body)));
+				return ::tvm::s_tir::SBlockRealize(
+						{}, IntImm::Bool(true), ::tvm::s_tir::SBlock("root", std::move(body))
+				);
 			};
 			// The kernel's dimensions are its own variables (bound from the buffers).
 			::tvm::PrimVar n("n", i64), r("r", i64), v("v", i64);
@@ -757,19 +747,19 @@ namespace mdl::backend::tvm {
 							tirx::For(
 									lane, IntImm(i64, 0), IntImm(i64, kChunk), tirx::ForKind::kSerial,
 									tirx::IfThenElse(
-											c < r, tirx::BufferStore(
-														   O, tirx::BufferLoad(O, {index, c}) + tirx::BufferLoad(G, {k, c}),
-														   {index, c}
-												   )
+											c < r,
+											tirx::BufferStore(
+													O, tirx::BufferLoad(O, {index, c}) + tirx::BufferLoad(G, {k, c}),
+													{index, c}
+											)
 									)
 							)
 					)
 			);
 			auto body = rootBlock(tirx::SeqStmt(::tvm::ffi::Array<tirx::Stmt>{zero, accumulate}));
 			auto func = tirx::PrimFunc({G, I, O}, body, ::tvm::VoidType());
-			func = ::tvm::WithAttr(std::move(func), "op_pattern", 8); // opaque: not fused or rescheduled
+			func = ::tvm::WithAttr(std::move(func), "tirx.is_scheduled", ::tvm::IntImm::Bool(true)); // (not fused)
 			return func;
-
 		}
 	} // namespace
 
@@ -826,7 +816,41 @@ namespace mdl::backend::tvm {
 		map.Set("relax.reshape", wrap([](const BlockBuilder& bb, const Call& call) {
 					TECall te{bb, "reshape"};
 					auto x = te.tensor(call->args[0]);
-					return te.finish(topi::reshape(x, (call->args[1]).as_or_throw<ShapeExpr>()->values));
+					const auto shape = (call->args[1]).as_or_throw<ShapeExpr>()->values;
+					// Only unit dimensions inserted or removed: the same indices (topi::reshape divides by the
+					// symbolic extents, which keeps the reshape from being inlined into a fused kernel).
+					auto nonUnit = [](const Array<PrimExpr>& dims) {
+						Array<PrimExpr> r;
+						for (const auto& d : dims)
+							if (!::tvm::prim::is_one(d))
+								r.push_back(d);
+						return r;
+					};
+					const auto from = nonUnit(x->shape), to = nonUnit(shape);
+					::tvm::sym::Analyzer analyzer;
+					bool units = from.size() == to.size();
+					for (size_t i = 0; units && i < from.size(); ++i)
+						units = analyzer->CanProveEqual(from[i], to[i]);
+					if (!units)
+						return te.finish(topi::reshape(x, shape));
+					return te.finish(te::compute(
+							shape,
+							[&](const Array<::tvm::PrimVar>& i) {
+								Array<PrimExpr> index;
+								size_t k = 0;
+								auto next = [&]() -> PrimExpr {
+									while (::tvm::prim::is_one(shape[k]))
+										++k;
+									return i[k++];
+								};
+								for (const auto& d : x->shape)
+									index.push_back(
+											::tvm::prim::is_one(d) ? PrimExpr(::tvm::IntImm(d.ty(), 0)) : next()
+									);
+								return x(index);
+							},
+							"T_reshape"
+					));
 				}));
 		map.Set("relax.permute_dims", wrap([](const BlockBuilder& bb, const Call& call) {
 					const auto* attrs = call->attrs.as<::tvm::relax::PermuteDimsAttrs>();
@@ -862,23 +886,29 @@ namespace mdl::backend::tvm {
 					Array<PrimExpr> shape;
 					for (int d = 0; d < rank; ++d) {
 						if (d == axis)
-							shape.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), static_cast<int64_t>(parts.size())));
+							shape.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), static_cast<int64_t>(parts.size()))
+							);
 						shape.push_back(parts[0]->shape[d]);
 					}
 					if (axis == rank)
 						shape.push_back(::tvm::IntImm(::tvm::PrimType::Int(64), static_cast<int64_t>(parts.size())));
-					return te.finish(te::compute(shape, [&](const Array<::tvm::PrimVar>& i) {
-						Array<PrimExpr> index;
-						for (int d = 0; d <= rank; ++d)
-							if (d != axis)
-								index.push_back(i[d]);
-						PrimExpr value = parts.back()(index);
-						for (size_t k = parts.size() - 1; k-- > 0;)
-							value = ::tvm::prim::Select(
-									i[axis] == ::tvm::IntImm(i[axis].ty(), static_cast<int64_t>(k)), parts[k](index), value
-							);
-						return value;
-					}, "T_stack"));
+					return te.finish(te::compute(
+							shape,
+							[&](const Array<::tvm::PrimVar>& i) {
+								Array<PrimExpr> index;
+								for (int d = 0; d <= rank; ++d)
+									if (d != axis)
+										index.push_back(i[d]);
+								PrimExpr value = parts.back()(index);
+								for (size_t k = parts.size() - 1; k-- > 0;)
+									value = ::tvm::prim::Select(
+											i[axis] == ::tvm::IntImm(i[axis].ty(), static_cast<int64_t>(k)),
+											parts[k](index), value
+									);
+								return value;
+							},
+							"T_stack"
+					));
 				}));
 		map.Set("relax.collapse_sum_to", wrap([](const BlockBuilder& bb, const Call& call) -> Expr {
 					// (Column sums by a kernel: kernels/onednn, sum-rows.)
@@ -1024,7 +1054,8 @@ namespace mdl::backend::tvm {
 					if (tx->dtype.MatchesElementType(kDLBfloat, 16)) {
 						const auto f32 = ::tvm::PrimType::Float(32);
 						auto y = topi::nn::layer_norm(
-								topi::cast(tx, f32), topi::cast(tg, f32), topi::cast(tb, f32), attrs->axes, attrs->epsilon
+								topi::cast(tx, f32), topi::cast(tg, f32), topi::cast(tb, f32), attrs->axes,
+								attrs->epsilon
 						);
 						return te.finish(topi::cast(y, tx->dtype));
 					}

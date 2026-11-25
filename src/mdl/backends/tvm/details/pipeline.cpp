@@ -3,15 +3,15 @@
 
 #include "../../../logging.hpp"
 #include "./aot.hpp"
-#include "./flatten_injective.hpp"
-#include "./fuse_rows.hpp"
-#include "./fuse_siblings.hpp"
-#include "./stack_sums.hpp"
 #include "./attention.hpp"
+#include "./flatten_injective.hpp"
+#include "./fusion/fusion.hpp"
 #include "./kernel_match.hpp"
 #include "./legalize.hpp"
+#include "./merge_sums.hpp"
 #include "./pattern_registry.hpp"
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
@@ -55,7 +55,8 @@ namespace mdl::backend::tvm {
 						IRModule kernels = mod;
 						kernels.CopyOnWrite();
 						for (const auto& [gv, func] : mod->functions)
-							if (const auto* f = func.as<::tvm::tirx::PrimFuncNode>(); f && f->HasNonzeroAttr(kAOTEntryAttr))
+							if (const auto* f = func.as<::tvm::tirx::PrimFuncNode>();
+								f && f->HasNonzeroAttr(kAOTEntryAttr))
 								kernels->Remove(gv);
 						kernels = registeredPass("tirx.transform.CommonSubexprElim")(kernels);
 						IRModule result = mod; // (with its attributes, e.g. the system library prefix)
@@ -268,6 +269,31 @@ namespace mdl::backend::tvm {
 					0, "mdl.InlineScalarConstants", {}
 			);
 		}
+		/**
+		 * @brief Marks the calls of kernel packages (a block without loops around a call_extern) as scheduled: they are
+		 * host code, which the targets' schedules skip (in TVM's pipelines, such calls are not PrimFuncs).
+		 */
+		IRModule markLibraryCalls(IRModule kernels) {
+			std::vector<std::pair<::tvm::GlobalVar, ::tvm::BaseFunc>> calls;
+			for (const auto& [gv, func] : kernels->functions) {
+				const auto* prim = func.as<::tvm::tirx::PrimFuncNode>();
+				if (prim == nullptr)
+					continue;
+				bool loops = false;
+				::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
+						prim->body,
+						[&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
+							loops = true;
+							return ::tvm::ffi::WalkResult::Advance();
+						}
+				);
+				if (!loops)
+					calls.emplace_back(gv, ::tvm::WithAttr(func, "tirx.is_scheduled", ::tvm::IntImm::Bool(true)));
+			}
+			for (const auto& [gv, func] : calls)
+				kernels->Update(gv, func);
+			return kernels;
+		}
 	} // namespace
 
 	IRModule canonicalize(IRModule mod, const ::tvm::Target& target) {
@@ -302,9 +328,7 @@ namespace mdl::backend::tvm {
 
 	IRModule afterPruning(IRModule mod, const ::tvm::Target& target) {
 		// (foldPermutesIntoAttention: whether the attention's row statistics are still used)
-		return runPasses(
-				mod, {RT::DeadCodeElimination({}), foldPermutesIntoAttention(), RT::Normalize()}, target
-		);
+		return runPasses(mod, {RT::DeadCodeElimination({}), foldPermutesIntoAttention(), RT::Normalize()}, target);
 	}
 
 	IRModule lowerRelax(IRModule mod, const Target& device, const mdl::CompileOptions& opts) {
@@ -315,21 +339,14 @@ namespace mdl::backend::tvm {
 		mod = runPasses(
 				mod,
 				{
-						// Sums of tensors computed from a common one: one sum (reads it once).
-						stackSiblingSums(),
-						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
-						RT::AnnotateTIROpPattern(),
 						// No FoldConstant after legalization: evaluating call_tir on constants builds TIR through
 						// Python in TVM 0.24 (constants were folded before the patterns).
-						RT::FuseOps(),
-						// Reductions over the same rows and their epilogue: one group (FuseOps: one reduction each).
-						fuseRows(),
+						RT::LegalizeOps(handlers, std::nullopt, /*enable_warning=*/true),
+						// Which kernel calls become one kernel (fusion/), then those kernels.
+						fusion::fuseKernels(),
 						RT::FuseTIR(),
 						// The fallbacks of runtime guards, now fused: back into their branches.
 						inlineGuardFallbacks(),
-						// Independent elementwise kernels reading the same inputs: one kernel (FuseOps fuses only
-						// producers into consumers).
-						fuseSiblings(),
 						RT::DeadCodeElimination({}),
 				},
 				target
@@ -354,7 +371,9 @@ namespace mdl::backend::tvm {
 		return lowerRelax(canonicalize(std::move(mod), target.tvm()), target, opts);
 	}
 
-	void buildObject(IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output) {
+	void buildObject(
+			IRModule mod, const Target& target, const std::string& systemLibPrefix, const std::filesystem::path& output
+	) {
 		auto logger = mdl::log::getLogger("compiler");
 		const ::tvm::Target& tvmTarget = target.tvm();
 		mod = ::tvm::WithAttr(mod, ::tvm::attr::kSystemLibPrefix, ::tvm::ffi::String(systemLibPrefix));
@@ -372,6 +391,8 @@ namespace mdl::backend::tvm {
 		}
 		kernels = runPasses(kernels, {::tvm::tirx::transform::BindTarget(tvmTarget)}, tvmTarget);
 		kernels = flattenInjective(kernels, tvmTarget); // (target-independent: flat loops for injective kernels)
+		kernels = mergeSiblingSums(kernels);			// (target-independent: sibling sums in one block)
+		kernels = markLibraryCalls(kernels);
 		kernels = target.schedule(kernels);
 		mod = runPasses(kernels, target.blockLowering(), tvmTarget);
 		for (const auto& [gv, func] : entries)
@@ -388,16 +409,16 @@ namespace mdl::backend::tvm {
 			passes.push_back(std::move(p));
 		for (auto p : {
 					 registeredPass("tirx.transform.StorageRewrite"),
-				registeredPass("s_tir.transform.HoistIfThenElse"),
-				registeredPass("tirx.transform.UnrollLoop"),
-				registeredPass("s_tir.transform.RenormalizeSplitPattern"),
-				registeredPass("tirx.transform.StmtSimplify"),
-				registeredPass("tirx.transform.RemoveNoOp"),
-				registeredPass("s_tir.transform.RewriteUnsafeSelect"),
-				kernelSubexprElim(),
-				registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
-				registeredPass("tirx.transform.VerifyMemory"),
-				registeredPass("tirx.transform.AnnotateEntryFunc"),
+					 registeredPass("s_tir.transform.HoistIfThenElse"),
+					 registeredPass("tirx.transform.UnrollLoop"),
+					 registeredPass("s_tir.transform.RenormalizeSplitPattern"),
+					 registeredPass("tirx.transform.StmtSimplify"),
+					 registeredPass("tirx.transform.RemoveNoOp"),
+					 registeredPass("s_tir.transform.RewriteUnsafeSelect"),
+					 kernelSubexprElim(),
+					 registeredPass("tirx.transform.FP8ComputeLegalize", ::tvm::ffi::String("float32")),
+					 registeredPass("tirx.transform.VerifyMemory"),
+					 registeredPass("tirx.transform.AnnotateEntryFunc"),
 			 })
 			passes.push_back(std::move(p));
 		for (auto& p : target.beforeSplit())

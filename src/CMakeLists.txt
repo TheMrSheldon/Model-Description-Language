@@ -72,6 +72,9 @@ if(MDL_ENABLE_COMPILER)
 		VERSION 0.27.0
 		GITHUB_REPOSITORY apache/tvm
 		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
+		# Fixes of TVM bugs we hit (patches/tvm; each patch describes its bug); remove a patch once the pinned version has
+		# the fix. (Applied unless applied already: FetchContent may run the step again on the patched sources.)
+		PATCH_COMMAND sh "${PROJECT_SOURCE_DIR}/patches/apply.sh" "${PROJECT_SOURCE_DIR}/patches/tvm"
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
 		OPTIONS "USE_LLVM ON" "USE_CUDA ${MDL_TVM_USE_CUDA}" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
@@ -87,8 +90,9 @@ endif()
 ##########################################################################################
 # Libraries and commands
 ##########################################################################################
-# Parts of TVM's Python package translated to C++ (mdl_tvm_ported, used by the CUDA target; see tvm_ported/README.md).
-if(MDL_ENABLE_COMPILER AND MDL_ENABLE_CUDA)
+# Parts of TVM's Python package translated to C++ (mdl_tvm_ported: DLight's schedule analysis, used by the fusion
+# planner and the targets; the CUDA target's code generation callbacks; see tvm_ported/README.md).
+if(MDL_ENABLE_COMPILER)
 	add_subdirectory(tvm_ported)
 endif()
 add_subdirectory(mdl)      # mdl_frontend, mdl_format; mdl, mdl_runtime, mdl_profile (compiler)

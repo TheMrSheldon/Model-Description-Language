@@ -307,7 +307,8 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 		const std::string name = request.substr(0, eq);
 		const std::string kind = eq == std::string::npos ? "element" : request.substr(eq + 1);
 		if (kind != "element" && kind != "suffix")
-			throw std::runtime_error(std::format("--mask {}: unknown mask kind '{}' (element or suffix)", request, kind));
+			throw std::runtime_error(std::format("--mask {}: unknown mask kind '{}' (element or suffix)", request, kind)
+			);
 		masked.push_back(name);
 		maskKinds[name] = kind == "suffix" ? masking::MaskKind::suffix : masking::MaskKind::element;
 	}
@@ -570,9 +571,10 @@ std::vector<ExportedFunction> mdl::exportedFunctions(
 				continue;
 			}
 			const PathPatterns checkpoint{gradients.checkpoint};
-			auto parts = autodiff::split(
-					unit.graph(), vjp, original.outputs.size(), gradients.checkpoint.empty() ? nullptr : &checkpoint
-			);
+			autodiff::SplitOptions splitOptions;
+			splitOptions.checkpoint = gradients.checkpoint.empty() ? nullptr : &checkpoint;
+			splitOptions.shapes = &oracle;
+			auto parts = autodiff::split(unit.graph(), vjp, original.outputs.size(), splitOptions);
 			if (!parts)
 				throw std::runtime_error(moduleName + "." + parts.error());
 			ContextBuffer context{

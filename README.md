@@ -1,7 +1,7 @@
 <h1 align="center">Model Description Language</h1>
 
 <p align="center">
-   <img width=120px src="./res/icon-solo.png">
+   <img width=120px src="./docs/media/icon-solo.png">
 </p>
 
 ---
@@ -178,6 +178,11 @@ mdl::models::FFN::Weights weights;
 weights.W = W;
 weights.b = b;
 mdl::models::FFN::forward(x, weights, out);
+
+// The same with an explicit session (its workspace, grown on demand; one per thread). The static functions above use
+// a session per thread (docs/dev/technical/runtime.md).
+mdl::models::FFN::Session session;
+session.forward(x, weights, out);
 
 // The hyperparameters the model was compiled with, as a constexpr struct:
 static_assert(mdl::models::FFN::hyperparameters.outdim == 3);

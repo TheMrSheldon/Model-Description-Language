@@ -12,12 +12,21 @@ target_link_libraries(mdl_runtime INTERFACE tvm_runtime nlohmann_json::nlohmann_
 # The runtime of a compilation target besides the CPU (mdl_add_model(... TARGET <kind> ...) links it): CUDA needs TVM's
 # CUDA runtime (device API, loading the embedded PTX).
 if(MDL_ENABLE_CUDA)
+	# The CUDA sessions (a stream and CUDA graphs per session, see docs/dev/technical/runtime.md): registers TVM FFI
+	# functions when loaded, which the bindings look up.
+	find_package(CUDAToolkit REQUIRED)
+	add_library(mdl_session_cuda SHARED sessions/cuda.cpp)
+	target_compile_features(mdl_session_cuda PRIVATE cxx_std_20)
+	target_link_libraries(mdl_session_cuda PRIVATE tvm_ffi_header tvm_runtime_cuda CUDA::cudart)
+
 	add_library(mdl_target_cuda INTERFACE)
-	# (It only registers itself when loaded, no symbols are referenced: keep it despite --as-needed.)
+	# (Both only register themselves when loaded, no symbols are referenced: keep them despite --as-needed. One group:
+	# CMake drops a repeated flag.)
 	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-		target_link_libraries(mdl_target_cuda INTERFACE "-Wl,--push-state,--no-as-needed" tvm_runtime_cuda "-Wl,--pop-state")
+		target_link_libraries(mdl_target_cuda INTERFACE
+			"-Wl,--push-state,--no-as-needed" tvm_runtime_cuda mdl_session_cuda "-Wl,--pop-state")
 	else()
-		target_link_libraries(mdl_target_cuda INTERFACE tvm_runtime_cuda)
+		target_link_libraries(mdl_target_cuda INTERFACE tvm_runtime_cuda mdl_session_cuda)
 	endif()
 	# TVM's runtime API (tvm/runtime/tensor.h, device_api.h) to allocate and copy device memory.
 	target_include_directories(mdl_target_cuda INTERFACE ${tvm_SOURCE_DIR}/include)

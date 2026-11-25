@@ -9,6 +9,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <optional>
@@ -18,6 +19,83 @@
 namespace mdl::autodiff {
 
 	namespace {
+		/** @brief Minimum s-t cut by maximum flow (Dinic's algorithm); capacities in bytes, possibly infinite. */
+		class MinCut {
+		public:
+			explicit MinCut(size_t n) : adjacent(n) {}
+
+			void edge(size_t from, size_t to, double capacity) {
+				adjacent[from].push_back(edges.size());
+				edges.push_back({to, capacity});
+				adjacent[to].push_back(edges.size());
+				edges.push_back({from, 0});
+			}
+
+			/**
+			 * @brief Which nodes are on the source's side of the minimum cut closest to the sink (of the minimum cuts:
+			 * the latest values, e.g. a matrix product with its bias rather than without it).
+			 */
+			std::vector<bool> sourceSide(size_t s, size_t t) {
+				while (levels(s, t)) {
+					std::vector<size_t> next(adjacent.size(), 0);
+					while (push(s, t, std::numeric_limits<double>::infinity(), next) > 0) {
+					}
+				}
+				// The nodes that still reach the sink in the residual graph are its side.
+				std::vector<bool> side(adjacent.size(), true);
+				side[t] = false;
+				std::vector<size_t> queue{t};
+				for (size_t k = 0; k < queue.size(); ++k)
+					for (size_t e : adjacent[queue[k]]) {
+						const size_t from = edges[e].to; // (e ^ 1 is the edge from -> queue[k])
+						if (side[from] && edges[e ^ 1].capacity > 0) {
+							side[from] = false;
+							queue.push_back(from);
+						}
+					}
+				return side;
+			}
+
+		private:
+			struct Edge {
+				size_t to;
+				double capacity; ///< residual
+			};
+			std::vector<std::vector<size_t>> adjacent;
+			std::vector<Edge> edges;
+			std::vector<int> level;
+
+			bool levels(size_t s, size_t t) {
+				level.assign(adjacent.size(), -1);
+				level[s] = 0;
+				std::vector<size_t> queue{s};
+				for (size_t k = 0; k < queue.size(); ++k)
+					for (size_t e : adjacent[queue[k]])
+						if (edges[e].capacity > 0 && level[edges[e].to] < 0) {
+							level[edges[e].to] = level[queue[k]] + 1;
+							queue.push_back(edges[e].to);
+						}
+				return level[t] >= 0;
+			}
+
+			double push(size_t v, size_t t, double amount, std::vector<size_t>& next) {
+				if (v == t)
+					return amount;
+				for (; next[v] < adjacent[v].size(); ++next[v]) {
+					Edge& e = edges[adjacent[v][next[v]]];
+					if (e.capacity <= 0 || level[e.to] != level[v] + 1)
+						continue;
+					const double pushed = push(e.to, t, std::min(amount, e.capacity), next);
+					if (pushed > 0) {
+						e.capacity -= pushed;
+						edges[adjacent[v][next[v]] ^ 1].capacity += pushed;
+						return pushed;
+					}
+				}
+				return 0;
+			}
+		};
+
 		using FIDs = builtins::FunctionIDs;
 		using NodeRef = Computegraph::NodeRef;
 
@@ -123,7 +201,8 @@ namespace mdl::autodiff {
 		 * runtime size, e.g. a sequence length, leaves the parameters unbound, as for a parsed call).
 		 */
 		std::vector<Computegraph::NodeRef> templateArguments(
-				Builder& b, Computegraph& graph, const FunctionDecl& func, const std::vector<Computegraph::NodeRef>& arguments
+				Builder& b, Computegraph& graph, const FunctionDecl& func,
+				const std::vector<Computegraph::NodeRef>& arguments
 		) {
 			std::vector<const Node*> values(func.templateParameters.size(), nullptr);
 			auto index = [&](const TensorType::Shape::value_type& dim) -> std::optional<size_t> {
@@ -152,8 +231,9 @@ namespace mdl::autodiff {
 					if (auto t = index(pdim); t && values[*t] == nullptr)
 						values[*t] = sizeNode(adim);
 				};
-				const auto ellipsis =
-						std::ranges::find_if(p->shape, [](const auto& d) { return std::holds_alternative<Elipsis>(d); });
+				const auto ellipsis = std::ranges::find_if(p->shape, [](const auto& d) {
+					return std::holds_alternative<Elipsis>(d);
+				});
 				const size_t before = static_cast<size_t>(ellipsis - p->shape.begin());
 				for (size_t k = 0; k < before && k < a->size(); ++k)
 					bind(p->shape[k], (*a)[k]);
@@ -261,7 +341,8 @@ namespace mdl::autodiff {
 					return b.op(FIDs::RESHAPE, {v, group, graph.addConstNode(Atomic{1})});
 				};
 				const Node* n = lastDimSize(graph, getDataType(x));
-				const Node& count = n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
+				const Node& count =
+						n != nullptr ? *n : keep(b.op(FIDs::SUM, {b.op(FIDs::BROADCAST_LIKE, {b.constant(1.0), x})}));
 				const Node& centered = b.sub(x, keep(b.op(FIDs::MEAN, {x})));
 				return b.div(b.mul(b.mul(keep(g), centered), b.constant(2.0)), b.sub(count, *other));
 			}
@@ -326,8 +407,9 @@ namespace mdl::autodiff {
 				};
 				std::vector<Computegraph::NodeRef> args = operands;
 				for (const Node* n :
-					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)), &b.op(FIDs::ATTENTION_PROBS, withBias(operands)),
-					  &g, &graph.addConstNode(Atomic{static_cast<int>(arg)})})
+					 {&node, &b.op(FIDs::ATTENTION_LSE, withBias(operands)),
+					  &b.op(FIDs::ATTENTION_PROBS, withBias(operands)), &g,
+					  &graph.addConstNode(Atomic{static_cast<int>(arg)})})
 					args.push_back(std::cref(*n));
 				return b.op(FIDs::ATTENTION_GRAD, withBias(std::move(args)));
 			}
@@ -360,7 +442,8 @@ namespace mdl::autodiff {
 			case FIDs::DEQUANT:
 				return false; // quantized weights are frozen
 			case FIDs::ATTENTION:
-				return arg != 3 && arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
+				return arg != 3 &&
+					   arg != 5; // not the scale or lengths; the bias: an error if it needs a gradient (see rule)
 			case FIDs::ATTENTION_LSE:
 			case FIDs::ATTENTION_PROBS:
 			case FIDs::ATTENTION_GRAD:
@@ -709,7 +792,7 @@ namespace mdl::autodiff {
 	}
 
 	std::expected<Split, std::string>
-	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const PathPatterns* checkpoint) {
+	split(Computegraph& graph, const FunctionDecl& vjp, size_t numOutputs, const SplitOptions& options) {
 		if (vjp.parameters.size() < numOutputs || vjp.outputs.size() < numOutputs)
 			return std::unexpected(
 					vjp.name + ": not a gradient function with " + std::to_string(numOutputs) + " output(s)"
@@ -737,27 +820,9 @@ namespace mdl::autodiff {
 			deps.emplace(&node, result);
 			return result;
 		};
-		auto cheap = [](const Node& node) {
-			const auto* inv = std::get_if<InvocationNode>(&node);
-			if (inv == nullptr)
-				return false;
-			switch (inv->id) {
-			case FIDs::RESHAPE:
-			case FIDs::PERMUTE:
-			case FIDs::EXPAND:
-			case FIDs::RESHAPE_LIKE:
-			case FIDs::PERMUTE_INVERSE:
-			case FIDs::BROADCAST_LIKE:
-			case FIDs::STOP_GRADIENT:
-				return true;
-			default:
-				return false;
-			}
-		};
-
 		// Checkpointing: the computations of the selected module calls are recomputed; their inputs are saved.
 		std::unordered_set<const Node*> recompute, boundary;
-		if (checkpoint != nullptr) {
+		if (options.checkpoint != nullptr) {
 			std::unordered_set<const Node*> seen;
 			std::vector<const Node*> stack;
 			for (const auto& out : vjp.outputs)
@@ -769,7 +834,7 @@ namespace mdl::autodiff {
 				if (!seen.insert(n).second)
 					continue;
 				for (const ModuleCall* call : graph.moduleCallsProducing(*n))
-					if (call->module != nullptr && !call->path.empty() && checkpoint->selects(call->path) &&
+					if (call->module != nullptr && !call->path.empty() && options.checkpoint->selects(call->path) &&
 						std::find(calls.begin(), calls.end(), call) == calls.end())
 						calls.push_back(call);
 				if (const auto* inv = std::get_if<InvocationNode>(n))
@@ -817,198 +882,243 @@ namespace mdl::autodiff {
 			}
 		}
 
-		// The residuals: the frontier of primal, input-dependent values that the backward computation reaches.
-		std::vector<const Node*> residuals;
-		std::unordered_set<const Node*> visited;
-		std::function<void(const Node&)> visit = [&](const Node& node) {
-			if (!visited.insert(&node).second)
-				return;
+		// The residuals: a minimum cut through the primal values (input-dependent, not cotangent-dependent) that the
+		// backward pass needs, which minimizes the bytes saved (docs/dev/technical/optimization.md). Values that only depend
+		// on weights and constants are recomputed (they are not part of the cut).
+		auto primal = [&](const Node& node) {
 			auto [cot, inp] = dependencies(node);
-			if (!cot && !inp)
-				return; // depends only on weights and constants: recomputed
-			// (Only computed values are recomputed; inputs used in the region, e.g. the mask, are saved. With
-			// checkpointing, the values the gradient pass computes from forward values are recomputed as well.)
-			const bool recomputed = std::holds_alternative<InvocationNode>(node) && !boundary.contains(&node) &&
-									(recompute.contains(&node) || (checkpoint != nullptr && !forward.contains(&node)));
-			if (cot || cheap(node) || recomputed) {
-				if (const auto* inv = std::get_if<InvocationNode>(&node))
-					for (const auto& arg : inv->arguments)
-						visit(arg.get());
-				return;
-			}
-			residuals.push_back(&node);
+			return inp && !cot;
 		};
-		for (size_t i = numOutputs; i < vjp.outputs.size(); ++i)
-			visit(vjp.outputs[i].get());
+		// The primal values that the backward computation reads, and the users of every node.
+		std::vector<const Node*> required;
+		std::unordered_map<const Node*, std::vector<const Node*>> users;
+		{
+			std::unordered_set<const Node*> seen, requiredSet;
+			std::vector<const Node*> stack;
+			for (size_t i = numOutputs; i < vjp.outputs.size(); ++i)
+				stack.push_back(&vjp.outputs[i].get());
+			while (!stack.empty()) {
+				const Node* n = stack.back();
+				stack.pop_back();
+				if (!seen.insert(n).second)
+					continue;
+				if (primal(*n)) {
+					if (requiredSet.insert(n).second)
+						required.push_back(n);
+					continue;
+				}
+				if (const auto* inv = std::get_if<InvocationNode>(n))
+					for (const auto& a : inv->arguments) {
+						users[&a.get()].push_back(n);
+						stack.push_back(&a.get());
+					}
+			}
+		}
+		// The primal values the required ones are computed from (the nodes of the cut's graph), in a deterministic
+		// (post-)order.
+		std::vector<const Node*> nodes;
+		std::unordered_map<const Node*, size_t> index;
+		{
+			std::function<void(const Node&)> collect = [&](const Node& n) {
+				if (index.contains(&n) || !primal(n))
+					return;
+				index.emplace(&n, 0);
+				if (const auto* inv = std::get_if<InvocationNode>(&n))
+					for (const auto& a : inv->arguments) {
+						users[&a.get()].push_back(&n);
+						collect(a.get());
+					}
+				index[&n] = nodes.size();
+				nodes.push_back(&n);
+			};
+			for (const Node* r : required)
+				collect(*r);
+		}
 
-		// Do not save values that elementwise operations recompute from the other residuals (e.g. `1 - h*h` of the
-		// tanh rule when `h` is saved anyway): this only removes residuals, so the saved memory never grows.
-		auto elementwise = [&](const Node& node) {
+		auto bytes = [&](const Node& node) {
+			const DataType& type = getDataType(node);
+			const auto* t = std::get_if<TensorType>(&type);
+			const PrimitiveType element = t != nullptr ? t->type : PrimitiveType::float32;
+			double size = element == PrimitiveType::float16 || element == PrimitiveType::bfloat16 ? 2
+						  : element == PrimitiveType::boolean || element == PrimitiveType::int8	  ? 1
+																								  : 4;
+			std::optional<shapes::Shape> shape;
+			if (const shapes::Shape* exact = options.shapes != nullptr ? options.shapes->shapeOf(node) : nullptr)
+				shape = *exact;
+			else
+				shape = shapes::shapeOfType(type);
+			if (!shape)
+				return size * static_cast<double>(options.typicalDim);
+			for (const auto& d : *shape) {
+				size *= static_cast<double>(d.known && !d.group && d.node == nullptr ? d.factor : 1);
+				if (!d.isConstant())
+					size *= std::pow(static_cast<double>(options.typicalDim), std::max<size_t>(d.symbols.size(), 1));
+			}
+			return size;
+		};
+		// Operations that are never recomputed (matrix products, attention, library operations).
+		auto opaque = [](const Node& node) {
+			const auto* inv = std::get_if<InvocationNode>(&node);
+			if (inv == nullptr)
+				return true; // (inputs: saved)
+			switch (inv->id) {
+			case FIDs::TENSOR_DOT:
+			case FIDs::ATTENTION:
+			case FIDs::ATTENTION_LSE:
+			case FIDs::ATTENTION_PROBS:
+			case FIDs::ATTENTION_GRAD:
+			case FIDs::TAKE:
+			case FIDs::SCATTER_ADD_ROWS:
+			case FIDs::UNSELECT_LIKE:
+			case FIDs::STACK:
+				return true;
+			default:
+				return false;
+			}
+		};
+		auto reduction = [](const Node& node) {
 			const auto* inv = std::get_if<InvocationNode>(&node);
 			if (inv == nullptr)
 				return false;
 			switch (inv->id) {
-			case FIDs::TENSOR_ADD:
-			case FIDs::TENSOR_SUB:
-			case FIDs::TENSOR_PROD:
-			case FIDs::TENSOR_DIV:
-			case FIDs::EXP:
-			case FIDs::LOG:
-			case FIDs::SQRT:
-			case FIDs::RSQRT:
-			case FIDs::ERF:
-			case FIDs::TANH:
-			case FIDs::SIN:
-			case FIDs::COS:
-			case FIDs::TAN:
-			case FIDs::EQUAL_MASK:
-			case FIDs::WHERE:
+			case FIDs::SUM:
+			case FIDs::MEAN:
+			case FIDs::MAX:
+			case FIDs::MIN:
+			case FIDs::VAR:
+			case FIDs::COLLAPSE_SUM_LIKE:
 				return true;
 			default:
-				return cheap(node);
+				return false;
 			}
 		};
-		// Save the input of an elementwise computation instead of its result if the result depends on one computed value
-		// only (e.g. `x` instead of `1 + erf(x / sqrt(2))` in the gradient of GELU): this never needs more memory (an
-		// elementwise result is at least as large as its arguments), and the forward pass does not compute values just to
-		// save them (which would also keep backends from replacing the forward computation by a fused kernel). The
-		// backward pass recomputes the elementwise computation, where it fuses with the operations that use it.
-		// Only values that the forward pass would not store anyway are moved to their source (moving adds the source as
-		// a saved value): those it does not compute, and those whose forward uses are all elementwise arithmetic (fused
-		// away), unlike e.g. `tanh(h)` that a matrix product takes (also through reshapes and permutations, which
-		// materialize their argument as well). Such a value may still be recomputed instead of saved by the next step
-		// (if it is elementwise in values that are saved anyway).
-		std::unordered_set<const Node*> stored;
-		for (size_t i = 0; i < numOutputs; ++i)
-			stored.insert(&vjp.outputs[i].get());
-		for (const Node* n : forward)
-			if (const auto* inv = std::get_if<InvocationNode>(n); inv != nullptr && (!elementwise(*n) || cheap(*n)))
-				for (const auto& arg : inv->arguments)
-					stored.insert(&arg.get());
-		// The nearest value through which the residual depends on all computed values that it depends on, if the
-		// residual is computed from it by elementwise operations (and weights and constants).
-		// Boolean values (masks, e.g. the fills of a masked function) are small and do not count: they are saved as well.
-		auto isBoolean = [](const Node& n) {
-			const auto* t = std::get_if<TensorType>(&getDataType(n));
-			return t != nullptr && t->type == PrimitiveType::boolean;
+		auto isView = [](const Node& n) {
+			const auto* inv = std::get_if<InvocationNode>(&n);
+			return inv != nullptr && (inv->id == FIDs::RESHAPE || inv->id == FIDs::PERMUTE || inv->id == FIDs::EXPAND ||
+									  inv->id == FIDs::STOP_GRADIENT);
 		};
-		std::vector<const Node*> masks;
-		auto singleSource = [&](const Node* residual) -> const Node* {
-			std::vector<const Node*> booleans;
-			if (boundary.contains(residual) || stored.contains(residual) || !elementwise(*residual))
-				return nullptr;
-			auto interior = [&](const Node* n) {
-				return std::holds_alternative<InvocationNode>(*n) && elementwise(*n) &&
-					   (n == residual || (!boundary.contains(n) && !stored.contains(n)));
-			};
-			// The elementwise computation (interior nodes) and the computed values it starts from.
-			const Node* source = nullptr;
-			std::vector<const Node*> nodes; // interior nodes, the residual first
-			std::unordered_set<const Node*> seen;
-			std::vector<const Node*> stack{residual};
-			while (!stack.empty()) {
-				const Node* n = stack.back();
-				stack.pop_back();
-				if (!seen.insert(n).second || !dependencies(*n).second)
-					continue; // weights and constants are not saved
-				if (isBoolean(*n)) {
-					booleans.push_back(n);
-					continue;
+		// Whether a non-fusible operation of the backward pass reads the value (also through reshapes): the backward
+		// pass would materialize it anyway.
+		std::function<bool(const Node&)> readByOpaque = [&](const Node& node) {
+			auto it = users.find(&node);
+			if (it == users.end())
+				return false;
+			for (const Node* u : it->second) {
+				const auto id = std::get<InvocationNode>(*u).id;
+				if (id == FIDs::RESHAPE || id == FIDs::PERMUTE || id == FIDs::RESHAPE_LIKE ||
+					id == FIDs::PERMUTE_INVERSE) {
+					if (readByOpaque(*u)) // (a view, also of the forward pass, e.g. `h.T()` for a weight gradient)
+						return true;
+				} else if (!primal(*u) && opaque(*u)) { // (not a use in the forward pass)
+					return true;
 				}
-				if (interior(n)) {
-					nodes.push_back(n);
-					for (const auto& arg : std::get<InvocationNode>(*n).arguments)
-						stack.push_back(&arg.get());
-					continue;
-				}
-				if (source != nullptr && source != n)
-					return nullptr;
-				source = n;
 			}
-			if (source == nullptr)
-				return nullptr;
-			masks.insert(masks.end(), booleans.begin(), booleans.end());
-			// Whether the source is reachable from the residual without passing through `avoid`.
-			auto reaches = [&](const Node* avoid) {
-				std::unordered_set<const Node*> visited;
-				std::vector<const Node*> work{residual};
-				while (!work.empty()) {
-					const Node* n = work.back();
-					work.pop_back();
-					if (n == avoid || !visited.insert(n).second || !dependencies(*n).second)
-						continue;
-					if (n == source)
-						return true;
-					if (interior(n))
-						for (const auto& arg : std::get<InvocationNode>(*n).arguments)
-							work.push_back(&arg.get());
-				}
-				return false;
-			};
-			// The dominators lie on every path to the source; the nearest one reaches all others.
-			std::vector<const Node*> dominators;
-			for (size_t i = 1; i < nodes.size(); ++i)
-				if (!reaches(nodes[i]))
-					dominators.push_back(nodes[i]);
-			dominators.push_back(source);
-			auto below = [&](const Node* from, const Node* to) { // `to` is an argument (transitively) of `from`
-				std::unordered_set<const Node*> visited;
-				std::vector<const Node*> work{from};
-				while (!work.empty()) {
-					const Node* n = work.back();
-					work.pop_back();
-					if (!visited.insert(n).second)
-						continue;
-					if (n == to)
-						return true;
-					if (interior(n))
-						for (const auto& arg : std::get<InvocationNode>(*n).arguments)
-							work.push_back(&arg.get());
-				}
-				return false;
-			};
-			for (const Node* d : dominators)
-				if (std::all_of(dominators.begin(), dominators.end(), [&](const Node* o) { return below(d, o); }))
-					return d;
-			return source;
+			return false;
 		};
+		// Recomputing it is allowed, but saving it is preferred (unless over the memory budget): reductions to much
+		// smaller results (e.g. the statistics of a normalization: recomputing them reads the whole input again), and
+		// values of the forward pass that a non-fusible backward operation reads (e.g. `gelu(h)` for a weight
+		// gradient). Not a view: a view is not materialized for the operation (e.g. the permuted heads that attention
+		// reads).
+		auto preferSaved = [&](const Node& node) {
+			if (reduction(node)) {
+				double input = 0;
+				for (const auto& a : std::get<InvocationNode>(node).arguments)
+					input = std::max(input, bytes(a.get()));
+				if (4 * bytes(node) <= input)
+					return true;
+			}
+			return forward.contains(&node) && !isView(node) && readByOpaque(node);
+		};
+		// The values that the forward pass writes to memory anyway (saving them costs their read in the backward pass;
+		// saving another value costs its write as well): the inputs and outputs, the results of non-fusible operations
+		// (or their epilogues: a bias or scale of weights and constants, which the backends compute with them), and the
+		// arguments of non-elementwise forward operations, also through reshapes and permutations.
+		std::unordered_set<const Node*> written;
 		{
-			std::vector<const Node*> moved;
-			std::unordered_set<const Node*> unique;
-			for (const Node* r : residuals) {
-				const Node* source = singleSource(r);
-				if (unique.insert(source != nullptr ? source : r).second)
-					moved.push_back(source != nullptr ? source : r);
+			auto elementwiseOp = [&](const Node& n) {
+				const auto* inv = std::get_if<InvocationNode>(&n);
+				return inv != nullptr && !opaque(n) && !reduction(n) && !isView(n);
+			};
+			std::unordered_map<const Node*, std::vector<const Node*>> forwardUsers;
+			for (const Node* n : forward)
+				if (const auto* inv = std::get_if<InvocationNode>(n))
+					for (const auto& a : inv->arguments)
+						forwardUsers[&a.get()].push_back(n);
+			// The epilogue of a non-fusible result: its only user, elementwise in it and in weights and constants.
+			auto epilogue = [&](const Node& n) -> const Node* {
+				auto it = forwardUsers.find(&n);
+				if (it == forwardUsers.end() || it->second.size() != 1 || !elementwiseOp(*it->second[0]))
+					return nullptr;
+				const auto& inv = std::get<InvocationNode>(*it->second[0]);
+				for (const auto& a : inv.arguments)
+					if (&a.get() != &n && dependencies(a.get()).second)
+						return nullptr;
+				return it->second[0];
+			};
+			for (size_t i = 0; i < numOutputs; ++i)
+				written.insert(&vjp.outputs[i].get());
+			for (const Node* n : forward) {
+				if (std::holds_alternative<InputNode>(*n)) {
+					written.insert(n);
+				} else if (opaque(*n)) {
+					const Node* e = epilogue(*n);
+					written.insert(e != nullptr ? e : n);
+				}
+				if (const auto* inv = std::get_if<InvocationNode>(n);
+					inv != nullptr && !elementwiseOp(*n) && !isView(*n))
+					for (const auto& a : inv->arguments) {
+						const Node* arg = &a.get();
+						while (isView(*arg)) // (the value that the view reads)
+							arg = &std::get<InvocationNode>(*arg).arguments[0].get();
+						written.insert(arg);
+					}
 			}
-			for (const Node* m : masks)
-				if (unique.insert(m).second)
-					moved.push_back(m);
-			residuals = std::move(moved);
 		}
-
-		// Residuals that are elementwise in other residuals (and weights and constants) are not saved: the backward pass
-		// recomputes them from those, which costs no memory, also if the forward pass materializes them (e.g. `gelu(h)`
-		// for a matrix product when `h` is saved for the derivative). The recomputation and the other uses of its inputs
-		// become one kernel in the backends (sibling fusion: `gelu(h)` and `gelu_backward(h, dy)` read `h` once).
-		std::unordered_set<const Node*> saved(residuals.begin(), residuals.end());
-		std::function<bool(const Node&, const Node*)> recomputable = [&](const Node& node, const Node* self) {
-			if (&node != self && saved.contains(&node))
-				return true;
-			if (!dependencies(node).second)
-				return true; // weights and constants
-			const auto* inv = std::get_if<InvocationNode>(&node);
-			if (inv == nullptr || !elementwise(node))
-				return false;
-			return std::all_of(inv->arguments.begin(), inv->arguments.end(), [&](const auto& arg) {
-				return recomputable(arg.get(), self);
-			});
+		// (A view costs slightly more than the value it views, which is saved instead on a tie: a saved view is a copy,
+		// and the backends compute a view of a result after the kernel, e.g. the per-row mean reshaped for broadcasting.)
+		auto cost = [&](const Node& node) {
+			return (written.contains(&node) ? 1.0 : 2.0) * bytes(node) * (isView(node) ? 1.0 + 1e-6 : 1.0);
 		};
-		std::erase_if(residuals, [&](const Node* r) {
-			if (!recomputable(*r, r))
-				return false;
-			saved.erase(r);
-			return true;
-		});
+
+		// (Checkpointing: recomputed, also matrix products; the boundary values are saved.)
+		auto forcedRecompute = [&](const Node& node) {
+			return std::holds_alternative<InvocationNode>(node) && !boundary.contains(&node) &&
+				   (recompute.contains(&node) || (options.checkpoint != nullptr && !forward.contains(&node)));
+		};
+
+		// The cut: node v is in(2v) -> out(2v+1) with the cost of saving v as capacity; s -> in for values that are
+		// not recomputed; out(argument) -> in(user); out(required) -> t.
+		auto cut = [&](bool withPreferences) {
+			constexpr double inf = std::numeric_limits<double>::infinity();
+			MinCut flow(2 * nodes.size() + 2);
+			const size_t source = 2 * nodes.size(), sink = source + 1;
+			for (size_t i = 0; i < nodes.size(); ++i) {
+				const Node& v = *nodes[i];
+				const bool forced = forcedRecompute(v);
+				flow.edge(2 * i, 2 * i + 1, forced ? inf : cost(v));
+				if (!forced && (opaque(v) || (withPreferences && preferSaved(v))))
+					flow.edge(source, 2 * i, inf);
+				if (const auto* inv = std::get_if<InvocationNode>(&v))
+					for (const auto& a : inv->arguments)
+						if (auto it = index.find(&a.get()); it != index.end())
+							flow.edge(2 * it->second + 1, 2 * i, inf);
+			}
+			for (const Node* r : required)
+				flow.edge(2 * index.at(r) + 1, sink, inf);
+			const auto side = flow.sourceSide(source, sink);
+			std::vector<const Node*> saved;
+			double total = 0;
+			for (size_t i = 0; i < nodes.size(); ++i)
+				if (side[2 * i] && !side[2 * i + 1]) {
+					saved.push_back(nodes[i]);
+					total += bytes(*nodes[i]);
+				}
+			return std::pair{saved, total};
+		};
+		auto [residuals, total] = cut(true);
+		if (total > options.memoryBudget) // (over the budget: recompute wherever possible)
+			residuals = cut(false).first;
 
 		auto typeOf = [](const Node& node) -> std::variant<PrimitiveType, TensorType> {
 			const DataType& type = getDataType(node);

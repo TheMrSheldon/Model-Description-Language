@@ -4,3 +4,4 @@
 add_subdirectory(onednn) # oneDNN (MDL_ENABLE_ONEDNN)
 add_subdirectory(cublas) # cuBLAS (MDL_ENABLE_CUDA, MDL_ENABLE_CUBLAS)
 add_subdirectory(cudnn)  # cuDNN (MDL_ENABLE_CUDA, MDL_ENABLE_CUDNN; CUDNN_ROOT)
+add_subdirectory(flash)  # FlashAttention-2 (MDL_ENABLE_CUDA, MDL_ENABLE_FLASH)

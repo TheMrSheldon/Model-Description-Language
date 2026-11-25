@@ -351,8 +351,10 @@ namespace mdl::backend::tvm {
 				const auto dof = ts.size() > 1 && ts[1].defined() ? scalarConstant(ts[1]) : std::optional<double>{};
 				if (!dof)
 					throw std::runtime_error("var: the degrees of freedom must be a compile-time constant");
-				auto divisor =
-						emitAs(bb, callRelaxOp("relax.op.subtract", n, makeFloatConst(static_cast<float>(*dof), dtypeOf(x))), "dof");
+				auto divisor = emitAs(
+						bb, callRelaxOp("relax.op.subtract", n, makeFloatConst(static_cast<float>(*dof), dtypeOf(x))),
+						"dof"
+				);
 				return callRelaxOp("relax.op.divide", ss, divisor);
 			},
 

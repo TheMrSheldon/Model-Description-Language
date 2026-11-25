@@ -280,7 +280,7 @@ namespace mdl::backend::tvm {
 		PatternEntry makeScaledMatmul() {
 			auto product = IsOp("mdl.matmul")(
 					Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(), Wildcard(),
-					Wildcard(), Wildcard(), Wildcard(), Wildcard()
+					Wildcard(), Wildcard(), Wildcard()
 			);
 			auto c = Wildcard();
 			DFPattern pattern = IsOp("relax.divide")(product, c);

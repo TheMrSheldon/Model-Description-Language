@@ -218,10 +218,10 @@ namespace {
 
 	void
 	matmul(dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
-		   const void* addend, int activation, float alpha) {
+		   const void* addend, float alpha) {
 		using Key = std::tuple<
 				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool,
-				int, float>;
+				float>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const memory::desc srcMd(a.dims, t, a.strides), wMd(b.dims, t, b.strides), dstMd(d.dims, t, d.strides);
 		const memory::dim N = d.dims.back();
@@ -232,15 +232,13 @@ namespace {
 
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), a.dims, a.strides, b.dims, b.strides, d.dims, d.strides, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, alpha},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					if (alpha != 1.0f)
 						attr.set_scales_mask(DNNL_ARG_SRC, 0);
-					// The epilogue: act(...) + addend.
+					// The epilogue: + addend.
 					dnnl::post_ops ops;
-					if (activation == 1)
-						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
 					if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
@@ -261,7 +259,7 @@ namespace {
 			const float* c32 = bias ? widened(scratch, 2, t, bias, N) : nullptr;
 			const float* r32 = addend ? widened(scratch, 4, t, addend, d.extent()) : nullptr;
 			float* out = scratch.get(3, d.extent());
-			matmul(dt::f32, out, a32, b32, c32, a, b, d, r32, activation, alpha);
+			matmul(dt::f32, out, a32, b32, c32, a, b, d, r32, alpha);
 			convert(dt::f32, out, t, dst, d.extent());
 			return;
 		}
@@ -274,7 +272,7 @@ namespace {
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
 		if (addend != nullptr)
 			args.emplace(
-					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
+					DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
 			);
 		float scale = alpha;
@@ -285,7 +283,7 @@ namespace {
 	}
 
 	/**
-	 * @brief dst = act(alpha * A @ W^T + bias) + addend with quantized W [N, K] (see mdl_matmul_q_f32): oneDNN's
+	 * @brief dst = alpha * A @ W^T + bias + addend with quantized W [N, K] (see mdl_matmul_q_f32): oneDNN's
 	 * weight decompression (the weights are dequantized inside the GEMM's inner loop, so they are read from memory in
 	 * their compressed size); where oneDNN does not implement a configuration, W is dequantized into a scratch buffer
 	 * first.
@@ -293,7 +291,7 @@ namespace {
 	void matmulQuantized(
 			dt t, void* dst, const void* A, const int8_t* q, const void* scales, const int8_t* zeros, int format,
 			int64_t group, const void* bias, int64_t M, int64_t K, int64_t N, int64_t aM, int64_t aK, int64_t dM,
-			int64_t dN, const void* addend, int activation, float alpha
+			int64_t dN, const void* addend, float alpha
 	) {
 		const bool int4 = format != 1;
 		const memory::dim groups = K / group;
@@ -309,12 +307,11 @@ namespace {
 		const memory::desc biasMd({1, N}, t, memory::format_tag::ab);
 
 		using Key = std::tuple<
-				int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int,
-				float>;
+				int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, float>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), format, group, M, K, N, aM, aK, dM, dN, zeros != nullptr, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, alpha},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					// Compute in the activations' type; apply_to_int: the integer weights are converted to it.
@@ -333,8 +330,6 @@ namespace {
 					if (alpha != 1.0f)
 						attr.set_scales_mask(DNNL_ARG_SRC, 0);
 					dnnl::post_ops ops;
-					if (activation == 1)
-						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
 					if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
@@ -377,7 +372,7 @@ namespace {
 				weights = narrow.data();
 			}
 			const View b{{K, N}, {1, K}};
-			matmul(t, dst, A, weights, bias, a, b, d, addend, activation, alpha);
+			matmul(t, dst, A, weights, bias, a, b, d, addend, alpha);
 			return;
 		}
 
@@ -398,7 +393,7 @@ namespace {
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
 		if (addend != nullptr)
 			args.emplace(
-					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
+					DNNL_ARG_ATTR_MULTIPLE_POST_OP(0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
 			);
 		float scale = alpha;
@@ -519,7 +514,7 @@ namespace {
 			ones = ones16.data();
 		}
 		const View a{{1, M}, {M, 1}}, b{{M, N}, {N, 1}}, d{{1, N}, {N, 1}};
-		matmul(t, dst, ones, src, nullptr, a, b, d, nullptr, 0, 1.0f);
+		matmul(t, dst, ones, src, nullptr, a, b, d, nullptr, 1.0f);
 	}
 
 	void layerNorm(
@@ -579,7 +574,7 @@ namespace {
 	/** @brief The product of one Gemm (see mdl_strided.hpp) at the offsets of a slice. */
 	void gemm(
 			dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
-			int32_t activation, float alpha
+			float alpha
 	) {
 		// A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not with a
 		// bias along N, or a broadcast B, which would become the left operand).
@@ -605,7 +600,7 @@ namespace {
 		a.dims.insert(a.dims.end(), {g.M, g.K}), a.strides.insert(a.strides.end(), {g.a_sM, g.a_sK});
 		b.dims.insert(b.dims.end(), {g.K, g.N}), b.strides.insert(b.strides.end(), {g.b_sK, g.b_sN});
 		d.dims.insert(d.dims.end(), {g.M, g.N}), d.strides.insert(d.strides.end(), {g.c_sM, g.c_sN});
-		matmul(t, dst, A, B, bias, a, b, d, addend, activation, alpha);
+		matmul(t, dst, A, B, bias, a, b, d, addend, alpha);
 	}
 
 	size_t elementSize(dt t) { return t == dt::f32 ? 4 : 2; }
@@ -619,14 +614,14 @@ namespace {
 			type* out, const type* A, const type* B, const type* bias, const type* addend, int64_t a_rank,             \
 			const int64_t* a_shape, const int64_t* a_strides, int64_t b_rank, const int64_t* b_shape,                  \
 			const int64_t* b_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
 			const int r = mdl::kernels::forEachGemm(                                                                   \
 					{a_rank, a_shape, a_strides}, {b_rank, b_shape, b_strides}, {c_rank, c_shape, c_strides}, 2,       \
 					[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t bo, int64_t co) {                             \
 						gemm(dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), at(B, bo, dtype), bias,   \
-							 g, at(addend, co, dtype), activation, alpha);                                             \
+							 g, at(addend, co, dtype), alpha);                                                         \
 						return 0;                                                                                      \
 					}                                                                                                  \
 			);                                                                                                         \
@@ -638,7 +633,7 @@ namespace {
 			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
 			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
 			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
-			int32_t activation, float alpha                                                                            \
+			float alpha                                                                                                \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
 			/* W^T [K, N] (unused strides: the batch dimensions only need its rank). */                                \
@@ -649,7 +644,7 @@ namespace {
 						matmulQuantized(                                                                               \
 								dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), q, scales, zeros,      \
 								format, group, bias, g.M, g.K, g.N, g.a_sM, g.a_sK, g.c_sM, g.c_sN,                    \
-								at(addend, co, dtype), activation, alpha                                               \
+								at(addend, co, dtype), alpha                                                           \
 						);                                                                                             \
 						return 0;                                                                                      \
 					}                                                                                                  \

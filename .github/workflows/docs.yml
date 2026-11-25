@@ -1,6 +1,7 @@
 # The documentation (Doxygen, see docs/dev/technical/documentation.md), published on GitHub Pages (branch gh-pages):
 #
-# - A pull request builds it (Doxygen warnings are errors) without publishing.
+# - A pull request builds it without publishing. Doxygen warnings are reported but do not fail the build (the tag file
+#   of cppreference has entries Doxygen warns about); -DMDL_DOCS_WARN_AS_ERROR=ON makes them errors locally.
 # - A push to main publishes it as nightly/ (also a prerelease).
 # - A release vX.Y.Z publishes it as vX.Y.Z/ and as latest/. The root redirects to latest/; versions.json lists the
 #   published versions (docs/doxygen/mdl-version.js reads it for the version dropdown).
@@ -57,7 +58,7 @@ jobs:
             echo "name=nightly" >> "$GITHUB_OUTPUT"
           fi
       - name: Configure CMake
-        run: cmake --preset conf-docs -DMDL_DOCS_WARN_AS_ERROR=ON "-DMDL_DOCS_VERSION=${{ steps.version.outputs.name }}"
+        run: cmake --preset conf-docs "-DMDL_DOCS_VERSION=${{ steps.version.outputs.name }}"
       - name: Build the Documentation
         run: |
           cmake --build --preset docs

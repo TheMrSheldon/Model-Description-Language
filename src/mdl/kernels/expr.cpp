@@ -149,7 +149,8 @@ namespace mdl::kernels::expr {
 					fail(peek(), "expected 'else'");
 				auto alternative = conditional();
 				if (alternative->type != value->type)
-					fail(at, std::format("the branches of 'if' are {} and {}", str(value->type), str(alternative->type)));
+					fail(at,
+						 std::format("the branches of 'if' are {} and {}", str(value->type), str(alternative->type)));
 				return make({.kind = Node::Kind::conditional, .type = value->type, .args = {cond, value, alternative}});
 			}
 
@@ -330,7 +331,9 @@ namespace mdl::kernels::expr {
 						expect(")");
 						require(list, Type::shape, t, std::format("the first argument of {}", t.text));
 						require(perm, Type::shape, t, std::format("the permutation of {}", t.text));
-						return make({.kind = Node::Kind::call, .type = Type::shape, .name = t.text, .args = {list, perm}});
+						return make(
+								{.kind = Node::Kind::call, .type = Type::shape, .name = t.text, .args = {list, perm}}
+						);
 					}
 					fail(t, std::format("unknown name '{}' (captures are written $name)", t.text));
 				}

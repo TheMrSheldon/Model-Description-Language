@@ -36,22 +36,22 @@ namespace mdl::backend::tvm {
 	} // namespace
 
 	::tvm::Target parseTarget(const std::string& spec) {
-			if (spec.empty() || spec.front() == '{' || spec.find(' ') == std::string::npos)
-				return ::tvm::Target(spec);
-			std::istringstream words(spec);
-			std::string kind, option;
-			words >> kind;
-			std::string json = "{\"kind\": " + jsonString(kind);
-			while (words >> option) {
-				const auto eq = option.find('=');
-				if (!option.starts_with('-') || eq == std::string::npos)
-					throw std::runtime_error("target '" + spec + "': expected options -key=value, got " + option);
-				const std::string key = option.substr(option.find_first_not_of('-'), eq - option.find_first_not_of('-'));
-				const std::string value = option.substr(eq + 1);
-				const bool number = !value.empty() && value.find_first_not_of("0123456789") == std::string::npos;
-				json += ", " + jsonString(key) + ": " + (number ? value : jsonString(value));
-			}
-			return ::tvm::Target(json + "}");
+		if (spec.empty() || spec.front() == '{' || spec.find(' ') == std::string::npos)
+			return ::tvm::Target(spec);
+		std::istringstream words(spec);
+		std::string kind, option;
+		words >> kind;
+		std::string json = "{\"kind\": " + jsonString(kind);
+		while (words >> option) {
+			const auto eq = option.find('=');
+			if (!option.starts_with('-') || eq == std::string::npos)
+				throw std::runtime_error("target '" + spec + "': expected options -key=value, got " + option);
+			const std::string key = option.substr(option.find_first_not_of('-'), eq - option.find_first_not_of('-'));
+			const std::string value = option.substr(eq + 1);
+			const bool number = !value.empty() && value.find_first_not_of("0123456789") == std::string::npos;
+			json += ", " + jsonString(key) + ": " + (number ? value : jsonString(value));
+		}
+		return ::tvm::Target(json + "}");
 	}
 
 	namespace {

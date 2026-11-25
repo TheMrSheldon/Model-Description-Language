@@ -47,7 +47,9 @@ namespace mdl::backend::tvm::gpu {
 		const PrimExpr extent = info.iters.back().dom; // (the innermost dimension: the lanes stay within it)
 		::tvm::sym::Analyzer analyzer;
 		if (vector == 1 ||
-			!analyzer->CanProve(::tvm::floormod(extent, ::tvm::IntImm(extent.ty(), vector)) == ::tvm::IntImm(extent.ty(), 0)))
+			!analyzer->CanProve(
+					::tvm::floormod(extent, ::tvm::IntImm(extent.ty(), vector)) == ::tvm::IntImm(extent.ty(), 0)
+			))
 			return std::nullopt;
 		try {
 			auto loops = sch->GetLoops(info.block_rv);
@@ -56,7 +58,8 @@ namespace mdl::backend::tvm::gpu {
 			const auto all = loops.size() == 1 ? loops[0] : sch->Fuse(loops);
 			// Exactly into vectors (no predicate on the lanes), then the vectors over the threads.
 			const auto lanes = sch->Split(all, {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(vector)});
-			const auto threads = sch->Split(lanes[0], {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(kThreads)});
+			const auto threads =
+					sch->Split(lanes[0], {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(kThreads)});
 			sch->Bind(threads[0], "blockIdx.x");
 			sch->Bind(threads[1], "threadIdx.x");
 			sch->Vectorize(lanes[1]);

@@ -6,14 +6,19 @@ For the kernel package format (manifests, patterns, expressions) see \ref spec_k
 
 A compiled model's GPU work comes from two sources:
 
-1. **Generated kernels**: TVM fuses the remaining operations into PrimFuncs (FuseOps/FuseTIR), which the CUDA target
-   schedules and compiles to CUDA C, then to a cubin with NVRTC at compile time. The cubin is embedded in the model's
+1. **Generated kernels**: the fusion planner groups the remaining operations and TVM's FuseTIR makes one PrimFunc per
+   group (see \ref dev_optimization). The CUDA target schedules them and compiles them to CUDA C, then
+   to a cubin with NVRTC at compile time. The cubin is embedded in the model's
    object file. Loading a model needs no compiler.
 2. **Kernel packages**: library calls (cuBLASLt, cuDNN) that the backend selects by pattern matching before fusion.
    From TVM's point of view these are `call_extern`s in host code.
 
-Every kernel runs on TVM's current stream (`TVMFFIEnvGetStream`). The caller controls that stream, e.g. torch's
-current stream through the Python binding. Temporary buffers are offsets in one workspace arena per call.
+Every kernel runs on TVM's current stream (`TVMFFIEnvGetStream`). During a call, a session sets that stream to its own
+stream and replays repeated calls as CUDA graphs. Temporary buffers are offsets in the session's workspace. See
+\ref dev_runtime.
+
+Kernel packages must therefore launch on `TVMFFIEnvGetStream` and must not synchronize, or calls that use them are not
+captured. They also must not allocate after their first call with a configuration: the first call is not captured.
 
 # Pipeline overview (CUDA-relevant parts)
 
@@ -22,9 +27,8 @@ current stream through the Python binding. Temporary buffers are offsets in one 
 | Attention fusion | `src/mdl/passes/attention.cpp` | softmax(QKᵀ·s + bias)·V → `ATTENTION*` builtins (target-independent) |
 | Kernel selection | `details/kernel_match.cpp`, `tvm.cpp` | Relax ops → package calls, in rounds; context pruning afterwards |
 | Legalization | `details/legalize.cpp`, `Target::overrideLegalizations` | remaining ops → TIR; the CUDA target overrides `mdl.scatter_add_rows` |
-| Row fusion | `details/fuse_rows.cpp` | reductions over the same rows, per-row values and full-shape elementwise ops → one group, possibly with several results (target-independent; before FuseTIR) |
-| Sibling fusion | `details/fuse_siblings.cpp` | independent elementwise kernels with the same result shape that read a common input → one kernel with several results (target-independent) |
-| Flattening | `details/flatten_injective.cpp` | injective kernels → one flat loop (target-independent) |
+| Fusion planner | `details/fusion/` | which kernel calls become one kernel: producers and consumers, readers of the same tensors, reductions over the same rows or columns, several results (target-independent; before FuseTIR) |
+| Merging and flattening | `details/flatten_injective.cpp` | the results of a kernel → one loop nest; injective kernels → one flat loop (target-independent) |
 | Scheduling | `targets/cuda.cpp` `CUDATarget::schedule` | schedule rules, first match wins (below) |
 | Lowering/emit | `CUDATarget::blockLowering/beforeSplit/emit` | TVM's default GPU TIR passes; CUDA C → NVRTC cubin → one `.o` |
 
@@ -53,14 +57,17 @@ uncoalesced.
 ## RowReduction (`row_reduction.{hpp,cpp}`)
 
 Sums, maxima, softmax and normalizations (LayerNorm forward and backward, log-softmax): one or more reductions over
-the innermost dimension(s), followed by elementwise epilogues over the same rows. Row fusion produces such kernels.
+the innermost dimension(s), followed by elementwise epilogues over the same rows. The fusion planner produces such kernels.
 
 - One **warp per row**. The 32 lanes stride over the row and combine their partials with warp shuffles.
 - A single reduction packs `kRowsPerBlock = 4` rows into a block. With several reductions (e.g. mean, then
   variance), each row gets its own block.
-- **Several epilogues** (several results, e.g. a normalization's output and the values saved for its gradient):
-  their loop nests are merged into the last one's (`Merge`). Full-shape epilogues share all loops; per-row results
-  share only the row loops and are written outside the column loop.
+- **Several epilogues** (several results, e.g. a normalization's output and its statistics saved for the gradient):
+  their loop nests are merged into those of the *anchor*, the last epilogue over the full rows (`Merge`). Full-row
+  epilogues share all loops; per-row results share only the row loops and are written outside the column loop. Per-row
+  results may come in any order after the reductions.
+- **Per-row blocks between the reductions** (e.g. a mean that is a result and that the variance's reduction reads) are
+  computed at the row loop like the reductions; every lane of the row computes the same value.
 - The rule applies to rows of symbolic length, or of static length up to `kMaxRowLength = 4096`, and needs at least
   `kMinRows = 64` rows.
 
@@ -68,19 +75,27 @@ DLight's GeneralReduction would use 1024 threads for a symbolic row of perhaps 1
 
 ## ColumnReduction (`column_reduction.{hpp,cpp}`)
 
-`out[n] = Σ_m x[m, n]`, optionally followed by an epilogue (a cast, or accumulation into a gradient). Bias and
-LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfactor):
+`out[n] = Σ_m x[m, n]`, several of them over the same columns (e.g. a normalization's `Σdy` and `Σ(dy·x̂)`, which
+then read `dy` once), each optionally followed by epilogues per column (a cast, or accumulation into a gradient).
+Bias and LayerNorm-parameter gradients have this form. The rule runs **two kernels** (rfactor):
 
 1. **First pass:** the rows are split into chunks of `kChunk = 64`. Each thread sums one chunk for `kVector = 4`
-   adjacent columns, using vector loads. A warp covers adjacent columns, so reads are coalesced. Blocks are
-   `8 × 32` (`kChunksPerBlock × warp`). The output is partial sums of shape `[chunks, columns]` in the reduction type,
-   e.g. f32.
-2. **Second pass:** 256 threads per block. Each thread sums the chunks of one column in a register (a local cache
-   write, not an initialized global buffer) and applies the epilogue.
+   adjacent columns, using vector loads, in registers, and stores its partial sums once. A warp covers adjacent
+   columns, so reads are coalesced. Blocks are `8 × 32` (`kChunksPerBlock × warp`). The output is partial sums of
+   shape `[chunks, columns]` in the reduction type, e.g. f32.
+2. **Second pass:** each thread sums the chunks of one column in a register and applies that reduction's epilogues.
+   With few columns (e.g. 768 bias gradients) this pass is latency-bound, so it uses blocks of `kThreads = 32` (spread
+   over many SMs) and unrolls the chunks by `kUnroll = 32`, which keeps their loads in flight together. Splitting a
+   column's chunks over several threads would need its epilogue (often `gradient += sum`, possibly in place) on one of
+   them; TVM's schedule cannot guard that, so it isn't done (see the open items below).
 
-The rule needs at least `kMinRows = 256` rows; with fewer, DLight's rules take the kernel. The second pass's write-back
-is not predicated, so its thread count must divide a static number of columns: the largest power of two from 256
-down to 32 that does, or the number of columns itself if it is at most 256. Otherwise DLight takes the kernel.
+A reduction block may have two results (sibling sums merged before scheduling, see \ref dev_optimization): both passes then
+keep a register cache per result, created before any is moved into the loops. Each reduction is scheduled with its
+epilogues in its own loop nest; then the nests of all reductions are merged level
+by level (`Merge`), so that both passes are one kernel each. The rule needs at least `kMinRows = 256` rows; with
+fewer, DLight's rules take the kernel. The second pass's write-back is not predicated, so its thread count must
+divide a static number of columns: 32 if it does, or the number of columns itself if it is at most 32. Otherwise
+DLight takes the kernel.
 
 ## Elementwise (`elementwise.{hpp,cpp}`)
 
@@ -104,7 +119,8 @@ reshape copies, broadcasts of trailing dimensions) into one loop over the result
 - Operands with the result's layout are read at `n`.
 - Trailing broadcasts are read at `n % P`.
 
-Blocks with several stores (merged sibling kernels) are flattened as well, as long as every store writes at the
+A kernel with several results over the same domain first becomes one block with a store per result (one loop nest,
+also when it cannot be flattened). Blocks with several stores are flattened as well, as long as every store writes at the
 iterators.
 
 Without this pass, splitting a fused loop over `[batch, seq, 3072]` with symbolic sizes costs several 64-bit
@@ -143,8 +159,9 @@ Strided-view helpers shared with the CPU packages are in `kernels/common/include
 - **Algorithm choice:** on the first call for a problem shape, the heuristic candidates are each timed 3 times into a
   scratch buffer, never into the output, because C may alias it. The fastest is cached.
 - **Per thread and device:** the cuBLAS and cuBLASLt handles and a 32 MiB cuBLASLt workspace.
-- Not used yet: the GELU / DGELU / BGRADB epilogues. GELU is only the tanh approximation, so it would need
-  `--fast-math`. Deferred (see the open items below).
+- **Epilogues:** only those `mdl.matmul` has (bias, scale, addend). Activations such as GELU are generated kernels,
+  which the fusion planner fuses with their neighbors (cuBLASLt's GELU is only the tanh approximation anyway). The
+  bias-gradient epilogue (BGRADB) is not used (see the open items below).
 
 ## cuDNN: `kernels/cudnn` (`mdl_attention_{fwd,bwd}_{bf16,f16}`)
 
@@ -170,6 +187,37 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 - **f32:** not covered. f32 attention is expanded into matmul + softmax kernels, the expansion fallback for unmatched
   ops.
 
+## FlashAttention-2: `kernels/flash` (`mdl_flash_attention_{fwd,bwd}_{bf16,f16}`)
+
+FlashAttention-2 (github.com/Dao-AILab/flash-attention, BSD-3-Clause, v2.7.4.post1) behind the cuDNN package's ABI.
+
+- **Patterns and priority:** the same patterns as the cuDNN package, priority 300 against cuDNN's 200, so it is chosen
+  wherever it applies:
+  - no bias and no lengths: masked attention stays on cuDNN;
+  - rank 3 or 4;
+  - head dimensions 32, 64 or 128 (V's the same as Q's);
+  - the head dimension contiguous.
+- **Mixing packages:** both packages write the row statistics in the same layout (`[..., Sq]`, float32), so a forward
+  pass of one and a backward pass of the other fit together.
+- **Sources:** fetched by CPM with FlashAttention's CUTLASS submodule.
+  - Only the instantiations we call are compiled: forward and backward, bf16 and f16, head dimensions 32/64/128, not
+    causal. That is 12 compilation units, about 3 minutes with `-j8`.
+  - `FLASHATTENTION_DISABLE_{DROPOUT,ALIBI,SOFTCAP,LOCAL,UNEVEN_K}` remove the features we don't use.
+  - Built for sm_80, and newer GPUs through PTX.
+  - `MDL_ENABLE_FLASH=OFF` skips the package.
+- **Wrapper (`src/flash.cu`):** replaces FlashAttention's `flash_api.cpp`, which needs PyTorch. It fills FlashAttention's
+  parameters from the strided views: the logical `[L0, L1, S, D]` becomes FlashAttention's batch `L0` and heads `L1`.
+  Then FlashAttention's row statistics `[b, h, s]` are the ABI's layout.
+- **PyTorch includes:** `shim/` replaces the three PyTorch headers that FlashAttention's kernels include. These are
+  the dropout generator state (unused without dropout) and the CUDA error macros, which throw an error that the
+  wrapper turns into a non-zero return value.
+- **Backward workspace:** dQ is accumulated in float32 (`[b, Sq rounded to 128, h, d]`), plus the row sums of
+  dO·O. Both live in a per-thread, per-device buffer that grows on demand, so CUDA graph captures (after the warm-up)
+  allocate nothing.
+- **Measured** (A100 bf16 BERT-base training): attention 3.58 → 3.13 ms per step (PyTorch's FlashAttention: 2.99 ms).
+  The step takes 29.27 ms against `torch.compile` + SDPA's 30.18 ms at 64×128, and 31.37 ms against 32.29 ms at
+  16×512.
+
 # Adding a CUDA kernel
 
 - **A new library call:** add an implementation to a package manifest (see \ref spec_kernel_packages), with a
@@ -182,9 +230,14 @@ Fused scaled-dot-product attention through the cuDNN frontend (`src/attention.cp
 # Open items
 
 \todo The cuBLASLt bias-gradient epilogue (BGRADB) was slower than separate column sums on an A100 slice
-(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions. Likewise the
-GELU and DGELU epilogues (tanh approximation only: with `--fast-math`).
+(cuBLAS 12.9: CUTLASS `bgradb` kernels) and is not used; measure it again on other GPUs and versions.
 
-\todo CUDA graphs and a caller-provided workspace.
+\todo ColumnReduction's second pass: the partial sums of a column over several threads (a cross-thread
+reduction), with the epilogue on one of them.
+
+\todo The merged sibling sums of a LayerNorm backward pass take 46 µs where a hand-written kernel takes 17 µs: the
+reductions' initialization inside the loop (`DecomposeReduction` splits the kernel) and 64-bit index arithmetic.
+
+\todo The Python bindings do not use the framework's current stream yet (see \ref dev_runtime).
 
 \todo Unpadding of suffix-masked regions.

@@ -19,9 +19,9 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 
 	namespace {
 		namespace T = ::tvm::script::ir_builder::tirx;
-		using ::tvm::script::ir_builder::IRBuilder;
-		using ::tvm::With;
 		using ::tvm::PrimType;
+		using ::tvm::With;
+		using ::tvm::script::ir_builder::IRBuilder;
 
 		PrimType dtype_of(const std::string& name) { return PrimType(ffi::StringToDLDataType(name)); }
 
@@ -132,16 +132,15 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 			const auto a = T::Arg("a", T::Handle()), c = T::Arg("c", T::Handle());
 			const PrimVar s1 = int32("s1"), s0 = int32("s0"), d1 = int32("d1"), d0 = int32("d0");
 			const auto A = match_buffer(a, {I(frag_m), I(frag_n)}, dtype, offset_factor, shared_scope, {s1, s0});
-			const auto C =
-					match_buffer(c, {I(frag_m), I(frag_n)}, dtype, offset_factor, wmma_fragment_scope, {d1, d0});
+			const auto C = match_buffer(c, {I(frag_m), I(frag_n)}, dtype, offset_factor, wmma_fragment_scope, {d1, d0});
 			With<T::SBlockFrame> root(T::Block("root"));
 			T::Reads({slice(A, {I(frag_m), I(frag_n)})});
 			T::Writes({slice(C, {I(frag_m), I(frag_n)})});
-			T::Evaluate(call(
-					"tirx.tvm_load_matrix_sync",
-					{C.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(C, d1, frag_m, frag_n),
-					 access_ptr(A, 1, dtype), s1, ::tvm::StringImm(layout)}
-			));
+			T::Evaluate(
+					call("tirx.tvm_load_matrix_sync",
+						 {C.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(C, d1, frag_m, frag_n),
+						  access_ptr(A, 1, dtype), s1, ::tvm::StringImm(layout)})
+			);
 		});
 
 		return {wmma_load_desc, wmma_load_impl};
@@ -169,16 +168,15 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 		const PrimFunc wmma_fill_impl = prim_func("wmma_fill_impl", [&] {
 			const auto c = T::Arg("c", T::Handle());
 			const PrimVar d1 = int32("d1"), d0 = int32("d0");
-			const auto C =
-					match_buffer(c, {I(m_dim), I(n_dim)}, dtype, offset_factor, "wmma.accumulator", {d1, d0});
+			const auto C = match_buffer(c, {I(m_dim), I(n_dim)}, dtype, offset_factor, "wmma.accumulator", {d1, d0});
 			With<T::SBlockFrame> root(T::Block("root"));
 			T::Reads({});
 			T::Writes({slice(C, {I(m_dim), I(n_dim)})});
-			T::Evaluate(call(
-					"tirx.tvm_fill_fragment",
-					{C.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(C, d1, m_dim, n_dim),
-					 ::tvm::FloatImm(PrimType::Float(32), 0)}
-			));
+			T::Evaluate(
+					call("tirx.tvm_fill_fragment",
+						 {C.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(C, d1, m_dim, n_dim),
+						  ::tvm::FloatImm(PrimType::Float(32), 0)})
+			);
 		});
 
 		return {wmma_fill_desc, wmma_fill_impl};
@@ -206,17 +204,16 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 		const PrimFunc wmma_store_impl = prim_func("wmma_store_impl", [&] {
 			const auto a = T::Arg("a", T::Handle()), c = T::Arg("c", T::Handle());
 			const PrimVar s1 = int32("s1"), s0 = int32("s0"), d1 = int32("d1"), d0 = int32("d0");
-			const auto A =
-					match_buffer(a, {I(m_dim), I(n_dim)}, dtype, offset_factor, "wmma.accumulator", {d1, d0});
+			const auto A = match_buffer(a, {I(m_dim), I(n_dim)}, dtype, offset_factor, "wmma.accumulator", {d1, d0});
 			const auto C = match_buffer(c, {I(m_dim), I(n_dim)}, dtype, offset_factor, scope, {s1, s0});
 			With<T::SBlockFrame> root(T::Block("root"));
 			T::Reads({slice(A, {I(m_dim), I(n_dim)})});
 			T::Writes({slice(C, {I(m_dim), I(n_dim)})});
-			T::Evaluate(call(
-					"tirx.tvm_store_matrix_sync",
-					{A.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(A, d1, m_dim, n_dim),
-					 access_ptr(C, 2, dtype), s1, ::tvm::StringImm("row_major")}
-			));
+			T::Evaluate(
+					call("tirx.tvm_store_matrix_sync",
+						 {A.data(), I(m_dim), I(n_dim), I(k_dim), get_wmma_fragment_index(A, d1, m_dim, n_dim),
+						  access_ptr(C, 2, dtype), s1, ::tvm::StringImm("row_major")})
+			);
 		});
 
 		return {wmma_store_desc, wmma_store_impl};
@@ -275,14 +272,11 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 			const PrimVar a1 = int32("a1"), a0 = int32("a0"), b1 = int32("b1"), b0 = int32("b0"), c1 = int32("c1"),
 						  c0 = int32("c0");
 
-			const auto A =
-					match_buffer(a, {I(m_dim), I(k_dim)}, in_dtype, A_offset_factor, "wmma.matrix_a", {a1, a0});
-			const auto B = match_buffer(
-					b, {I(b_shape_0), I(b_shape_1)}, in_dtype, B_offset_factor, "wmma.matrix_b", {b1, b0}
-			);
-			const auto C = match_buffer(
-					c, {I(m_dim), I(n_dim)}, out_dtype, out_offset_factor, "wmma.accumulator", {c1, c0}
-			);
+			const auto A = match_buffer(a, {I(m_dim), I(k_dim)}, in_dtype, A_offset_factor, "wmma.matrix_a", {a1, a0});
+			const auto B =
+					match_buffer(b, {I(b_shape_0), I(b_shape_1)}, in_dtype, B_offset_factor, "wmma.matrix_b", {b1, b0});
+			const auto C =
+					match_buffer(c, {I(m_dim), I(n_dim)}, out_dtype, out_offset_factor, "wmma.accumulator", {c1, c0});
 
 			With<T::SBlockFrame> root(T::Block("root"));
 			T::Reads(
@@ -290,13 +284,12 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 					 slice(B, {I(b_shape_0), I(b_shape_1)})}
 			);
 			T::Writes({slice(C, {I(m_dim), I(n_dim)})});
-			T::Evaluate(call(
-					"tirx.tvm_mma_sync",
-					{C.data(), get_wmma_fragment_index(C, c1, m_dim, n_dim), A.data(),
-					 get_wmma_fragment_index(A, a1, m_dim, k_dim), B.data(),
-					 get_wmma_fragment_index(B, b1, b_shape_0, b_shape_1), C.data(),
-					 get_wmma_fragment_index(C, c1, m_dim, n_dim)}
-			));
+			T::Evaluate(
+					call("tirx.tvm_mma_sync", {C.data(), get_wmma_fragment_index(C, c1, m_dim, n_dim), A.data(),
+											   get_wmma_fragment_index(A, a1, m_dim, k_dim), B.data(),
+											   get_wmma_fragment_index(B, b1, b_shape_0, b_shape_1), C.data(),
+											   get_wmma_fragment_index(C, c1, m_dim, n_dim)})
+			);
 		});
 
 		return {wmma_sync_desc, wmma_sync_impl};
@@ -381,11 +374,8 @@ namespace mdl::tvm_ported::tensor_intrin::cuda {
 		const std::string store_intrin = "wmma_store_" + shape + "_" + out_dtype + "_" + store_scope;
 
 		return {
-				{"init", init_intrin},
-				{"load_a", load_a_intrin},
-				{"load_b", load_b_intrin},
-				{"compute", compute_intrin},
-				{"store", store_intrin},
+				{"init", init_intrin},		 {"load_a", load_a_intrin}, {"load_b", load_b_intrin},
+				{"compute", compute_intrin}, {"store", store_intrin},
 		};
 	}
 

@@ -63,9 +63,8 @@ namespace mdl::backend::tvm {
 	::tvm::relax::Expr makeScatterAddRows(::tvm::relax::Expr g, ::tvm::relax::Expr ids, ::tvm::PrimExpr rows);
 
 	/** @brief A handler for LegalizeOps (see legalizeMap). */
-	::tvm::ffi::Function legalizeHandler(
-			std::function<::tvm::relax::Expr(const ::tvm::relax::BlockBuilder&, const ::tvm::Call&)> fn
-	);
+	::tvm::ffi::Function
+	legalizeHandler(std::function<::tvm::relax::Expr(const ::tvm::relax::BlockBuilder&, const ::tvm::Call&)> fn);
 
 	/** @brief `call_tir` of @p func (added to the module as @p name) with @p inputs and the result @p out. */
 	::tvm::relax::Expr callPrimFunc(
