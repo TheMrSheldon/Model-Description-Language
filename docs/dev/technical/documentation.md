@@ -74,7 +74,9 @@ module FFN[indim: uint, outdim: uint] { ... }
 ~~~
 
 # Versions
-The workflow `.github/workflows/docs.yml` builds the documentation for every pull request (with warnings as
-errors), publishes the state of `main` as `nightly/`, and every release as `vX.Y.Z/` (and as `latest/`) on GitHub
-Pages. Doxygen has no version selector, so versions are distinguished by the URL; the root redirects to `latest/`, and
+The workflow `.github/workflows/docs.yml` builds the documentation for every pull request, publishes the state of
+`main` as `nightly/`, and every release as `vX.Y.Z/` (and as `latest/`) on GitHub Pages. Doxygen's warnings are
+reported but do not fail the build: the tag file of cppreference has entries that Doxygen warns about (e.g.
+`erase_if(std::deque)` in `std::experimental`, a container in the member's name). `-DMDL_DOCS_WARN_AS_ERROR=ON` makes
+warnings errors, e.g. to check the pages locally. Doxygen has no version selector, so versions are distinguished by the URL; the root redirects to `latest/`, and
 `versions.json` lists the published versions.

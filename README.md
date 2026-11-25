@@ -1,7 +1,7 @@
 <h1 align="center">Model Description Language</h1>
 
 <p align="center">
-   <img width=120px src="./res/icon-solo.png">
+   <img width=120px src="./docs/media/icon-solo.png">
 </p>
 
 ---
