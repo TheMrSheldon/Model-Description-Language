@@ -29,6 +29,11 @@ jobs:
         run: cmake --build ./build --parallel
       - name: Run Tests
         run: ctest --test-dir ./build --output-on-failure --parallel 4
+      # The packages themselves (the release workflow builds and tries all formats): a change that breaks the
+      # installation or the CPack configuration fails here, not at the next release.
+      - name: Build the Packages (tar.gz and deb)
+        working-directory: ./build
+        run: cpack -G "TGZ;DEB" -B ../packages
 
   tooling:
     # The frontend and the tooling (mdl-format, mdls) without the compiler: no TVM/LLVM/oneDNN, so it builds with each

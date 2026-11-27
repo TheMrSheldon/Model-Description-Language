@@ -1,13 +1,16 @@
-# Release builds of the tooling (mdl-format, mdls, and the standard library) for every platform the editor integration
-# supports. Each platform is built and tested; the archives have the layout bin/mdl-format, bin/mdls, share/mdl/std/.
+# Release builds: the installers and archives of every platform (see docs/dev/technical/packaging.md), built with CPack.
 #
-# - A tag vX.Y.Z (or vX.Y.Z-suffix, a prerelease) publishes a GitHub release with the archives and SHA256SUMS.
-# - A push to main updates the rolling `nightly` prerelease.
+# - Linux (x64, arm64): the compiler, the runtime, the SDK, and the tools, with CUDA: .tar.gz, .deb and .rpm packages (one
+#   per component). Built on glibc 2.28 (manylinux_2_28) with libstdc++, libgcc and LLVM linked statically, so they run on
+#   any distribution with glibc >= 2.28.
+# - macOS (arm64) and Windows (x64, arm64): the tools (mdl-format, mdls, mdl-doc, the standard library) until the compiler
+#   is ported to them: .tar.gz/.pkg and .zip/.exe.
+# - Every platform also gets mdl-tools-<platform>.{tar.gz,zip}: only the tools, the archive of the editor integration.
 #
-# Portability: Linux binaries are built on glibc 2.28 (manylinux_2_28) with libstdc++ and libgcc linked statically, so
-# they run on any distribution with glibc >= 2.28; Windows binaries use the static C runtime; macOS binaries target
-# macOS 13.3 (std::format, std::expected), are universal binaries (arm64 and x86_64), and are signed and notarized if
-# the signing secrets are set.
+# Every package is installed and tried in the smoke tests (old distributions, macOS, Windows) before anything is published.
+#
+# - A tag vX.Y.Z (or vX.Y.Z-suffix, a prerelease) publishes a GitHub release with the packages and SHA256SUMS.
+# - A push to main replaces the rolling `nightly` prerelease.
 name: Publish Release
 on:
   push:
@@ -20,9 +23,18 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LLVM_VERSION: "21.1.0"   # the LLVM that is linked statically into the Linux compiler (scripts/ci/build-llvm.sh)
+  CUDA_VERSION: "12-9"     # TVM 0.27's CUDA runtime needs CUDA >= 12.8
+  CMAKE_GENERATOR: Ninja
+
 jobs:
-  tools:
-    name: Tools (${{ matrix.platform }})
+  packages:
+    name: Package (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +42,12 @@ jobs:
           - platform: linux-x64
             os: ubuntu-latest
             container: quay.io/pypa/manylinux_2_28_x86_64
+            cuda_repo: x86_64
           - platform: linux-arm64
             os: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
-          - platform: darwin-universal # arm64 and x86_64 in one binary (there are no x86_64 macOS runners)
+            cuda_repo: sbsa
+          - platform: darwin-arm64
             os: macos-latest
           - platform: win32-x64
             os: windows-latest
@@ -41,9 +55,6 @@ jobs:
             os: windows-11-arm
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
-    env:
-      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-      CMAKE_GENERATOR: Ninja
     steps:
       - name: Checkout Repository (with tags, for the version)
         uses: actions/checkout@v6
@@ -54,10 +65,10 @@ jobs:
         shell: bash
 
       # ── Toolchains ──────────────────────────────────────────────────────────────────────────────
-      - name: Install Java (ANTLR code generation) and Check the Compiler (Linux)
+      - name: Install the Build Tools (Linux)
         if: runner.os == 'Linux'
         run: |
-          dnf install -y java-17-openjdk-headless
+          dnf install -y java-17-openjdk-headless rpm-build dnf-plugins-core
           gcc --version
           # C++23 (std::format, std::expected) needs GCC 13 or newer.
           test "$(gcc -dumpversion | cut -d. -f1)" -ge 13
@@ -75,89 +86,209 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.platform == 'win32-arm64' && 'arm64' || 'x64' }}
+      - name: Install NSIS (Windows, if missing)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          command -v makensis || {
+            choco install nsis -y --no-progress
+            echo "C:\\Program Files (x86)\\NSIS" >> "$GITHUB_PATH"
+          }
+
+      # The compiler needs LLVM (TVM's code generation): a static build, cached, so that the packages need no LLVM.
+      - name: Cache LLVM (Linux)
+        if: runner.os == 'Linux'
+        id: llvm
+        uses: actions/cache@v4
+        with:
+          path: /opt/llvm
+          key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/ci/build-llvm.sh') }}
+      - name: Build LLVM (Linux, not cached)
+        if: runner.os == 'Linux' && steps.llvm.outputs.cache-hit != 'true'
+        run: scripts/ci/build-llvm.sh /opt/llvm "$LLVM_VERSION"
+      # NVRTC, the headers, and nvcc (for the cuBLAS kernels). The runner has no GPU: the CUDA parts are built, not run.
+      - name: Install the CUDA Toolkit (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/${{ matrix.cuda_repo }}/cuda-rhel8.repo
+          dnf install -y cuda-nvcc-${CUDA_VERSION} cuda-cudart-devel-${CUDA_VERSION} cuda-nvrtc-devel-${CUDA_VERSION} \
+            cuda-cccl-${CUDA_VERSION} libcublas-devel-${CUDA_VERSION}
+          ls -d /usr/local/cuda-*
 
       # ── Build and test ──────────────────────────────────────────────────────────────────────────
-      - name: Configure
+      - name: "Configure (Linux: everything)"
+        if: runner.os == 'Linux'
+        run: |
+          cuda=/usr/local/cuda-${CUDA_VERSION//-/.}
+          cmake --preset conf-release-static-deps -B build \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libstdc++ -static-libgcc" \
+            -DMDL_LLVM_CONFIG=/opt/llvm/bin/llvm-config \
+            -DMDL_REQUIRE_THIRD_PARTY_LICENSES=ON \
+            -DMDL_ENABLE_CUDA=ON -DMDL_CUDA_ARCH=sm_80 -DCUDAToolkit_ROOT="$cuda" -DCUDA_TOOLKIT_ROOT_DIR="$cuda" \
+            -DCMAKE_CUDA_COMPILER="$cuda/bin/nvcc"
+      - name: "Configure (macOS and Windows: the tools)"
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           case "${{ runner.os }}" in
-            Linux)   extra=(-DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc") ;;
             Windows) extra=(-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl) ;;
-            macOS)   extra=(-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64") ;;
+            macOS)   extra=(-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_OSX_ARCHITECTURES=arm64) ;;
           esac
-          cmake --preset conf-tooling -B build "${extra[@]}"
+          cmake --preset conf-tooling -B build -DMDL_REQUIRE_THIRD_PARTY_LICENSES=ON "${extra[@]}"
       - name: Build
         run: cmake --build build --config Release --parallel
-      - name: Test
-        run: ctest --test-dir build --build-config Release --output-on-failure
-      - name: Check the Linux Binaries (glibc <= 2.28, no shared libstdc++/libgcc)
+      - name: "Test (Linux: the frontend, the tools, the installation, and examples; the whole suite runs in test.yml)"
         if: runner.os == 'Linux'
         run: |
-          for tool in build/src/commands/mdl-format build/src/commands/mdls; do
-            newest=$(objdump -T "$tool" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)
-            echo "$tool needs $newest"
-            test "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = "GLIBC_2.28"
-            ! ldd "$tool" | grep -E 'libstdc\+\+|libgcc_s'
-          done
+          ctest --test-dir build --build-config Release --output-on-failure --parallel 4 \
+            -R 'frontend_tests|mdls_tests|mdl_doc_golden|install_consumer|unit_tests|mdl_kernels|mdlc_|example_0[148]'
+      - name: Test (macOS and Windows)
+        if: runner.os != 'Linux'
+        run: ctest --test-dir build --build-config Release --output-on-failure
+      - name: Check the Linux Binaries (glibc <= 2.28; no libstdc++, libgcc, LLVM, or CUDA libraries)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --install build --prefix stage
+          scripts/ci/check-linux-binaries.sh stage 2.28
 
       # ── Package ─────────────────────────────────────────────────────────────────────────────────
-      - name: Install
-        run: cmake --install build --config Release --component tools --prefix dist/mdl-tools-${{ matrix.platform }}
-      - name: Sign and Notarize (macOS, if the secrets are set)
-        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
-        env:
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
-          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
-          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+      - name: Package (the installers and archives of the platform)
+        shell: bash
+        working-directory: build
+        run: cpack -B ../dist
+      - name: "Package (only the tools: the archive of the editor integration)"
+        shell: bash
+        working-directory: build
         run: |
-          echo "$MACOS_CERTIFICATE" | base64 --decode > certificate.p12
-          security create-keychain -p ci build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p ci build.keychain
-          security import certificate.p12 -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
-          for tool in dist/mdl-tools-${{ matrix.platform }}/bin/*; do
-            codesign --force --options runtime --timestamp --sign "$MACOS_SIGNING_IDENTITY" "$tool"
-          done
-          ditto -c -k dist/mdl-tools-${{ matrix.platform }} notarize.zip
-          xcrun notarytool submit notarize.zip --apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_PASSWORD" \
-            --team-id "$MACOS_NOTARY_TEAM_ID" --wait
-      - name: Archive (tar.gz)
-        if: runner.os != 'Windows'
-        run: tar -C dist -czf mdl-tools-${{ matrix.platform }}.tar.gz mdl-tools-${{ matrix.platform }}
-      - name: Archive (zip)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist/mdl-tools-${{ matrix.platform }} -DestinationPath mdl-tools-${{ matrix.platform }}.zip
+          if [ "${{ runner.os }}" = Windows ]; then format=ZIP; else format=TGZ; fi
+          cpack -G "$format" -D CPACK_MDL_ARCHIVE=tools -B ../dist-tools
+          mv ../dist-tools/mdl-tools-* ../dist/
+      - name: List the Packages (and check the layout of the editor archive)
+        shell: bash
+        run: |
+          ls -lh dist | grep -v _CPack_Packages
+          if [ "${{ runner.os }}" = Windows ]; then
+            unzip -l dist/mdl-tools-${{ matrix.platform }}.zip | grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format.exe'
+          else
+            tar tzf dist/mdl-tools-${{ matrix.platform }}.tar.gz | grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format$'
+          fi
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: mdl-tools-${{ matrix.platform }}
-          path: mdl-tools-${{ matrix.platform }}.*
+          name: packages-${{ matrix.platform }}
+          path: dist/mdl-*
+          if-no-files-found: error
 
+  # ── Smoke tests: the packages installed in old and current distributions ──────────────────────
+  smoke-linux:
+    name: Smoke Test (${{ matrix.runner == 'ubuntu-latest' && 'x64' || 'arm64' }}, ${{ matrix.image }})
+    needs: packages
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        image: ['debian:11', 'ubuntu:20.04', 'rockylinux:8', 'fedora:latest']
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Download the Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-linux-${{ matrix.runner == 'ubuntu-latest' && 'x64' || 'arm64' }}
+          path: packages
+      - name: Install the Packages in ${{ matrix.image }} and Run Them
+        run: |
+          case "${{ matrix.image }}" in debian*|ubuntu*) ext=deb ;; *) ext=rpm ;; esac
+          mkdir selected && cp packages/*.$ext selected/
+          docker run --rm -v "$PWD/selected:/packages:ro" -v "$PWD:/repo:ro" ${{ matrix.image }} \
+            bash /repo/scripts/ci/smoke-test-linux.sh /packages /repo/examples/01_ffn
+
+  # A program that uses the installed SDK (find_package(MDL)), built and run on the runner.
+  smoke-sdk:
+    name: Smoke Test (SDK, ${{ matrix.platform }})
+    needs: packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            os: ubuntu-latest
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+      - name: Download the Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: packages
+      - name: Install the Packages
+        run: sudo apt-get install -y ./packages/*.deb
+      - name: Build and Run a Program with the Installed SDK
+        run: |
+          cmake -S tests/install -B consumer -DEXAMPLE_DIR="$PWD/examples/01_ffn" -DCMAKE_BUILD_TYPE=Release
+          cmake --build consumer
+          ./consumer/consumer
+
+  smoke-desktop:
+    name: Smoke Test (${{ matrix.platform }})
+    needs: packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            os: macos-latest
+          - platform: win32-x64
+            os: windows-latest
+          - platform: win32-arm64
+            os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download the Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: packages
+      - name: Install the Package and Run the Tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo installer -pkg packages/mdl-*-${{ matrix.platform }}.pkg -target /
+          /usr/local/bin/mdl-format --version
+          /usr/local/bin/mdls --version
+          ls /usr/local/share/mdl/std
+      - name: Install the Package and Run the Tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem packages/mdl-*-${{ matrix.platform }}.exe).FullName
+          $process = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "the installer failed: $($process.ExitCode)" }
+          & "$env:ProgramFiles\MDL\bin\mdl-format.exe" --version
+          & "$env:ProgramFiles\MDL\bin\mdls.exe" --version
+          if (-not (Test-Path "$env:ProgramFiles\MDL\share\mdl\std")) { throw "no standard library" }
+
+  # ── Publish ─────────────────────────────────────────────────────────────────────────────────
   release:
     name: Publish
-    needs: tools
+    needs: [packages, smoke-linux, smoke-sdk, smoke-desktop]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
-      - name: Download the Archives
+      - name: Download the Packages
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
       - name: Checksums
         working-directory: artifacts
-        run: sha256sum mdl-tools-* > SHA256SUMS && cat SHA256SUMS
-      - name: Move the Nightly Tag
-        if: github.ref == 'refs/heads/main'
-        run: |
-          git tag -f nightly
-          git push -f origin refs/tags/nightly
+        run: sha256sum mdl-* > SHA256SUMS && cat SHA256SUMS
       - name: Publish the Release (tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -167,14 +298,15 @@ jobs:
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+      # The file names of the packages contain the version, so a new nightly would leave the old files next to the new
+      # ones: the nightly release is replaced as a whole.
       - name: Publish the Nightly Release (main)
         if: github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: nightly
-          name: Nightly
-          body: The tooling built from the latest commit on main (${{ github.sha }}).
-          files: artifacts/*
-          fail_on_unmatched_files: true
-          prerelease: true
-          make_latest: false
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+          git tag -f nightly
+          git push -f origin refs/tags/nightly
+          gh release create nightly artifacts/* --title Nightly --prerelease --latest=false \
+            --notes "The packages built from the latest commit on main (${{ github.sha }})."

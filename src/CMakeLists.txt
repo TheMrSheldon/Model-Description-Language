@@ -68,6 +68,14 @@ if(MDL_ENABLE_COMPILER)
 	else()
 		set(MDL_TVM_USE_CUDA OFF)
 	endif()
+	# LLVM: found by TVM (the installed one, linked as shared library), or with MDL_LLVM_CONFIG linked statically into
+	# TVM's compiler library (what the packages do, so that they need no LLVM: `llvm-config --link-static`).
+	set(MDL_LLVM_CONFIG "" CACHE FILEPATH "llvm-config of the LLVM to link statically (default: TVM finds LLVM and links it as a shared library)")
+	if(MDL_LLVM_CONFIG)
+		set(MDL_TVM_USE_LLVM "${MDL_LLVM_CONFIG} --link-static")
+	else()
+		set(MDL_TVM_USE_LLVM ON)
+	endif()
 	# TVM
 	# - Optimized kernels (GEMM, softmax, layer norm, ...) come from kernel packages (oneDNN: kernels/onednn), so TVM's
 	#   BLAS contrib is not needed.
@@ -81,7 +89,7 @@ if(MDL_ENABLE_COMPILER)
 		GIT_TAG 7b5acb32bd271342a24130f4ef439ff6c2e52c6c # v0.27.0.post1
 		# The backend uses TVM's C++ compiler APIs (pattern language, ExprMutator, passes), many of which are not marked
 		# TVM_DLL; hiding private symbols (TVM's default for non-Debug builds) would make them unavailable.
-		OPTIONS "USE_LLVM ON" "USE_CUDA ${MDL_TVM_USE_CUDA}" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
+		OPTIONS "USE_LLVM ${MDL_TVM_USE_LLVM}" "USE_CUDA ${MDL_TVM_USE_CUDA}" "USE_BLAS none" "USE_OPENMP gnu" "HIDE_PRIVATE_SYMBOLS OFF"
 		EXCLUDE_FROM_ALL YES
 	)
 	# spdlog (logging)
@@ -199,8 +207,11 @@ if(MDL_ENABLE_COMPILER)
 		LICENSE_FILES "${tvm_SOURCE_DIR}/3rdparty/tvm-ffi/3rdparty/dlpack/LICENSE")
 	# LLVM (Apache-2.0 with LLVM exceptions): linked into the compiler. The license file is where the distribution
 	# of the LLVM that TVM uses puts it.
+	if(MDL_LLVM_CONFIG)
+		get_filename_component(_llvm_prefix "${MDL_LLVM_CONFIG}/../.." ABSOLUTE) # (scripts/ci/build-llvm.sh installs it there)
+	endif()
 	mdl_find_license_file(_llvm_license
-		"${LLVM_DIR}/../../../share/doc/llvm*/LICENSE.TXT" "/usr/share/licenses/llvm*/LICENSE.TXT"
+		"${_llvm_prefix}/share/doc/llvm/LICENSE.TXT" "${LLVM_DIR}/../../../share/doc/llvm*/LICENSE.TXT" "/usr/share/licenses/llvm*/LICENSE.TXT"
 		"/usr/share/doc/llvm*/LICENSE.TXT" "/usr/share/doc/llvm-*/copyright" "/usr/share/doc/llvm/copyright")
 	mdl_third_party(LLVM COMPONENTS compiler SPDX "Apache-2.0 WITH LLVM-exception" URL https://llvm.org
 		LICENSE_FILES "${_llvm_license}" NOTE "Used by TVM's code generation for CPU targets.")

@@ -68,6 +68,27 @@ contain it, and its license files. Add a registration with every new dependency 
 headers. The release builds pass `-DMDL_REQUIRE_THIRD_PARTY_LICENSES=ON`, so that a license that cannot be found (LLVM's:
 where the distribution puts it) fails the build instead of only warning.
 
+# The release workflow
+`.github/workflows/publish.yml` builds, packages and tries the packages of every platform, then publishes them (tags
+`vX.Y.Z`: a release, a pushed commit on `main`: the replaced `nightly` prerelease; a manual run builds and tests only).
+
+1. **Package** (per platform): configure, build, test, and `cpack`. On Linux the build uses the preset
+   `conf-release-static-deps` with LLVM linked statically (`-DMDL_LLVM_CONFIG`, an LLVM built by `scripts/ci/build-llvm.sh` and
+   cached; it only has the X86 and AArch64 targets), libstdc++ and libgcc linked statically, and CUDA (the toolkit is installed in
+   the build container, there is no GPU: the CUDA parts are built, not run). `scripts/ci/check-linux-binaries.sh` checks
+   that nothing needs a glibc newer than 2.28 or a libstdc++, LLVM or CUDA library. macOS and Windows build the tooling
+   (`conf-tooling`) until the compiler is ported to them.
+2. **Smoke tests**: the Linux packages are installed in Debian 11, Ubuntu 20.04, Rocky 8 and Fedora containers
+   (`scripts/ci/smoke-test-linux.sh`: the commands run and compile a model), and a program is built against the installed SDK
+   on the runner; the macOS `.pkg` and the Windows installer are installed and their tools run.
+3. **Publish**: the packages and `SHA256SUMS`. The nightly release is deleted and created again, because the file names
+   contain the version.
+
+`test.yml` builds the Linux packages (`.tar.gz`, `.deb`) on every push, so that a change that breaks them fails there.
+
+Changing the LLVM or CUDA version: `LLVM_VERSION` and `CUDA_VERSION` at the top of the workflow (TVM 0.27's CUDA runtime needs
+CUDA 12.8 or newer; the LLVM must be one that TVM supports).
+
 # Portability of the Linux packages
 The Linux packages are built in a manylinux_2_28 container (glibc 2.28) with libstdc++ and libgcc linked statically, so they
 run on any distribution with glibc 2.28 or newer. `mdl-runtime` depends on `libgomp`.
