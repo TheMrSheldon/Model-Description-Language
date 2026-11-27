@@ -191,3 +191,7 @@ BibTeX); see [docs/dev/technical/documentation.md](docs/dev/technical/documentat
 
 ## Roadmap
 Open work is listed in [TODO.md](TODO.md).
+
+## License
+MDL is licensed under the [Apache License 2.0](LICENSE). The binaries contain third-party software under its own
+licenses, see the `THIRD-PARTY-NOTICES.txt` of each package.

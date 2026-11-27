@@ -4,7 +4,9 @@
 
 #include <tvm/target/target.h>
 
-#include <nvrtc.h>
+#include <nvrtc.h> // the declarations only: the library is loaded when it is first needed (see Nvrtc)
+
+#include <dlfcn.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -63,12 +65,84 @@ namespace mdl::tvm_ported::support::nvcc {
 			return std::nullopt;
 		}
 
+		/**
+		 * @brief The NVRTC library, loaded at run time (dlopen) instead of linked: mdlc starts on machines without the
+		 * CUDA toolkit (it is only needed to compile for CUDA targets, which needs the toolkit's headers anyway).
+		 */
+		struct Nvrtc {
+			decltype(&::nvrtcGetErrorString) GetErrorString;
+			decltype(&::nvrtcCreateProgram) CreateProgram;
+			decltype(&::nvrtcDestroyProgram) DestroyProgram;
+			decltype(&::nvrtcCompileProgram) CompileProgram;
+			decltype(&::nvrtcGetProgramLogSize) GetProgramLogSize;
+			decltype(&::nvrtcGetProgramLog) GetProgramLog;
+			decltype(&::nvrtcGetCUBINSize) GetCUBINSize;
+			decltype(&::nvrtcGetCUBIN) GetCUBIN;
+			decltype(&::nvrtcGetPTXSize) GetPTXSize;
+			decltype(&::nvrtcGetPTX) GetPTX;
+		};
+
+		/** @brief The NVRTC library: next to the CUDA path (CUDA_PATH, nvcc, /usr/local/cuda), else the loader's search. */
+		const Nvrtc& nvrtc() {
+			static const Nvrtc api = [] {
+				std::vector<std::string> directories;
+				try {
+					const fs::path root = find_cuda_path();
+					for (const char* dir :
+						 {"lib64", "lib", "targets/x86_64-linux/lib", "targets/sbsa-linux/lib",
+						  "targets/aarch64-linux/lib"})
+						directories.push_back((root / dir).string());
+				} catch (const std::runtime_error&) { // no toolkit found: rely on the loader's search path
+				}
+				directories.emplace_back(); // the loader's search path (LD_LIBRARY_PATH, the system directories)
+				void* handle = nullptr;
+				for (const auto& dir : directories) {
+					for (const char* name : {"libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12", "libnvrtc.so.11.2"}) {
+						const std::string path = dir.empty() ? std::string(name) : dir + "/" + name;
+						if (!dir.empty() && !fs::exists(path))
+							continue;
+						if ((handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL)) != nullptr)
+							break;
+					}
+					if (handle != nullptr)
+						break;
+				}
+				if (handle == nullptr)
+					throw std::runtime_error(
+							"cannot load NVRTC (libnvrtc.so): compiling for CUDA targets needs the CUDA toolkit; "
+							"install "
+							"it or set CUDA_PATH"
+					);
+				const auto symbol = [&](const char* name) {
+					void* address = dlsym(handle, name);
+					if (address == nullptr)
+						throw std::runtime_error(std::string("NVRTC: missing function ") + name);
+					return address;
+				};
+#define MDL_NVRTC_FUNCTION(field, name) reinterpret_cast<decltype(Nvrtc::field)>(symbol(name))
+				return Nvrtc{
+						MDL_NVRTC_FUNCTION(GetErrorString, "nvrtcGetErrorString"),
+						MDL_NVRTC_FUNCTION(CreateProgram, "nvrtcCreateProgram"),
+						MDL_NVRTC_FUNCTION(DestroyProgram, "nvrtcDestroyProgram"),
+						MDL_NVRTC_FUNCTION(CompileProgram, "nvrtcCompileProgram"),
+						MDL_NVRTC_FUNCTION(GetProgramLogSize, "nvrtcGetProgramLogSize"),
+						MDL_NVRTC_FUNCTION(GetProgramLog, "nvrtcGetProgramLog"),
+						MDL_NVRTC_FUNCTION(GetCUBINSize, "nvrtcGetCUBINSize"),
+						MDL_NVRTC_FUNCTION(GetCUBIN, "nvrtcGetCUBIN"),
+						MDL_NVRTC_FUNCTION(GetPTXSize, "nvrtcGetPTXSize"),
+						MDL_NVRTC_FUNCTION(GetPTX, "nvrtcGetPTX"),
+				};
+#undef MDL_NVRTC_FUNCTION
+			}();
+			return api;
+		}
+
 		void check(nvrtcResult result, nvrtcProgram* prog, const std::string& what) {
 			if (result == NVRTC_SUCCESS)
 				return;
 			if (prog != nullptr)
-				nvrtcDestroyProgram(prog);
-			throw std::runtime_error(what + ": " + nvrtcGetErrorString(result));
+				nvrtc().DestroyProgram(prog);
+			throw std::runtime_error(what + ": " + nvrtc().GetErrorString(result));
 		}
 
 		/** @brief Compile CUDA code using NVRTC (NVIDIA Runtime Compilation). */
@@ -149,7 +223,7 @@ using cuda::std::int64_t;
 			code_filtered = nvrtc_preamble + code_filtered;
 
 			nvrtcProgram prog = nullptr;
-			check(nvrtcCreateProgram(&prog, code_filtered.c_str(), "tvm_kernels.cu", 0, nullptr, nullptr), nullptr,
+			check(nvrtc().CreateProgram(&prog, code_filtered.c_str(), "tvm_kernels.cu", 0, nullptr, nullptr), nullptr,
 				  "Failed to create NVRTC program");
 
 			// Prepare compilation options
@@ -177,7 +251,7 @@ using cuda::std::int64_t;
 			for (const auto& p : include_paths)
 				found |= fs::is_regular_file(fs::path(p) / "cuda_runtime.h");
 			if (!found) {
-				nvrtcDestroyProgram(&prog);
+				nvrtc().DestroyProgram(&prog);
 				throw std::runtime_error("Cannot find CUDA headers (cuda_runtime.h) under " + cuda_path);
 			}
 			for (const auto& include_path : include_paths)
@@ -199,8 +273,9 @@ using cuda::std::int64_t;
 
 			// Add user-provided options, filtering out nvcc-specific flags that nvrtc doesn't support
 			static const std::vector<std::string> nvcc_only_prefixes{
-					"-c", "-O", "-std", "--std", "-Xcompiler", "-Xlinker", "-Xarchive", "-Xcudafe", "-Xptxas",
-					"--compile", "--compiler-options", "--linker-options", "-fPIC", "-shared", "-o",
+					"-c",		 "-O",		 "-std",	"--std",	 "-Xcompiler",		   "-Xlinker",
+					"-Xarchive", "-Xcudafe", "-Xptxas", "--compile", "--compiler-options", "--linker-options",
+					"-fPIC",	 "-shared",	 "-o",
 			};
 			for (const auto& opt : options) {
 				bool skip = false;
@@ -214,22 +289,22 @@ using cuda::std::int64_t;
 			std::vector<const char*> argv;
 			for (const auto& o : compile_opts)
 				argv.push_back(o.c_str());
-			const nvrtcResult result = nvrtcCompileProgram(prog, static_cast<int>(argv.size()), argv.data());
+			const nvrtcResult result = nvrtc().CompileProgram(prog, static_cast<int>(argv.size()), argv.data());
 			if (result != NVRTC_SUCCESS) {
 				// Get compilation log
 				size_t log_size = 0;
 				std::string error_msg;
-				if (nvrtcGetProgramLogSize(prog, &log_size) == NVRTC_SUCCESS && log_size > 0) {
+				if (nvrtc().GetProgramLogSize(prog, &log_size) == NVRTC_SUCCESS && log_size > 0) {
 					std::string log_buf(log_size, '\0');
-					if (nvrtcGetProgramLog(prog, log_buf.data()) == NVRTC_SUCCESS)
+					if (nvrtc().GetProgramLog(prog, log_buf.data()) == NVRTC_SUCCESS)
 						error_msg = "NVRTC compilation failed:\n" + log_buf;
 					else
 						error_msg = std::string("NVRTC compilation failed (couldn't get log): ") +
-									nvrtcGetErrorString(result);
+									nvrtc().GetErrorString(result);
 				} else {
-					error_msg = std::string("NVRTC compilation failed: ") + nvrtcGetErrorString(result);
+					error_msg = std::string("NVRTC compilation failed: ") + nvrtc().GetErrorString(result);
 				}
-				nvrtcDestroyProgram(&prog);
+				nvrtc().DestroyProgram(&prog);
 				throw std::runtime_error(error_msg);
 			}
 
@@ -237,17 +312,17 @@ using cuda::std::int64_t;
 			std::string binary_buf;
 			size_t binary_size = 0;
 			if (*target_format == "cubin") {
-				check(nvrtcGetCUBINSize(prog, &binary_size), &prog, "Failed to get CUBIN size");
+				check(nvrtc().GetCUBINSize(prog, &binary_size), &prog, "Failed to get CUBIN size");
 				binary_buf.resize(binary_size);
-				check(nvrtcGetCUBIN(prog, binary_buf.data()), &prog, "Failed to get CUBIN");
+				check(nvrtc().GetCUBIN(prog, binary_buf.data()), &prog, "Failed to get CUBIN");
 			} else { // ptx
-				check(nvrtcGetPTXSize(prog, &binary_size), &prog, "Failed to get PTX size");
+				check(nvrtc().GetPTXSize(prog, &binary_size), &prog, "Failed to get PTX size");
 				binary_buf.resize(binary_size);
-				check(nvrtcGetPTX(prog, binary_buf.data()), &prog, "Failed to get PTX");
+				check(nvrtc().GetPTX(prog, binary_buf.data()), &prog, "Failed to get PTX");
 			}
 
 			// Clean up NVRTC program
-			nvrtcDestroyProgram(&prog);
+			nvrtc().DestroyProgram(&prog);
 			return binary_buf;
 		}
 	} // namespace
@@ -274,7 +349,9 @@ using cuda::std::int64_t;
 		const std::string cuda_path = "/usr/local/cuda";
 		if (fs::exists(fs::path(cuda_path) / "bin/nvcc"))
 			return cuda_path;
-		throw std::runtime_error("Cannot find CUDA path");
+		throw std::runtime_error(
+				"Cannot find the CUDA toolkit (compiling for CUDA targets needs it): install it or set CUDA_PATH"
+		);
 	}
 
 	std::string tvm_callback_cuda_compile(const std::string& code) {

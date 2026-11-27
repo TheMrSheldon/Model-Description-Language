@@ -36,6 +36,17 @@ if(NOT MDL_ENABLE_COMPILER)
 	return()
 endif()
 
+# The installation (cmake --install, the CPack packages): a program built against it with find_package(MDL). Needs the
+# examples' sources and the whole project built.
+if(MDL_BUILD_EXAMPLES)
+	add_test(NAME install_consumer COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR}
+		-DCONSUMER=${CMAKE_CURRENT_LIST_DIR}/install -DEXAMPLE=${PROJECT_SOURCE_DIR}/examples/01_ffn
+		-DWORK=${CMAKE_CURRENT_BINARY_DIR}/install_work -DGENERATOR=${CMAKE_GENERATOR} -DCUDA=${MDL_ENABLE_CUDA}
+		-DCUDA_ARCH=${MDL_CUDA_ARCH}
+		-P ${CMAKE_CURRENT_LIST_DIR}/install/check_install.cmake)
+	set_tests_properties(install_consumer PROPERTIES TIMEOUT 1200)
+endif()
+
 # Compiler tests (passes, exports, backend, runtime).
 add_executable(tests
     mdl/computegraph/einops.cpp

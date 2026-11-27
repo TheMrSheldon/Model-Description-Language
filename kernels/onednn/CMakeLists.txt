@@ -21,6 +21,10 @@ CPMAddPackage(
 	EXCLUDE_FROM_ALL YES
 )
 
+# (libdnnl.a is installed with the compiler: its license, and that of the software that it contains, go with it.)
+mdl_third_party(oneDNN COMPONENTS compiler VERSION 3.13.4 SPDX Apache-2.0 URL https://github.com/uxlfoundation/oneDNN
+	LICENSE_FILES "${oneDNN_SOURCE_DIR}/LICENSE" "${oneDNN_SOURCE_DIR}/THIRD-PARTY-PROGRAMS")
+
 add_library(mdl_onednn STATIC src/onednn.cpp src/layer_norm_backward.cpp)
 target_include_directories(mdl_onednn PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(mdl_onednn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../common/include) # (mdl_strided.hpp)
@@ -37,5 +41,5 @@ file(READ "${CMAKE_CURRENT_BINARY_DIR}/onednn.package.yml.in" manifest)
 string(REGEX REPLACE "\\$<TARGET_FILE:([a-z_]+)>" "lib/$<TARGET_FILE_NAME:\\1>" manifest "${manifest}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/onednn.install.yml" CONTENT "${manifest}")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/onednn.install.yml" DESTINATION share/mdl/kernels/onednn
-	RENAME package.yml COMPONENT kernels)
-install(FILES $<TARGET_FILE:mdl_onednn> $<TARGET_FILE:dnnl> DESTINATION share/mdl/kernels/onednn/lib COMPONENT kernels)
+	RENAME package.yml COMPONENT compiler)
+install(FILES $<TARGET_FILE:mdl_onednn> $<TARGET_FILE:dnnl> DESTINATION share/mdl/kernels/onednn/lib COMPONENT compiler)

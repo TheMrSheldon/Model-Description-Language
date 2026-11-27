@@ -51,7 +51,7 @@ MDL_MATMUL_DECLARE(f16, uint16_t)
 #define MDL_MATMUL_Q_DECLARE(suffix, type)                                                                             \
 	int mdl_matmul_q_##suffix(                                                                                         \
 			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
-			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
+			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,    \
 			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
 			int32_t activation, float alpha                                                                            \
 	);

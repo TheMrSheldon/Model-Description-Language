@@ -29,24 +29,24 @@ extern "C" {
  * [batch, seq, heads, dim] of the model in place. The score matrix is never stored. The head dimension must be
  * contiguous (stride 1). lse is [..., Sq] float32, contiguous (not written without @p with_lse).
  */
-#define MDL_ATTENTION_DECLARE(suffix, type)                                                                            \
-	int mdl_attention_fwd_##suffix(                                                                                    \
-			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t rank, const int64_t* q_shape,  \
-			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,        \
-			const int64_t* v_strides, const int64_t* o_strides, const type* bias, const int64_t* bias_shape,           \
-			const int64_t* bias_strides, const int32_t* lengths, int32_t with_lse, float scale                         \
-	);                                                                                                                 \
+#define MDL_ATTENTION_DECLARE(suffix, type)                                                                              \
+	int mdl_attention_fwd_##suffix(                                                                                      \
+			type* out, float* lse, const type* Q, const type* K, const type* V, int64_t rank, const int64_t* q_shape,    \
+			const int64_t* q_strides, const int64_t* k_shape, const int64_t* k_strides, const int64_t* v_shape,          \
+			const int64_t* v_strides, const int64_t* o_strides, const type* bias, const int64_t* bias_shape,             \
+			const int64_t* bias_strides, const int32_t* lengths, int32_t with_lse, float scale                           \
+	);                                                                                                                   \
 	/**                                                                                                                \
 	 * @brief The gradients dQ, dK, dV of fused attention for the cotangent dO of its result O, from its statistics lse \
 	 * (see mdl_attention_fwd); O and dO have out's shape, dQ, dK, dV the shapes of Q, K, V (strides only).            \
-	 */                                                                                                                \
-	int mdl_attention_bwd_##suffix(                                                                                    \
-			type* dq, type* dk, type* dv, const type* Q, const type* K, const type* V, const type* O, const type* dO,  \
-			const float* lse, int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,  \
-			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,      \
-			const int64_t* do_strides, const int64_t* dq_strides, const int64_t* dk_strides,                           \
-			const int64_t* dv_strides, const type* bias, const int64_t* bias_shape, const int64_t* bias_strides,       \
-			const int32_t* lengths, float scale                                                                        \
+	 */ \
+	int mdl_attention_bwd_##suffix(                                                                                      \
+			type* dq, type* dk, type* dv, const type* Q, const type* K, const type* V, const type* O, const type* dO,    \
+			const float* lse, int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,    \
+			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,        \
+			const int64_t* do_strides, const int64_t* dq_strides, const int64_t* dk_strides,                             \
+			const int64_t* dv_strides, const type* bias, const int64_t* bias_shape, const int64_t* bias_strides,         \
+			const int32_t* lengths, float scale                                                                          \
 	);
 MDL_ATTENTION_DECLARE(bf16, uint16_t)
 MDL_ATTENTION_DECLARE(f16, uint16_t)

@@ -24,9 +24,9 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 #include <map>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -115,19 +115,25 @@ namespace {
 	template <typename T>
 	__device__ inline T fromFloat(float v);
 	template <>
-	__device__ inline float fromFloat<float>(float v) { return v; }
+	__device__ inline float fromFloat<float>(float v) {
+		return v;
+	}
 	template <>
-	__device__ inline __nv_bfloat16 fromFloat<__nv_bfloat16>(float v) { return __float2bfloat16(v); }
+	__device__ inline __nv_bfloat16 fromFloat<__nv_bfloat16>(float v) {
+		return __float2bfloat16(v);
+	}
 	template <>
-	__device__ inline __half fromFloat<__half>(float v) { return __float2half(v); }
+	__device__ inline __half fromFloat<__half>(float v) {
+		return __float2half(v);
+	}
 
 	__device__ inline float gelu(float v) { return 0.5f * v * (1.0f + erff(v * 0.70710678118654752f)); }
 
 	/** @brief dst = act(dst + bias) + addend over the strided result [b0, b1, M, N] (any layout). */
 	template <typename T>
 	__global__ void epilogue(
-			T* dst, const T* bias, int has_bias, const T* addend, int has_addend, int activation, int64_t b0, int64_t b1,
-			int64_t M, int64_t N, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN
+			T* dst, const T* bias, int has_bias, const T* addend, int has_addend, int activation, int64_t b0,
+			int64_t b1, int64_t M, int64_t N, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN
 	) {
 		const int64_t total = b0 * b1 * M * N;
 		for (int64_t idx = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; idx < total;
@@ -148,7 +154,8 @@ namespace {
 	/** @brief dst = gelu(dst) + addend for a contiguous result of @p total elements (the addend in the same layout). */
 	template <typename T>
 	__global__ void geluContiguous(T* dst, const T* addend, int has_addend, int64_t total) {
-		for (int64_t i = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; i < total; i += int64_t(gridDim.x) * blockDim.x) {
+		for (int64_t i = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; i < total;
+			 i += int64_t(gridDim.x) * blockDim.x) {
 			float v = gelu(toFloat(dst[i]));
 			if (has_addend)
 				v += toFloat(addend[i]);
@@ -166,7 +173,8 @@ namespace {
 			const void** a, const void** b, void** d, const T* aBase, const T* bBase, T* dBase, int64_t b0, int64_t b1,
 			int64_t a_s0, int64_t a_s1, int64_t b_s0, int64_t b_s1, int64_t d_s0, int64_t d_s1
 	) {
-		for (int64_t k = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; k < b0 * b1; k += int64_t(gridDim.x) * blockDim.x) {
+		for (int64_t k = blockIdx.x * int64_t(blockDim.x) + threadIdx.x; k < b0 * b1;
+			 k += int64_t(gridDim.x) * blockDim.x) {
 			const int64_t i = k / b1, j = k % b1;
 			a[k] = aBase + i * a_s0 + j * a_s1;
 			b[k] = bBase + i * b_s0 + j * b_s1;
@@ -260,9 +268,22 @@ namespace {
 				255
 		);
 		const AlgoKey key{
-				currentDevice(), static_cast<int>(type), static_cast<int>(opA) * 4 + static_cast<int>(opB), p.rows,
-				p.cols, p.K, p.first.ld, p.second.ld, p.ldd, batch, p.firstBatch, p.secondBatch, dBatch, alignment,
-				bias != nullptr, c != nullptr
+				currentDevice(),
+				static_cast<int>(type),
+				static_cast<int>(opA) * 4 + static_cast<int>(opB),
+				p.rows,
+				p.cols,
+				p.K,
+				p.first.ld,
+				p.second.ld,
+				p.ldd,
+				batch,
+				p.firstBatch,
+				p.secondBatch,
+				dBatch,
+				alignment,
+				bias != nullptr,
+				c != nullptr
 		};
 		auto it = algos.find(key);
 		if (it == algos.end()) {
@@ -289,8 +310,8 @@ namespace {
 				const int64_t elements = (batch - 1) * dBatch + p.ldd * p.cols;
 				void* scratch = nullptr;
 				cudaEvent_t start = nullptr, stop = nullptr;
-				if (cudaMalloc(&scratch, elements * sizeof(T)) == cudaSuccess && cudaEventCreate(&start) == cudaSuccess &&
-					cudaEventCreate(&stop) == cudaSuccess) {
+				if (cudaMalloc(&scratch, elements * sizeof(T)) == cudaSuccess &&
+					cudaEventCreate(&start) == cudaSuccess && cudaEventCreate(&stop) == cudaSuccess) {
 					float bestMs = 0;
 					const float beta = c != nullptr ? 1.0f : 0.0f;
 					T* out = static_cast<T*>(scratch);
@@ -342,12 +363,11 @@ namespace {
 	}
 
 	template <typename T>
-	int matmul(
-			T* dst, const T* A, const T* B, const T* bias, int32_t has_bias, int64_t b0, int64_t b1, int64_t M,
-			int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0, int64_t b_s1,
-			int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN, const T* addend,
-			int32_t has_addend, int32_t activation, float alpha
-	) {
+	int
+	matmul(T* dst, const T* A, const T* B, const T* bias, int32_t has_bias, int64_t b0, int64_t b1, int64_t M,
+		   int64_t K, int64_t N, int64_t a_s0, int64_t a_s1, int64_t a_sM, int64_t a_sK, int64_t b_s0, int64_t b_s1,
+		   int64_t b_sK, int64_t b_sN, int64_t d_s0, int64_t d_s1, int64_t d_sM, int64_t d_sN, const T* addend,
+		   int32_t has_addend, int32_t activation, float alpha) {
 		if (b0 <= 0 || b1 <= 0 || M <= 0 || N <= 0 || K < 0)
 			return 0 == b0 * b1 * M * N ? 0 : 1;
 		Context* ctx = context();
@@ -421,9 +441,9 @@ namespace {
 				const float zero = 0.0f;
 				const cublasStatus_t status = cublasGemmBatchedEx(
 						ctx->blas, p.first.op, p.second.op, static_cast<int>(p.rows), static_cast<int>(p.cols),
-						static_cast<int>(K), &alpha, ap, Types<T>::data, static_cast<int>(p.first.ld), bp, Types<T>::data,
-						static_cast<int>(p.second.ld), &zero, dp, Types<T>::data, static_cast<int>(p.ldd),
-						static_cast<int>(count), Types<T>::compute, CUBLAS_GEMM_DEFAULT
+						static_cast<int>(K), &alpha, ap, Types<T>::data, static_cast<int>(p.first.ld), bp,
+						Types<T>::data, static_cast<int>(p.second.ld), &zero, dp, Types<T>::data,
+						static_cast<int>(p.ldd), static_cast<int>(count), Types<T>::compute, CUBLAS_GEMM_DEFAULT
 				);
 				if (status == CUBLAS_STATUS_SUCCESS)
 					return cudaGetLastError() == cudaSuccess ? 0 : 6;
@@ -492,7 +512,7 @@ namespace {
 					return matmul<T>(                                                                                  \
 							reinterpret_cast<T*>(out) + co, offset(A, ao), offset(B, bo), offset(bias, 0),             \
 							bias != nullptr, g.b0, g.b1, g.M, g.K, g.N, g.a_s0, g.a_s1, g.a_sM, g.a_sK, g.b_s0,        \
-							g.b_s1, g.b_sK, g.b_sN, g.c_s0, g.c_s1, g.c_sM, g.c_sN, offset(addend, co),               \
+							g.b_s1, g.b_sK, g.b_sN, g.c_s0, g.c_s1, g.c_sM, g.c_sN, offset(addend, co),                \
 							addend != nullptr, activation, alpha                                                       \
 					);                                                                                                 \
 				}                                                                                                      \

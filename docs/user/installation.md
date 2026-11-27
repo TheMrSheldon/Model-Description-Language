@@ -33,7 +33,9 @@ cmake --install build --prefix ~/.local
 ```
 </div>
 
-The installation contains the standard library (`share/mdl/std`), the kernel packages (`share/mdl/kernels`) and the
-CMake integration, see \ref using_cmake.
+The installation contains the standard library (`share/mdl/std`), TVM's libraries and the SDK's headers (`lib/mdl`,
+`include/mdl`), the kernel packages (`share/mdl/kernels`) and the CMake package (`lib/cmake/MDL`, see \ref using_cmake).
+The installation is relocatable: the commands find their libraries relative to themselves. Building needs CMake 3.28 or
+newer.
 
 \todo Describe the required system packages per platform.

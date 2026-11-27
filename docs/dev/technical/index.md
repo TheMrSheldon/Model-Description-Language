@@ -10,6 +10,8 @@ The following pages describe how the compiler and the tools are built, which des
   The general optimizations from the computation graph to the generated code: fusion, save or recompute.
 - \subpage dev_cuda_kernels
   The CUDA target: schedule rules of the generated kernels, and the cuBLAS and cuDNN packages.
+- \subpage dev_packaging
+  The installation and the packages (CPack): components, formats per platform, and the release workflow.
 - \subpage dev_documentation
   How this documentation is built, including the API pages of the standard library.
 

@@ -22,12 +22,12 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
-#include <stdexcept>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -132,8 +132,9 @@ namespace {
 					_mm256_cvtps_ph(_mm256_loadu_ps(src + 8 * i), _MM_FROUND_TO_NEAREST_INT)
 			);
 		for (int64_t i = n / 8 * 8; i < n; ++i)
-			dst[i] = static_cast<uint16_t>(_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT)
-			));
+			dst[i] = static_cast<uint16_t>(
+					_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT))
+			);
 	}
 
 	bool hasF16C() {
@@ -577,10 +578,9 @@ namespace {
 
 namespace {
 	/** @brief The product of one Gemm (see mdl_strided.hpp) at the offsets of a slice. */
-	void gemm(
-			dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
-			int32_t activation, float alpha
-	) {
+	void
+	gemm(dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
+		 int32_t activation, float alpha) {
 		// A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not with a
 		// bias along N, or a broadcast B, which would become the left operand).
 		const bool broadcastB = (g.b0 > 1 && g.b_s0 == 0) || (g.b1 > 1 && g.b_s1 == 0);
@@ -636,15 +636,15 @@ namespace {
 	}                                                                                                                  \
 	extern "C" int mdl_matmul_q_##suffix(                                                                              \
 			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
-			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
+			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,    \
 			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
 			int32_t activation, float alpha                                                                            \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
 			/* W^T [K, N] (unused strides: the batch dimensions only need its rank). */                                \
-			const int64_t K = a_shape[a_rank - 1], wShape[2] = {K, N}, wStrides[2] = {1, K};                            \
+			const int64_t K = a_shape[a_rank - 1], wShape[2] = {K, N}, wStrides[2] = {1, K};                           \
 			const int r = mdl::kernels::forEachGemm(                                                                   \
-					{a_rank, a_shape, a_strides}, {2, wShape, wStrides}, {c_rank, c_shape, c_strides}, 0,             \
+					{a_rank, a_shape, a_strides}, {2, wShape, wStrides}, {c_rank, c_shape, c_strides}, 0,              \
 					[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t, int64_t co) {                                \
 						matmulQuantized(                                                                               \
 								dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), q, scales, zeros,      \

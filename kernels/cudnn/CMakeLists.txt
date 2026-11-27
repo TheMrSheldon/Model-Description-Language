@@ -20,6 +20,8 @@ string(REGEX REPLACE ".*MAJOR ([0-9]+).*MINOR ([0-9]+).*PATCHLEVEL ([0-9]+).*" "
 message(STATUS "[mdl] cuDNN ${MDL_CUDNN_VERSION}: ${MDL_CUDNN_LIBRARY}")
 
 CPMAddPackage(NAME cudnn_frontend GITHUB_REPOSITORY NVIDIA/cudnn-frontend GIT_TAG v1.12.0 DOWNLOAD_ONLY YES)
+mdl_third_party(cudnn-frontend COMPONENTS cuda VERSION 1.12.0 SPDX MIT URL https://github.com/NVIDIA/cudnn-frontend
+	LICENSE_FILES "${cudnn_frontend_SOURCE_DIR}/LICENSE*")
 find_package(CUDAToolkit REQUIRED)
 
 add_library(mdl_cudnn STATIC src/attention.cpp)
@@ -38,5 +40,5 @@ file(READ "${CMAKE_CURRENT_BINARY_DIR}/cudnn.package.yml.in" manifest)
 string(REGEX REPLACE "\\$<TARGET_FILE:([a-z_]+)>" "lib/$<TARGET_FILE_NAME:\\1>" manifest "${manifest}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cudnn.install.yml" CONTENT "${manifest}")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/cudnn.install.yml" DESTINATION share/mdl/kernels/cudnn
-	RENAME package.yml COMPONENT kernels)
-install(FILES $<TARGET_FILE:mdl_cudnn> DESTINATION share/mdl/kernels/cudnn/lib COMPONENT kernels)
+	RENAME package.yml COMPONENT cuda)
+install(FILES $<TARGET_FILE:mdl_cudnn> DESTINATION share/mdl/kernels/cudnn/lib COMPONENT cuda)
