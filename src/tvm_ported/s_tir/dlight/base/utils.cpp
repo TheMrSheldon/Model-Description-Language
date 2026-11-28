@@ -22,8 +22,8 @@ namespace mdl::tvm_ported::dlight {
 		const auto extent = as_int(get_extent(sch, loop));
 		if (!extent)
 			return;
-		const LoopRV v = *extent <= max_vec ? loop
-											: sch->Split(loop, {std::nullopt, ::tvm::IntImm::Int32(max_vec)}).back();
+		const LoopRV v =
+				*extent <= max_vec ? loop : sch->Split(loop, {std::nullopt, ::tvm::IntImm::Int32(max_vec)}).back();
 		sch->Vectorize(v);
 	}
 

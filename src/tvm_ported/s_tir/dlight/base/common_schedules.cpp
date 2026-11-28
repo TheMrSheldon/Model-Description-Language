@@ -30,8 +30,9 @@ namespace mdl::tvm_ported::dlight {
 		return blocks;
 	}
 
-	std::optional<std::vector<analysis::SBlockInfo>>
-	try_inline_contiguous_spatial(const Schedule& sch, const std::optional<std::vector<analysis::SBlockInfo>>& block_infos) {
+	std::optional<std::vector<analysis::SBlockInfo>> try_inline_contiguous_spatial(
+			const Schedule& sch, const std::optional<std::vector<analysis::SBlockInfo>>& block_infos
+	) {
 		if (!block_infos)
 			return std::nullopt;
 		std::vector<analysis::SBlockInfo> results, spatial_blocks;

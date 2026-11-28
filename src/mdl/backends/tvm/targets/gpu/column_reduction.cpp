@@ -102,7 +102,7 @@ namespace mdl::backend::tvm::gpu {
 			const LoopRV r = loops.size() - numS == 1 ? loops.back()
 													  : sch->Fuse(Array<LoopRV>(loops.begin() + split, loops.end()));
 			const auto chunks = sch->Split(r, factors(kChunk)); // [chunk, row in chunk]
-			const SBlockRV rf = sch->RFactor(chunks[0], 0);	   // partial sums [chunks, columns]
+			const SBlockRV rf = sch->RFactor(chunks[0], 0);		// partial sums [chunks, columns]
 
 			// The partial sums: threadIdx.x on adjacent columns, threadIdx.y on chunks; each thread sums its chunk.
 			{
@@ -111,8 +111,10 @@ namespace mdl::backend::tvm::gpu {
 					return std::nullopt;
 				// kVector adjacent columns per thread (vector loads) if the columns divide evenly.
 				const int64_t vector = columns && *columns % (kWarp * kVector) == 0 ? kVector : 1;
-				const auto cols = sch->Split(l[0], {::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(kWarp),
-													::tvm::IntImm::Int32(vector)});
+				const auto cols = sch->Split(
+						l[0],
+						{::tvm::ffi::Optional<PrimExpr>(), ::tvm::IntImm::Int32(kWarp), ::tvm::IntImm::Int32(vector)}
+				);
 				const auto chs = sch->Split(l[1], factors(kChunksPerBlock));
 				sch->Reorder({cols[0], chs[0], chs[1], cols[1], l[2], cols[2]});
 				sch->Bind(cols[0], "blockIdx.x");

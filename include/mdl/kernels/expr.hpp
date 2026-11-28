@@ -35,11 +35,11 @@ namespace mdl::kernels::expr {
 			 * operator `attr.NAME` (real). `$out` (or `$out0`, `$out1`, ... for several results): the result.
 			 */
 			access,
-			unary,	   ///< op: `-`, `not`
-			binary,	   ///< op: + - * // % == != < <= > >= and or
-			in,		   ///< args[0] in args[1] (a list)
-			index,	   ///< args[0][args[1]] of a shape (negative indices count from the end)
-			slice,	   ///< args[0][from:to] of a shape (absent bounds: hasFrom/hasTo false)
+			unary,	///< op: `-`, `not`
+			binary, ///< op: + - * // % == != < <= > >= and or
+			in,		///< args[0] in args[1] (a list)
+			index,	///< args[0][args[1]] of a shape (negative indices count from the end)
+			slice,	///< args[0][from:to] of a shape (absent bounds: hasFrom/hasTo false)
 			/**
 			 * name(args...): prod(shape), len(shape), strides(shape) (the row-major strides of a contiguous tensor),
 			 * permute(list, perm) (entry i is list[perm[i]]), unpermute(list, perm) (its inverse); an empty permutation is

@@ -155,8 +155,9 @@ namespace mdl::attention {
 					const Node* data = &add->arguments[i].get();
 					const Node& b = add->arguments[1 - i].get();
 					const Node* mask = nullptr;
-					if (const auto* w = invocation(*data, FIDs::WHERE);
-						w != nullptr && isConstant(w->arguments[2].get(), 0.0) && isMaskBias(b, w->arguments[0].get())) {
+					if (const auto* w = invocation(*data, FIDs::WHERE); w != nullptr &&
+																		isConstant(w->arguments[2].get(), 0.0) &&
+																		isMaskBias(b, w->arguments[0].get())) {
 						data = &w->arguments[1].get();
 						mask = &w->arguments[0].get();
 					}

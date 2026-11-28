@@ -32,8 +32,8 @@ namespace mdl::backend::tvm {
 	public:
 		explicit UnsupportedTarget(const mdl::CompileOptions& /*opts*/) {
 			throw std::runtime_error(
-					std::string("target '") + Kind.value + "' is not supported by this build of mdlc (build it with -D" +
-					Feature.value + "=ON)"
+					std::string("target '") + Kind.value +
+					"' is not supported by this build of mdlc (build it with -D" + Feature.value + "=ON)"
 			);
 		}
 

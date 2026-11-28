@@ -44,8 +44,8 @@ namespace mdl::backend::tvm {
 		 * an accumulated output, updated in place), or -1 for an argument of the entry.
 		 */
 		std::vector<int> aliases;
-		bool context = false;		  ///< whether the function takes a context buffer (as its last argument)
-		std::string contextName;	  ///< the context buffer's name (shared by its producer and consumers)
+		bool context = false;	 ///< whether the function takes a context buffer (as its last argument)
+		std::string contextName; ///< the context buffer's name (shared by its producer and consumers)
 		/** @brief For the producer: global symbol of the size function to emit (`dims... -> bytes`); else empty. */
 		std::string sizeSymbol;
 		/**

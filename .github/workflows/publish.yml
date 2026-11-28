@@ -96,23 +96,32 @@ jobs:
           }
 
       # The compiler needs LLVM (TVM's code generation): a static build, cached, so that the packages need no LLVM.
-      - name: Cache LLVM (Linux)
+      # (restore and save are separate steps: the save of actions/cache runs only if the whole job succeeds, and a later
+      # failure would throw the 45 minutes of the LLVM build away.)
+      - name: Restore LLVM (Linux)
         if: runner.os == 'Linux'
         id: llvm
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /opt/llvm
           key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/ci/build-llvm.sh') }}
       - name: Build LLVM (Linux, not cached)
         if: runner.os == 'Linux' && steps.llvm.outputs.cache-hit != 'true'
         run: scripts/ci/build-llvm.sh /opt/llvm "$LLVM_VERSION"
+      - name: Save LLVM (Linux, not cached)
+        if: runner.os == 'Linux' && steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/llvm
+          key: llvm-${{ env.LLVM_VERSION }}-${{ matrix.platform }}-${{ hashFiles('scripts/ci/build-llvm.sh') }}
       # NVRTC, the headers, and nvcc (for the cuBLAS kernels). The runner has no GPU: the CUDA parts are built, not run.
       - name: Install the CUDA Toolkit (Linux)
         if: runner.os == 'Linux'
         run: |
           dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/${{ matrix.cuda_repo }}/cuda-rhel8.repo
+          # (cuda-driver-devel: the stub libcuda.so that TVM's CUDA runtime links against; there is no driver on the runner)
           dnf install -y cuda-nvcc-${CUDA_VERSION} cuda-cudart-devel-${CUDA_VERSION} cuda-nvrtc-devel-${CUDA_VERSION} \
-            cuda-cccl-${CUDA_VERSION} libcublas-devel-${CUDA_VERSION}
+            cuda-cccl-${CUDA_VERSION} cuda-driver-devel-${CUDA_VERSION} libcublas-devel-${CUDA_VERSION}
           ls -d /usr/local/cuda-*
 
       # ── Build and test ──────────────────────────────────────────────────────────────────────────
@@ -126,7 +135,8 @@ jobs:
             -DMDL_LLVM_CONFIG=/opt/llvm/bin/llvm-config \
             -DMDL_REQUIRE_THIRD_PARTY_LICENSES=ON \
             -DMDL_ENABLE_CUDA=ON -DMDL_CUDA_ARCH=sm_80 -DCUDAToolkit_ROOT="$cuda" -DCUDA_TOOLKIT_ROOT_DIR="$cuda" \
-            -DCMAKE_CUDA_COMPILER="$cuda/bin/nvcc"
+            -DCMAKE_CUDA_COMPILER="$cuda/bin/nvcc" \
+            -DCUDA_CUDA_LIBRARY="$cuda/lib64/stubs/libcuda.so"
       - name: "Configure (macOS and Windows: the tools)"
         if: runner.os != 'Linux'
         shell: bash
@@ -167,11 +177,14 @@ jobs:
       - name: List the Packages (and check the layout of the editor archive)
         shell: bash
         run: |
-          ls -lh dist | grep -v _CPack_Packages
+          ls -lh dist
+          # (the listing goes to a file: `grep -q` closing the pipe early would fail the step under pipefail)
           if [ "${{ runner.os }}" = Windows ]; then
-            unzip -l dist/mdl-tools-${{ matrix.platform }}.zip | grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format.exe'
+            unzip -l dist/mdl-tools-${{ matrix.platform }}.zip > editor-archive.txt
+            grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format.exe' editor-archive.txt
           else
-            tar tzf dist/mdl-tools-${{ matrix.platform }}.tar.gz | grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format$'
+            tar tzf dist/mdl-tools-${{ matrix.platform }}.tar.gz > editor-archive.txt
+            grep -q 'mdl-tools-${{ matrix.platform }}/bin/mdl-format$' editor-archive.txt
           fi
       - name: Upload
         uses: actions/upload-artifact@v4

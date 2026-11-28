@@ -31,7 +31,8 @@ namespace mdl::backend::tvm {
 	 */
 	::tvm::relax::Expr makeAttention(
 			::tvm::relax::Expr q, ::tvm::relax::Expr k, ::tvm::relax::Expr v, double scale,
-			std::optional<::tvm::relax::Expr> bias = std::nullopt, std::optional<::tvm::relax::Expr> lengths = std::nullopt
+			std::optional<::tvm::relax::Expr> bias = std::nullopt,
+			std::optional<::tvm::relax::Expr> lengths = std::nullopt
 	);
 
 	/**
@@ -44,7 +45,8 @@ namespace mdl::backend::tvm {
 	::tvm::relax::Expr makeAttentionGrad(
 			::tvm::relax::Expr q, ::tvm::relax::Expr k, ::tvm::relax::Expr v, ::tvm::relax::Expr out,
 			::tvm::relax::Expr lse, ::tvm::relax::Expr probs, ::tvm::relax::Expr dy, double scale,
-			std::optional<::tvm::relax::Expr> bias = std::nullopt, std::optional<::tvm::relax::Expr> lengths = std::nullopt
+			std::optional<::tvm::relax::Expr> bias = std::nullopt,
+			std::optional<::tvm::relax::Expr> lengths = std::nullopt
 	);
 
 	/**

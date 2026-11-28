@@ -43,9 +43,9 @@ namespace mdl::backend::tvm {
 		 * block's iterators (the producers of fused kernels inlined).
 		 */
 		struct Injective {
-			tirx::PrimFunc func;			  ///< (inlined)
-			std::vector<tirx::For> loops;	  ///< outermost first
-			s_tir::SBlockRealize realize;	  ///< the block
+			tirx::PrimFunc func;		  ///< (inlined)
+			std::vector<tirx::For> loops; ///< outermost first
+			s_tir::SBlockRealize realize; ///< the block
 			s_tir::SBlock root;
 			s_tir::SBlockRealize rootRealize;
 		};
@@ -96,11 +96,13 @@ namespace mdl::backend::tvm {
 			k.realize = ffi::GetRef<s_tir::SBlockRealize>(inner);
 			const auto& block = inner->block;
 			if (block->init.has_value() || !block->alloc_buffers.empty() || !block->match_buffers.empty() ||
-				block->iter_vars.empty() || block->iter_vars.size() != k.loops.size() || !::tvm::prim::is_one(inner->predicate))
+				block->iter_vars.empty() || block->iter_vars.size() != k.loops.size() ||
+				!::tvm::prim::is_one(inner->predicate))
 				return std::nullopt;
 			const auto* store = block->body.as<tirx::BufferStoreNode>();
 			const auto& out = k.func->params.back();
-			if (store == nullptr || store->buffer.get() != out.get() || store->indices.size() != block->iter_vars.size())
+			if (store == nullptr || store->buffer.get() != out.get() ||
+				store->indices.size() != block->iter_vars.size())
 				return std::nullopt;
 			const auto outBuffer = out.as_or_throw<tirx::BufferVar>();
 			::tvm::sym::Analyzer analyzer;
@@ -122,11 +124,10 @@ namespace mdl::backend::tvm {
 		/** @brief @p buffer with the shape @p shape (a new buffer over new memory, bound by a parameter). */
 		tirx::BufferVar reshaped(const tirx::BufferVar& buffer, const ffi::Array<PrimExpr>& shape) {
 			return tirx::BufferVar(
-					buffer.name(),
-					tirx::BufferType(
-							buffer->storage_scope, buffer->dtype, shape, buffer->strides, buffer->elem_offset,
-							buffer->data_alignment, buffer->offset_factor
-					)
+					buffer.name(), tirx::BufferType(
+										   buffer->storage_scope, buffer->dtype, shape, buffer->strides,
+										   buffer->elem_offset, buffer->data_alignment, buffer->offset_factor
+								   )
 			);
 		}
 
@@ -160,10 +161,14 @@ namespace mdl::backend::tvm {
 						if (out->shape[d].as<::tvm::VarNode>() != nullptr)
 							vars.emplace(out->shape[d].get(), baseOut->shape[d]);
 				auto subst = [&](const PrimExpr& e) {
-					return tirx::SubstituteWithDataTypeLegalization(e, [&](const ::tvm::Var& v) -> ffi::Optional<PrimExpr> {
-						auto it = vars.find(v.get());
-						return it == vars.end() ? ffi::Optional<PrimExpr>() : ffi::Optional<PrimExpr>(it->second);
-					});
+					return tirx::SubstituteWithDataTypeLegalization(
+							e,
+							[&](const ::tvm::Var& v) -> ffi::Optional<PrimExpr> {
+								auto it = vars.find(v.get());
+								return it == vars.end() ? ffi::Optional<PrimExpr>()
+														: ffi::Optional<PrimExpr>(it->second);
+							}
+					);
 				};
 				// The parameters: shared, reshaped (the first kernel's variables) or unchanged.
 				std::unordered_map<const void*, tirx::BufferVar> buffers; // the kernel's parameter -> the merged one
@@ -213,16 +218,18 @@ namespace mdl::backend::tvm {
 														   indices.push_back(rewrite(i));
 													   return ffi::Any(tirx::BufferLoad(bufferOf(*buffer), indices));
 												   }
-	                                       )
-												   .cast<PrimExpr>();
+					).cast<PrimExpr>();
 					return subst(loads);
 				};
-				auto points = [&](const ffi::Array<::tvm::TensorRegion>& regions, ffi::Array<::tvm::TensorRegion>& into) {
+				auto points = [&](const ffi::Array<::tvm::TensorRegion>& regions,
+								  ffi::Array<::tvm::TensorRegion>& into) {
 					for (const auto& r : regions) {
 						ffi::Array<PrimExpr> indices;
 						for (const auto& range : r->region)
 							indices.push_back(rewrite(range->min));
-						into.push_back(tirx::BufferRegionFromPoint(bufferOf(r->source.as_or_throw<tirx::BufferVar>()), indices));
+						into.push_back(
+								tirx::BufferRegionFromPoint(bufferOf(r->source.as_or_throw<tirx::BufferVar>()), indices)
+						);
 					}
 				};
 				points(block->reads, reads);
@@ -361,8 +368,7 @@ namespace mdl::backend::tvm {
 					for (const void* v : argumentVars(sites[i]->call))
 						inputs.insert(v);
 					for (size_t j = i + 1; j < bindings.size() && group.size() < kMaxGroup; ++j) {
-						if (!sites[j] || taken[j] ||
-							!ffi::StructuralEqual()(*knownShape(bindings[j]->var), shape))
+						if (!sites[j] || taken[j] || !ffi::StructuralEqual()(*knownShape(bindings[j]->var), shape))
 							continue;
 						bool shares = false, available = true;
 						for (const void* v : argumentVars(sites[j]->call)) {
@@ -427,14 +433,13 @@ namespace mdl::backend::tvm {
 				return block.as<relax::DataflowBlockNode>() ? relax::BindingBlock(relax::DataflowBlock(result))
 															: relax::BindingBlock(result);
 			}
-
 		};
 	} // namespace
 
 	::tvm::transform::Pass fuseSiblings() {
 		return ::tvm::transform::CreateModulePass(
-				[](::tvm::IRModule mod, ::tvm::transform::PassContext) { return SiblingFuser(std::move(mod)).run(); }, 0,
-				"mdl.FuseSiblings", {}
+				[](::tvm::IRModule mod, ::tvm::transform::PassContext) { return SiblingFuser(std::move(mod)).run(); },
+				0, "mdl.FuseSiblings", {}
 		);
 	}
 

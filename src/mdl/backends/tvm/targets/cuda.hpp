@@ -28,7 +28,7 @@ namespace mdl::backend::tvm {
 
 	private:
 		::tvm::Target target;
-		std::string arch;					///< sm_XY
+		std::string arch;			   ///< sm_XY
 		std::filesystem::path dumpDir; ///< CompileOptions::dumpDir: the generated CUDA source is written there
 	};
 #else

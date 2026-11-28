@@ -1040,9 +1040,7 @@ namespace mdl {
 		}
 
 		/** @brief Records every part of an import path with the file(s) it stands for (for hover and go to definition). */
-		void indexImport(
-				mdlParser::Import_pathContext* ctx, bool reexported, std::vector<std::string> names = {}
-		) {
+		void indexImport(mdlParser::Import_pathContext* ctx, bool reexported, std::vector<std::string> names = {}) {
 			auto read = [](const std::filesystem::path& file) {
 				std::ifstream in{file, std::ios::binary};
 				return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};

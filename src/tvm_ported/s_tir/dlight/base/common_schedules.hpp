@@ -15,7 +15,8 @@ namespace mdl::tvm_ported::dlight {
 	std::vector<analysis::SBlockInfo> try_inline(const Schedule& sch, std::vector<analysis::SBlockInfo> blocks);
 
 	/** @brief Try to inline contiguous spatial blocks in a schedule; returns the remaining blocks. */
-	std::optional<std::vector<analysis::SBlockInfo>>
-	try_inline_contiguous_spatial(const Schedule& sch, const std::optional<std::vector<analysis::SBlockInfo>>& block_infos);
+	std::optional<std::vector<analysis::SBlockInfo>> try_inline_contiguous_spatial(
+			const Schedule& sch, const std::optional<std::vector<analysis::SBlockInfo>>& block_infos
+	);
 
 } // namespace mdl::tvm_ported::dlight

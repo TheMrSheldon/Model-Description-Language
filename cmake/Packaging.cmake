@@ -96,8 +96,11 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Model Description Language: a language fo
 set(CPACK_PACKAGE_DESCRIPTION
 	"MDL is a language for describing neural networks and a compiler (mdlc) that turns a model into a linkable object file plus bindings (C++ header, Python).")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "MDL")
-set(CPACK_RESOURCE_FILE_LICENSE "${PROJECT_SOURCE_DIR}/LICENSE")
-set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
+# (The installers show these files; productbuild only accepts .txt, .rtf, .html and .rtfd.)
+configure_file("${PROJECT_SOURCE_DIR}/LICENSE" "${CMAKE_BINARY_DIR}/installer/LICENSE.txt" COPYONLY)
+configure_file("${PROJECT_SOURCE_DIR}/README.md" "${CMAKE_BINARY_DIR}/installer/README.txt" COPYONLY)
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_BINARY_DIR}/installer/LICENSE.txt")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_BINARY_DIR}/installer/README.txt")
 set(CPACK_PACKAGE_FILE_NAME "mdl-${CPACK_PACKAGE_VERSION}-${MDL_PACKAGE_PLATFORM}")
 set(CPACK_STRIP_FILES ON)
 set(CPACK_SOURCE_GENERATOR "") # (source archives are the GitHub release's)

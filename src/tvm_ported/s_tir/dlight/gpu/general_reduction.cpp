@@ -187,7 +187,9 @@ namespace mdl::tvm_ported::dlight::gpu {
 				sch->SetScope(block, static_cast<int>(i), "shared");
 			sch->ComputeAt(block, bx, /*preserve_unit_loops=*/true);
 			const auto block_loops = sch->GetLoops(block);
-			r_loop = sch->Fuse(Array<LoopRV>(block_loops.end() - static_cast<std::ptrdiff_t>(num_trailing_r), block_loops.end()));
+			r_loop = sch->Fuse(
+					Array<LoopRV>(block_loops.end() - static_cast<std::ptrdiff_t>(num_trailing_r), block_loops.end())
+			);
 			split = sch->Split(r_loop, factors({std::nullopt, len_tx}));
 			r_loop = split[0];
 			tx = split[1];

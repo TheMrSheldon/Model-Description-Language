@@ -438,13 +438,16 @@ namespace mdl::backend::tvm {
 			for (const auto& id : impl.artifacts) {
 				const auto* a = p.artifact(id);
 				std::error_code ec;
-				std::string reason = !kernels::forDevice(*a, target)
-											 ? (a->deviceArch.empty() ? std::string("not for the device ") + target.deviceArch
-																	  : "not for " + (target.deviceArch.empty() ? std::string("the CPU") : target.deviceArch))
-									 : !a->supported() ? "cubin and PTX artifacts are not supported yet"
-									 : !kernels::compatible(a->platform, target)	  ? "not for " + target.str()
-									 : !std::filesystem::is_regular_file(a->path, ec) ? "missing " + a->path.string()
-																					  : "";
+				std::string reason =
+						!kernels::forDevice(*a, target)
+								? (a->deviceArch.empty()
+										   ? std::string("not for the device ") + target.deviceArch
+										   : "not for " + (target.deviceArch.empty() ? std::string("the CPU")
+																					 : target.deviceArch))
+						: !a->supported()							? "cubin and PTX artifacts are not supported yet"
+						: !kernels::compatible(a->platform, target) ? "not for " + target.str()
+						: !std::filesystem::is_regular_file(a->path, ec) ? "missing " + a->path.string()
+																		 : "";
 				if (reason.empty())
 					return {id, ""};
 				why += (why.empty() ? "" : "; ") + id + ": " + reason;
@@ -525,7 +528,8 @@ namespace mdl::backend::tvm {
 							c.captures.emplace_back(name, value);
 						}
 						captures["out"] = vb->var;
-						if (const auto* tuple = relax::GetType(vb->var).as<::tvm::TupleTypeNode>()) // ($out0, $out1, ...)
+						if (const auto* tuple =
+									relax::GetType(vb->var).as<::tvm::TupleTypeNode>()) // ($out0, $out1, ...)
 							for (size_t i = 0; i < tuple->fields.size(); ++i)
 								captures["out" + std::to_string(i)] = Var("out" + std::to_string(i), tuple->fields[i]);
 
@@ -912,19 +916,22 @@ namespace mdl::backend::tvm {
 							const auto c = ::tvm::sym::Analyzer()->Simplify(eval.eval(*target->args[0]).scalar);
 							const auto* imm = c.as<::tvm::IntImmNode>();
 							if (imm == nullptr)
-								throw std::runtime_error("mdl kernels: a pointer chosen by a condition that is not constant");
+								throw std::runtime_error(
+										"mdl kernels: a pointer chosen by a condition that is not constant"
+								);
 							target = target->args[intValue(imm) != 0 ? 1 : 2].get();
 						}
-						const std::string name = target->kind == expr::Node::Kind::access ? target->name : std::string();
+						const std::string name =
+								target->kind == expr::Node::Kind::access ? target->name : std::string();
 						if (auto out = outs.find(name); out != outs.end()) {
 							args.push_back(out->second);
 							continue;
 						}
 						if (name.empty() || tensorInfo(captures.at(name)) == nullptr) { // (null, e.g. an absent bias)
-							args.push_back(Call(
-									::tvm::PointerType::VoidPointerTy(), tirx::builtin::reinterpret(),
-									{::tvm::IntImm(::tvm::PrimType::UInt(64), 0)}
-							));
+							args.push_back(
+									Call(::tvm::PointerType::VoidPointerTy(), tirx::builtin::reinterpret(),
+										 {::tvm::IntImm(::tvm::PrimType::UInt(64), 0)})
+							);
 							continue;
 						}
 						auto [p, inserted] = pointers.try_emplace(name);

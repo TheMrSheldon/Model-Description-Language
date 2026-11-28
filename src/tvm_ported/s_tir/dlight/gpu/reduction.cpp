@@ -115,7 +115,8 @@ namespace mdl::tvm_ported::dlight::gpu {
 			std::optional<size_t> s_split_index;
 		};
 
-		Normalized _normalize(const Schedule& sch, const SBlockInfo& block_info, const ::tvm::sym::IterSumExpr& access) {
+		Normalized
+		_normalize(const Schedule& sch, const SBlockInfo& block_info, const ::tvm::sym::IterSumExpr& access) {
 			if (as_int(access->base) != 0)
 				return {};
 			std::unordered_map<const void*, const analysis::IterInfo*> iter_to_info;

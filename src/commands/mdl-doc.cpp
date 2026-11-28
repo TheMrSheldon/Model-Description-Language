@@ -76,7 +76,9 @@ namespace {
 		for (std::string_view command : {"@brief", "\\brief"})
 			for (size_t at = text.find(command); at != std::string::npos; at = text.find(command, at))
 				if (at == 0 || text[at - 1] == '\n')
-					text.erase(at, command.size() + (at + command.size() < text.size() && text[at + command.size()] == ' '));
+					text.erase(
+							at, command.size() + (at + command.size() < text.size() && text[at + command.size()] == ' ')
+					);
 				else
 					at += command.size();
 		return text;
@@ -134,8 +136,7 @@ namespace {
 			if (auto link = links.find(keyOf(s)); link != links.end()) {
 				target = link->second;
 			} else if (s.kind == SymbolKind::module || s.kind == SymbolKind::structure ||
-					   s.kind == SymbolKind::function || s.kind == SymbolKind::method ||
-					   s.kind == SymbolKind::member) {
+					   s.kind == SymbolKind::function || s.kind == SymbolKind::method || s.kind == SymbolKind::member) {
 				if (auto defining = pages.find(fs::weakly_canonical(s.file)); defining != pages.end())
 					target = pageId(defining->second) + "_source.html#l" + std::to_string(s.range.begin.line);
 			}
@@ -172,10 +173,9 @@ namespace {
 	}
 
 	/** @brief The page of @p file: its public definitions (and re-exports). */
-	std::string render(
-			const Page& page, const mdl::analysis::SemanticIndex& index, const std::map<fs::path, std::string>& pages,
-			const std::string& fileComment, Links& links
-	) {
+	std::string
+	render(const Page& page, const mdl::analysis::SemanticIndex& index, const std::map<fs::path, std::string>& pages,
+		   const std::string& fileComment, Links& links) {
 		const std::string id = pageId(page.dotted);
 		std::ostringstream out;
 		out << "\\page " << id << " " << page.dotted << "\n\n" << docText(fileComment) << "\n\\tableofcontents\n\n";
@@ -208,7 +208,8 @@ namespace {
 			out << level << " " << heading << " {#" << anchorId << "}\n\n"
 				<< "\\htmlonly[block]<div class=\"memitem\"><div class=\"memproto mdl\">\\endhtmlonly\n```\n"
 				<< declaration(s) << "\n```\n\\htmlonly[block]</div><div class=\"memdoc\">\\endhtmlonly\n\n"
-				<< withoutBriefCommand(docText(s.comment)) << "\n"
+				<< withoutBriefCommand(docText(s.comment))
+				<< "\n"
 				// "Definition at line N of FILE" like Doxygen's, with links into the source page.
 				<< "\n\\htmlonly[block]<p class=\"definition\">Definition at line <a href=\"" << id << "_source.html#l"
 				<< s.range.begin.line << "\">" << s.range.begin.line << "</a> of <a href=\"" << id << "_source.html\">"
@@ -336,7 +337,8 @@ int main(int argc, char* argv[]) {
 	// The index: the files with their brief description (of the `@file` comment).
 	index << "\\page " << pageId(name) << "_api " << title << "\n\n| File | Description |\n|---|---|\n";
 	for (const auto& page : pages)
-		index << "| \\ref " << pageId(page.dotted) << " \"" << page.dotted << "\" | " << tableCell(page.brief) << " |\n";
+		index << "| \\ref " << pageId(page.dotted) << " \"" << page.dotted << "\" | " << tableCell(page.brief)
+			  << " |\n";
 	index << "\n<div class=\"hidden-subpages\">\n\n";
 	for (const auto& page : pages) {
 		std::ofstream{output / (page.dotted + ".md")} << page.text;

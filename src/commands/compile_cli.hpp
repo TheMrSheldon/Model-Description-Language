@@ -607,7 +607,8 @@ inline CLI::Option* addCompileOptions(CLI::App& app, CompileArgs& args) {
 	app.add_option("--dump-dir", args.compileOpts.dumpDir, "Write intermediate IR dumps into this directory.");
 	app.add_option(
 			"--kernels-dir", args.compileOpts.kernelDirs,
-			"A kernel directory with kernel packages (searched first; repeatable; see docs/dev/spec/kernel-packages.md)."
+			"A kernel directory with kernel packages (searched first; repeatable; see "
+			"docs/dev/spec/kernel-packages.md)."
 	);
 	app.add_option(
 			"--kernel-package", args.compileOpts.kernelPackages,

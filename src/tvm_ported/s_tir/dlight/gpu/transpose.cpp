@@ -96,9 +96,8 @@ namespace mdl::tvm_ported::dlight::gpu {
 			for (const auto& i : block_stmt->iter_vars)
 				input_iters.Set(i->var, i->dom);
 			::tvm::sym::Analyzer analyzer;
-			const auto result = ::tvm::sym::NormalizeToIterSum(
-					analysis::detect_dominant_read(block_stmt), input_iters, analyzer
-			);
+			const auto result =
+					::tvm::sym::NormalizeToIterSum(analysis::detect_dominant_read(block_stmt), input_iters, analyzer);
 			if (!result->args.empty())
 				c_factor = as_int(result->args[0]->lower_factor).value();
 		}

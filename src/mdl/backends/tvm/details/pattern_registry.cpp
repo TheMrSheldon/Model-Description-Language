@@ -102,8 +102,10 @@ namespace mdl::backend::tvm {
 							::tvm::relax::
 									Expr(::tvm::relax::Expr,
 										 ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr>)>(
-							[&](::tvm::relax::Expr call, ::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr> m
-							) { return sharesIntermediates(entry.pattern, m) ? call : entry.rewriter(call, m, bindings); }
+							[&](::tvm::relax::Expr call,
+								::tvm::ffi::Map<::tvm::relax::DFPattern, ::tvm::relax::Expr> m) {
+								return sharesIntermediates(entry.pattern, m) ? call : entry.rewriter(call, m, bindings);
+							}
 					);
 					auto new_fn = ::tvm::relax::RewriteCall(entry.pattern, rewriter, func);
 					currentUses = nullptr;

@@ -11,8 +11,8 @@
 #include <tvm_ported/s_tir/dlight/gpu/gpu.hpp>
 #include <tvm_ported/support/nvcc.hpp>
 
-#include <tvm/ir/attrs.h>
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/ir/attrs.h>
 #include <tvm/target/codegen.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
@@ -72,7 +72,8 @@ namespace mdl::backend::tvm {
 				continue;
 			bool loops = false;
 			::tvm::ffi::StructuralWalk<::tvm::ffi::WalkOrder::kPreOrder>(
-					prim->body, [&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
+					prim->body,
+					[&](const ::tvm::tirx::For&) -> ::tvm::ffi::Expected<::tvm::ffi::WalkResult> {
 						loops = true;
 						return ::tvm::ffi::WalkResult::Advance();
 					}
@@ -83,14 +84,14 @@ namespace mdl::backend::tvm {
 		for (const auto& [gv, func] : externs)
 			kernels->Update(gv, func);
 		namespace gpu = mdl::tvm_ported::dlight::gpu;
-		const auto apply = mdl::tvm_ported::dlight::ApplyDefaultSchedule({
-				// (RowReduction, ColumnReduction: ours, before DLight's reductions.)
-				std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
-				std::make_shared<mdl::backend::tvm::gpu::ColumnReduction>(),
-				std::make_shared<gpu::Reduction>(), std::make_shared<gpu::GeneralReduction>(),
-				std::make_shared<mdl::backend::tvm::gpu::Elementwise>(), std::make_shared<gpu::Transpose>(),
-				std::make_shared<gpu::Fallback>()
-		});
+		const auto apply = mdl::tvm_ported::dlight::ApplyDefaultSchedule(
+				{// (RowReduction, ColumnReduction: ours, before DLight's reductions.)
+				 std::make_shared<gpu::Matmul>(), std::make_shared<mdl::backend::tvm::gpu::RowReduction>(),
+				 std::make_shared<mdl::backend::tvm::gpu::ColumnReduction>(), std::make_shared<gpu::Reduction>(),
+				 std::make_shared<gpu::GeneralReduction>(), std::make_shared<mdl::backend::tvm::gpu::Elementwise>(),
+				 std::make_shared<gpu::Transpose>(), std::make_shared<gpu::Fallback>()
+				}
+		);
 		try {
 			return runPasses(kernels, {apply}, target);
 		} catch (const std::exception& e) {
@@ -99,10 +100,14 @@ namespace mdl::backend::tvm {
 				try {
 					runPasses(::tvm::IRModule({{gv, func}}), {apply}, target);
 				} catch (const std::exception& inner) {
-					throw std::runtime_error(
-							std::format("cannot schedule the kernel {} for CUDA: {}\n{}", std::string(gv->name_hint),
-										inner.what(), [&] { std::ostringstream o; o << func; return o.str(); }())
-					);
+					throw std::runtime_error(std::format(
+							"cannot schedule the kernel {} for CUDA: {}\n{}", std::string(gv->name_hint), inner.what(),
+							[&] {
+								std::ostringstream o;
+								o << func;
+								return o.str();
+							}()
+					));
 				}
 			}
 			throw;
@@ -133,7 +138,8 @@ namespace mdl::backend::tvm {
 
 	std::vector<::tvm::transform::Pass> CUDATarget::afterVectorize() const {
 		// As in TVM's default TIR pipeline (python/tvm/s_tir/pipeline.py): DLight's schedules bind virtual threads.
-		return {registeredPass("s_tir.transform.InjectVirtualThread"), registeredPass("s_tir.transform.InjectDoubleBuffer")};
+		return {registeredPass("s_tir.transform.InjectVirtualThread"),
+				registeredPass("s_tir.transform.InjectDoubleBuffer")};
 	}
 
 	std::vector<::tvm::transform::Pass> CUDATarget::beforeSplit() const {
@@ -194,8 +200,8 @@ namespace mdl::backend::tvm {
 		const std::string llvmTarget =
 				triple ? R"({"kind": "llvm", "mtriple": ")" + std::string(triple.value()) + "\"}" : std::string("llvm");
 		::tvm::codegen::PackImportsToLLVM(code, /*system_lib=*/true, llvmTarget, prefix)->WriteToFile(blobObj, "o");
-		const std::string link = std::string(MDL_LINKER) + " -r -o '" + output.string() + "' '" + hostObj + "' '" +
-								 blobObj + "'";
+		const std::string link =
+				std::string(MDL_LINKER) + " -r -o '" + output.string() + "' '" + hostObj + "' '" + blobObj + "'";
 		const int status = std::system(link.c_str());
 		std::filesystem::remove(hostObj);
 		std::filesystem::remove(blobObj);

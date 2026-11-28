@@ -82,7 +82,7 @@ namespace mdl::builtins {
 		 * suffix mask of the queries' and keys' positions, its lengths, so that kernels can skip the masked suffix)
 		 */
 		ATTENTION,
-		ATTENTION_LSE,	 /**< (q, k, v, scale[, bias[, lengths]]): the log-sum-exp of the rows of the biased scores ([..., Sq], float32) */
+		ATTENTION_LSE, /**< (q, k, v, scale[, bias[, lengths]]): the log-sum-exp of the rows of the biased scores ([..., Sq], float32) */
 		ATTENTION_PROBS, /**< (q, k, v, scale[, bias[, lengths]]): the probabilities softmax(scale * q @ k^T + bias) */
 		/**
 		 * (q, k, v, scale, out, lse, probs, dy, which[, bias[, lengths]]): the gradient of ATTENTION w.r.t. q, k, or v (which: 0..2) for

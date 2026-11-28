@@ -1,11 +1,11 @@
 #include "./aot.hpp"
 #include "./tvm_compat.hpp"
 
-#include <tvm/sym/analyzer.h>
-#include <tvm/te/operation.h>
 #include <tvm/ir/function.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/type.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/te/operation.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -17,9 +17,9 @@
 
 #include <algorithm>
 #include <cstring>
-#include <stdexcept>
 #include <functional>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -149,8 +149,8 @@ namespace mdl::backend::tvm {
 			 */
 			std::string fill(DataType dtype, size_t k) {
 				return get("fill" + std::to_string(k) + "_" + key(dtype), [&] {
-					const bool narrowFloat =
-							dtype.bits() < 32 && (dtype.MatchesCode(kDLFloat) || dtype.MatchesElementType(kDLBfloat, 16));
+					const bool narrowFloat = dtype.bits() < 32 &&
+											 (dtype.MatchesCode(kDLFloat) || dtype.MatchesElementType(kDLBfloat, 16));
 					const DataType param = narrowFloat ? DataType::Float(32) : dtype;
 					Array<::tvm::ffi::ObjectRef> args;
 					std::vector<PrimVar> values;
@@ -381,8 +381,8 @@ namespace mdl::backend::tvm {
 			std::vector<tirx::Stmt> stmts;
 			static constexpr int64_t kArenaAlign = 64;
 			::tvm::PrimVar arenaSize{"workspace_bytes", DataType::Int(64)};
-			tirx::BufferVar arena;									  ///< the intermediate buffers (see allocate)
-			PrimExpr arenaBytes = IntImm(DataType::Int(64), 0); ///< its size so far
+			tirx::BufferVar arena;										   ///< the intermediate buffers (see allocate)
+			PrimExpr arenaBytes = IntImm(DataType::Int(64), 0);			   ///< its size so far
 			std::vector<std::pair<::tvm::PrimVar, PrimExpr>> arenaOffsets; ///< of the buffers (in their elements)
 			std::unordered_map<const ::tvm::VarNode*, Value> values;
 			std::unordered_map<const ::tvm::VarNode*, Expr> bindingOf;
@@ -443,7 +443,8 @@ namespace mdl::backend::tvm {
 				if (role == Role::Producer && !contextDims.empty()) {
 					// The dimensions into the header (through a kernel: the context may be device memory).
 					auto dims = bufferOf(
-							"ctx_dims", DataType::Int(64), {IntImm(DataType::Int(64), static_cast<int64_t>(contextDims.size()))},
+							"ctx_dims", DataType::Int(64),
+							{IntImm(DataType::Int(64), static_cast<int64_t>(contextDims.size()))},
 							IntImm(DataType::Int(64), 0)
 					);
 					prologue.push_back(tirx::DeclBuffer(dims, context.data()));
@@ -600,8 +601,9 @@ namespace mdl::backend::tvm {
 				// (The offset as a variable bound before the function's statements: the views do not repeat the sums.)
 				::tvm::PrimVar offset{freshName(name + "_offset"), i64};
 				arenaOffsets.emplace_back(offset, ::tvm::floordiv(arenaBytes, IntImm(i64, bytesOf(dtype))));
-				arenaBytes = arenaBytes + ::tvm::floordiv(bytes + IntImm(i64, kArenaAlign - 1), IntImm(i64, kArenaAlign)) *
-												  IntImm(i64, kArenaAlign);
+				arenaBytes =
+						arenaBytes + ::tvm::floordiv(bytes + IntImm(i64, kArenaAlign - 1), IntImm(i64, kArenaAlign)) *
+											 IntImm(i64, kArenaAlign);
 				return view(arena, std::move(shape), dtype, offset);
 			}
 

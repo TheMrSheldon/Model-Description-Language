@@ -220,9 +220,13 @@ namespace {
 	void
 	matmul(dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
 		   const void* addend, int activation, float alpha) {
+		// The addend is the output itself when a gradient is accumulated (dst += ...): oneDNN's sum post-op does that. (A
+		// binary post-op may not read its second operand from the output buffer: the product is stored before it is
+		// read, which on some CPUs (aarch64) doubles the result.)
+		const bool inplace = addend != nullptr && addend == dst;
 		using Key = std::tuple<
 				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool,
-				int, float>;
+				int, float, bool>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const memory::desc srcMd(a.dims, t, a.strides), wMd(b.dims, t, b.strides), dstMd(d.dims, t, d.strides);
 		const memory::dim N = d.dims.back();
@@ -233,7 +237,7 @@ namespace {
 
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), a.dims, a.strides, b.dims, b.strides, d.dims, d.strides, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, activation, alpha, inplace},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					if (alpha != 1.0f)
@@ -242,7 +246,9 @@ namespace {
 					dnnl::post_ops ops;
 					if (activation == 1)
 						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
-					if (addend != nullptr)
+					if (inplace)
+						ops.append_sum();
+					else if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
 					auto create = [&] {
@@ -273,7 +279,7 @@ namespace {
 		std::unordered_map<int, memory> args{{DNNL_ARG_SRC, src}, {DNNL_ARG_WEIGHTS, wei}, {DNNL_ARG_DST, out}};
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
-		if (addend != nullptr)
+		if (addend != nullptr && !inplace)
 			args.emplace(
 					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
@@ -309,13 +315,14 @@ namespace {
 		const memory::desc zerosMd({groups, N}, dt::u8, memory::format_tag::ab);
 		const memory::desc biasMd({1, N}, t, memory::format_tag::ab);
 
+		const bool inplace = addend != nullptr && addend == dst; // (see matmul)
 		using Key = std::tuple<
 				int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int,
-				float>;
+				float, bool>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), format, group, M, K, N, aM, aK, dM, dN, zeros != nullptr, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, activation, alpha, inplace},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					// Compute in the activations' type; apply_to_int: the integer weights are converted to it.
@@ -336,7 +343,9 @@ namespace {
 					dnnl::post_ops ops;
 					if (activation == 1)
 						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
-					if (addend != nullptr)
+					if (inplace)
+						ops.append_sum();
+					else if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
 					auto create = [&] {
@@ -397,7 +406,7 @@ namespace {
 			);
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
-		if (addend != nullptr)
+		if (addend != nullptr && !inplace)
 			args.emplace(
 					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
