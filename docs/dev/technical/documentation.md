@@ -74,7 +74,7 @@ module FFN[indim: uint, outdim: uint] { ... }
 ~~~
 
 # Versions
-The workflow `.github/workflows/docs.yml` builds the documentation for every pull request (with warnings as
-errors), publishes the state of `main` as `nightly/`, and every release as `vX.Y.Z/` (and as `latest/`) on GitHub
+The workflow `.github/workflows/docs.yml` builds the documentation for every pull request (Doxygen warnings are
+reported, not errors; `-DMDL_DOCS_WARN_AS_ERROR=ON` makes them errors), publishes the state of `main` as `nightly/`, and every release as `vX.Y.Z/` (and as `latest/`) on GitHub
 Pages. Doxygen has no version selector, so versions are distinguished by the URL; the root redirects to `latest/`, and
 `versions.json` lists the published versions.

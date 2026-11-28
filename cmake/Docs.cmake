@@ -6,7 +6,7 @@
 # Citations (\cite key) come from all docs/references/*.bib files.
 find_package(Doxygen 1.10 REQUIRED dot)
 
-option(MDL_DOCS_WARN_AS_ERROR "Fail the documentation build on Doxygen warnings (CI)" OFF)
+option(MDL_DOCS_WARN_AS_ERROR "Fail the documentation build on Doxygen warnings" OFF)
 
 CPMAddPackage(
 	NAME doxygen-awesome-css
@@ -76,7 +76,10 @@ set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${PROJECT_SOURCE_DIR}/docs/index.md")
 set(DOXYGEN_USE_MATHJAX YES)
 set(DOXYGEN_MATHJAX_VERSION MathJax_3)
 set(DOXYGEN_MATHJAX_EXTENSIONS ams)
-set(DOXYGEN_IMAGE_PATH "${PROJECT_SOURCE_DIR}/docs/media")
+# (git does not keep an empty directory: without images, Doxygen would complain about the missing path)
+if(EXISTS "${PROJECT_SOURCE_DIR}/docs/media")
+	set(DOXYGEN_IMAGE_PATH "${PROJECT_SOURCE_DIR}/docs/media")
+endif()
 set(DOXYGEN_EXAMPLE_PATH "${PROJECT_SOURCE_DIR}/examples" "${PROJECT_SOURCE_DIR}/std")
 set(DOXYGEN_CITE_BIB_FILES ${_bib_files})
 set(DOXYGEN_SOURCE_BROWSER NO)

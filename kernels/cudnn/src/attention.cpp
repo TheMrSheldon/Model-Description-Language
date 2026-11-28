@@ -69,15 +69,15 @@ namespace {
 	/** @brief Builds the graph's execution plan (false if cuDNN does not support the configuration). */
 	bool build(fe::graph::Graph& graph, Context& ctx) {
 		return graph.validate().is_good() && graph.build_operation_graph(ctx.handle).is_good() &&
-			   graph.create_execution_plans({fe::HeurMode_t::A}).is_good() && graph.check_support(ctx.handle).is_good() &&
+			   graph.create_execution_plans({fe::HeurMode_t::A}).is_good() &&
+			   graph.check_support(ctx.handle).is_good() &&
 			   graph.build_plans(ctx.handle, fe::BuildPlanPolicy_t::ALL).is_good(); // (all: measured on first use)
 	}
 
 	/** @brief The graph of a configuration (nullptr if cuDNN does not support it). */
-	std::shared_ptr<fe::graph::Graph>
-	graphFor(
-			Context& ctx, Kind kind, fe::DataType_t type, const Dims& dims, const Strides& strides, const BiasLayout& bias,
-			const Padding& padding, float scale
+	std::shared_ptr<fe::graph::Graph> graphFor(
+			Context& ctx, Kind kind, fe::DataType_t type, const Dims& dims, const Strides& strides,
+			const BiasLayout& bias, const Padding& padding, float scale
 	) {
 		thread_local std::map<Key, std::shared_ptr<fe::graph::Graph>> graphs;
 		const Key key{currentDevice(), kind, static_cast<int>(type), dims, strides, bias, padding, scale};
@@ -91,7 +91,9 @@ namespace {
 		size_t next = 0; // the next tensor's strides
 		auto strided = [&](std::shared_ptr<fe::graph::Tensor_attributes> t, int64_t uid, std::vector<int64_t> dim) {
 			const size_t s = 4 * next++;
-			t->set_uid(uid).set_dim(std::move(dim)).set_stride({strides[s], strides[s + 1], strides[s + 2], strides[s + 3]});
+			t->set_uid(uid)
+					.set_dim(std::move(dim))
+					.set_stride({strides[s], strides[s + 1], strides[s + 2], strides[s + 3]});
 			return t;
 		};
 		auto input = [&](const char* name, int64_t uid, std::vector<int64_t> dim) {
@@ -107,22 +109,26 @@ namespace {
 		};
 		std::shared_ptr<fe::graph::Tensor_attributes> lengths;
 		if (padding.enabled)
-			lengths = graph->tensor(fe::graph::Tensor_attributes()
-											.set_name("lengths")
-											.set_uid(kSeqLen)
-											.set_dim({b0, 1, 1, 1})
-											.set_stride({1, 1, 1, 1})
-											.set_data_type(fe::DataType_t::INT32));
+			lengths = graph->tensor(
+					fe::graph::Tensor_attributes()
+							.set_name("lengths")
+							.set_uid(kSeqLen)
+							.set_dim({b0, 1, 1, 1})
+							.set_stride({1, 1, 1, 1})
+							.set_data_type(fe::DataType_t::INT32)
+			);
 		auto Q = input("Q", kQ, {b0, b1, Sq, D});
 		auto K = input("K", kK, {b0, b1, Skv, D});
 		auto V = input("V", kV, {b0, b1, Skv, Dv});
 		std::shared_ptr<fe::graph::Tensor_attributes> B;
 		if (!bias.empty())
-			B = graph->tensor(fe::graph::Tensor_attributes()
-									  .set_name("bias")
-									  .set_uid(kBias)
-									  .set_dim({bias[0], bias[1], bias[2], bias[3]})
-									  .set_stride({bias[4], bias[5], bias[6], bias[7]}));
+			B = graph->tensor(
+					fe::graph::Tensor_attributes()
+							.set_name("bias")
+							.set_uid(kBias)
+							.set_dim({bias[0], bias[1], bias[2], bias[3]})
+							.set_stride({bias[4], bias[5], bias[6], bias[7]})
+			);
 		if (kind != Kind::backward) {
 			auto options = fe::graph::SDPA_attributes().set_name("attention").set_attn_scale(scale);
 			if (B)
@@ -200,7 +206,8 @@ namespace {
 			cudaEvent_t start = nullptr, stop = nullptr;
 			if (count > 1 && cudaEventCreate(&start) == cudaSuccess && cudaEventCreate(&stop) == cudaSuccess) {
 				for (int64_t plan = 0; plan < count; ++plan) {
-					if (!workspaceFor(plan) || !graph->execute_plan_at_index(ctx->handle, pack, ctx->workspace, plan).is_good())
+					if (!workspaceFor(plan) ||
+						!graph->execute_plan_at_index(ctx->handle, pack, ctx->workspace, plan).is_good())
 						continue; // (also the warm-up)
 					constexpr int kRuns = 3;
 					cudaEventRecord(start, stream);
@@ -237,7 +244,9 @@ namespace {
 	}
 
 	/** @brief A view with @p shape and @p strides (pointers into the caller's arrays). */
-	mdl::kernels::View view(int64_t rank, const int64_t* shape, const int64_t* strides) { return {rank, shape, strides}; }
+	mdl::kernels::View view(int64_t rank, const int64_t* shape, const int64_t* strides) {
+		return {rank, shape, strides};
+	}
 
 	/** @brief The shape [..., Sq, Dv] of the result (Q's batch dimensions and rows, V's columns). */
 	std::vector<int64_t> outShape(int64_t rank, const int64_t* q_shape, const int64_t* v_shape) {
@@ -287,12 +296,11 @@ namespace {
 		}
 	};
 
-	int forward(
-			fe::DataType_t type, size_t size, void* out, float* lse, const void* Q, const void* K, const void* V,
+	int
+	forward(fe::DataType_t type, size_t size, void* out, float* lse, const void* Q, const void* K, const void* V,
 			int64_t rank, const int64_t* q_shape, const int64_t* q_strides, const int64_t* k_shape,
 			const int64_t* k_strides, const int64_t* v_shape, const int64_t* v_strides, const int64_t* o_strides,
-			const Bias& bias, const int32_t* lengths, int32_t with_lse, float scale
-	) {
+			const Bias& bias, const int32_t* lengths, int32_t with_lse, float scale) {
 		const int axis = lengths != nullptr ? bias.lengthsAxis(rank) : -1;
 		if (lengths != nullptr && axis < 0)
 			return 7; // (the manifest admits only ranks and biases whose lengths' dimension is known)
@@ -309,7 +317,9 @@ namespace {
 				views,
 				[&](int64_t b0, int64_t b1, const std::vector<std::vector<int64_t>>& s, const std::vector<int64_t>& o) {
 					std::unordered_map<int64_t, void*> pack{
-							{kQ, at(mut(Q), o[0], size)}, {kK, at(mut(K), o[1], size)}, {kV, at(mut(V), o[2], size)},
+							{kQ, at(mut(Q), o[0], size)},
+							{kK, at(mut(K), o[1], size)},
+							{kV, at(mut(V), o[2], size)},
 							{kO, at(out, o[3], size)}
 					};
 					if (bias.data != nullptr)
@@ -356,9 +366,10 @@ namespace {
 		const auto o_shape = outShape(rank, q_shape, v_shape);
 		const int64_t Sq = q_shape[rank - 2], Skv = k_shape[rank - 2], D = q_shape[rank - 1], Dv = v_shape[rank - 1];
 		std::vector<mdl::kernels::View> views{
-				view(rank, q_shape, q_strides),	 view(rank, k_shape, k_strides),		view(rank, v_shape, v_strides),
-				view(rank, o_shape.data(), o_strides), view(rank, o_shape.data(), do_strides), view(rank, q_shape, dq_strides),
-				view(rank, k_shape, dk_strides), view(rank, v_shape, dv_strides)
+				view(rank, q_shape, q_strides),			view(rank, k_shape, k_strides),
+				view(rank, v_shape, v_strides),			view(rank, o_shape.data(), o_strides),
+				view(rank, o_shape.data(), do_strides), view(rank, q_shape, dq_strides),
+				view(rank, k_shape, dk_strides),		view(rank, v_shape, dv_strides)
 		};
 		if (bias.data != nullptr)
 			views.push_back(bias.view(rank));
@@ -384,9 +395,9 @@ namespace {
 					const float* stats = lse + slice * b0 * b1 * Sq;
 					++slice;
 					std::unordered_map<int64_t, void*> pack{
-							{kQ, at(mut(Q), o[0], size)},	{kK, at(mut(K), o[1], size)}, {kV, at(mut(V), o[2], size)},
-							{kO, at(mut(O), o[3], size)},	{kdO, at(mut(dO), o[4], size)}, {kStats, mut(stats)},
-							{kdQ, at(dq, o[5], size)},		{kdK, at(dk, o[6], size)},		{kdV, at(dv, o[7], size)}
+							{kQ, at(mut(Q), o[0], size)}, {kK, at(mut(K), o[1], size)},	  {kV, at(mut(V), o[2], size)},
+							{kO, at(mut(O), o[3], size)}, {kdO, at(mut(dO), o[4], size)}, {kStats, mut(stats)},
+							{kdQ, at(dq, o[5], size)},	  {kdK, at(dk, o[6], size)},	  {kdV, at(dv, o[7], size)}
 					};
 					if (bias.data != nullptr)
 						pack.emplace(kBias, at(mut(bias.data), o[8], size));

@@ -295,8 +295,8 @@ namespace mdl::kernels {
 					return impl;
 				onlyKeys(
 						n,
-						{"pattern", "artifacts", "priority", "symbol", "abi", "signature", "applicability",
-						 "guarantees"},
+						{"pattern", "artifacts", "priority", "symbol", "abi", "signature", "applicability", "guarantees"
+						},
 						"an implementation"
 				);
 				impl.pattern = requiredString(n, "pattern", where);
@@ -327,7 +327,9 @@ namespace mdl::kernels {
 								continue;
 							onlyKeys(a, {"type", "access", "value", "align"}, "an argument");
 							Argument arg;
-							arg.type = choice(a["type"], "type", {"pointer", "int64", "int32", "float32", "float64", "int64[]"});
+							arg.type =
+									choice(a["type"], "type",
+										   {"pointer", "int64", "int32", "float32", "float64", "int64[]"});
 							arg.value = requiredString(a, "value", "an argument");
 							if (arg.type == "pointer") {
 								if (a["access"])

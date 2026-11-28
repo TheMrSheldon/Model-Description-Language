@@ -40,7 +40,8 @@ namespace mdl::backend::tvm {
 		 * @brief The device's own legalizations of backend operators (operator name → LegalizeOps handler), replacing
 		 * the default ones (see legalizeMap), e.g. kernels written for the device. Default: none.
 		 */
-		virtual void overrideLegalizations(::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function>& /*handlers*/) const {}
+		virtual void
+		overrideLegalizations(::tvm::ffi::Map<::tvm::ffi::String, ::tvm::ffi::Function>& /*handlers*/) const {}
 
 		/** @brief Schedules the TVM-generated kernels (PrimFuncs with blocks) of @p kernels for this device. */
 		virtual ::tvm::IRModule schedule(::tvm::IRModule kernels) const = 0;

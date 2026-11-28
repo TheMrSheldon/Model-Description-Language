@@ -36,6 +36,17 @@ if(NOT MDL_ENABLE_COMPILER)
 	return()
 endif()
 
+# The installation (cmake --install, the CPack packages): a program built against it with find_package(MDL). Needs the
+# examples' sources and the whole project built.
+if(MDL_BUILD_EXAMPLES)
+	add_test(NAME install_consumer COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR}
+		-DCONSUMER=${CMAKE_CURRENT_LIST_DIR}/install -DEXAMPLE=${PROJECT_SOURCE_DIR}/examples/01_ffn
+		-DWORK=${CMAKE_CURRENT_BINARY_DIR}/install_work -DGENERATOR=${CMAKE_GENERATOR} -DCUDA=${MDL_ENABLE_CUDA}
+		-DCUDA_ARCH=${MDL_CUDA_ARCH}
+		-P ${CMAKE_CURRENT_LIST_DIR}/install/check_install.cmake)
+	set_tests_properties(install_consumer PROPERTIES TIMEOUT 1200)
+endif()
+
 # Compiler tests (passes, exports, backend, runtime).
 add_executable(tests
     mdl/computegraph/einops.cpp
@@ -66,15 +77,20 @@ endif()
 # mdl-kernels check/dump: the selection among competing implementations (tests/kernels/matching), the verdicts, and the
 # Relax module at the matching boundary.
 set(_model "${_kernels}/models/scaled_add.dlm")
-add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check "${_model}" --kernel-package competing)
+# The package of the selection tests names the platform of this build (it would not be eligible on another).
+mdl_kernel_host_platform(MDL_KERNEL_OS MDL_KERNEL_ARCH MDL_KERNEL_ABI)
+set(_matching "${CMAKE_CURRENT_BINARY_DIR}/kernels/matching")
+configure_file("${_kernels}/matching/competing/package.yml.in" "${_matching}/competing/package.yml" @ONLY)
+configure_file("${_kernels}/matching/competing/lib/libcompeting.placeholder" "${_matching}/competing/lib/libcompeting.placeholder" COPYONLY)
+add_test(NAME mdl_kernels_check COMMAND mdl-kernels --kernels-dir "${_matching}" check "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_check PROPERTIES PASS_REGULAR_EXPRESSION
 	"M__forward: competing/scaled-add-aligned at v4 \\(with a runtime guard\\).*M__other: competing/add-f32.*20 candidate\\(s\\), 5 selected")
-add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" check --explain "${_model}" --kernel-package competing)
+add_test(NAME mdl_kernels_explain COMMAND mdl-kernels --kernels-dir "${_matching}" check --explain "${_model}" --kernel-package competing)
 set_tests_properties(mdl_kernels_explain PROPERTIES PASS_REGULAR_EXPRESSION
 	"guard    where \\$x.shape\\[0\\] % 16 == 0 \\(checked at runtime: B % 16 == 0\\).*overlaps competing/scaled-add-aligned.*selected with a runtime guard.*it is float32.*the constant is 2 \\(it is 3\\)")
 # mdl-kernels deps/link-args: the packages' link requirements (CMake IMPORTED targets), and linker arguments from the
 # kernel report of the end-to-end test.
-add_test(NAME mdl_kernels_deps COMMAND mdl-kernels --kernels-dir "${_kernels}/matching" deps --kernel-package competing)
+add_test(NAME mdl_kernels_deps COMMAND mdl-kernels --kernels-dir "${_matching}" deps --kernel-package competing)
 set_tests_properties(mdl_kernels_deps PROPERTIES PASS_REGULAR_EXPRESSION
 	"add_library\\(mdl_kernel_artifact_competing_host STATIC IMPORTED\\).*MDL_KERNEL_PACKAGE_BUILD_competing IMPORTED")
 add_test(NAME mdl_kernels_deps_unknown COMMAND mdl-kernels deps --kernel-package nonexistent)

@@ -37,5 +37,5 @@ file(READ "${CMAKE_CURRENT_BINARY_DIR}/cublas.package.yml.in" manifest)
 string(REGEX REPLACE "\\$<TARGET_FILE:([a-z_]+)>" "lib/$<TARGET_FILE_NAME:\\1>" manifest "${manifest}")
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cublas.install.yml" CONTENT "${manifest}")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/cublas.install.yml" DESTINATION share/mdl/kernels/cublas
-	RENAME package.yml COMPONENT kernels)
-install(FILES $<TARGET_FILE:mdl_cublas> DESTINATION share/mdl/kernels/cublas/lib COMPONENT kernels)
+	RENAME package.yml COMPONENT cuda)
+install(FILES $<TARGET_FILE:mdl_cublas> DESTINATION share/mdl/kernels/cublas/lib COMPONENT cuda)

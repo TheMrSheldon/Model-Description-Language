@@ -8,7 +8,29 @@
 namespace mdl::tvm_ported::backend::cuda::codegen {
 
 	const std::vector<std::string>& TAGS() {
-		static const std::vector<std::string> tags{"bf16", "cast_smem_ptr_to_int", "cooperative_groups", "cuda", "cuda/barrier", "elect_one_sync", "fp16", "fp4", "fp6", "fp8", "get_time_stamp", "get_tmem_addr", "gmma_descriptor", "instr_descriptor", "instr_descriptor_block_scaled", "int8", "math_constants", "mma", "nvshmem", "smem_descriptor", "warp_shuffle"};
+		static const std::vector<std::string> tags{
+				"bf16",
+				"cast_smem_ptr_to_int",
+				"cooperative_groups",
+				"cuda",
+				"cuda/barrier",
+				"elect_one_sync",
+				"fp16",
+				"fp4",
+				"fp6",
+				"fp8",
+				"get_time_stamp",
+				"get_tmem_addr",
+				"gmma_descriptor",
+				"instr_descriptor",
+				"instr_descriptor_block_scaled",
+				"int8",
+				"math_constants",
+				"mma",
+				"nvshmem",
+				"smem_descriptor",
+				"warp_shuffle"
+		};
 		return tags;
 	}
 

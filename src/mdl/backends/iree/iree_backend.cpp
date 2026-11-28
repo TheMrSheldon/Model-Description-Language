@@ -675,17 +675,23 @@ translateFuncToMlir(const mdl::FunctionDecl& func, const mdl::ArgVals& argVals, 
 								std::string exsq =
 										bindOp(std::format("stablehlo.multiply {}, {} : {}", ex, ex, sumType), "exsq");
 								std::string var0 =
-										bindOp(std::format("stablehlo.subtract {}, {} : {}", ex2, exsq, sumType), "var0");
+										bindOp(std::format("stablehlo.subtract {}, {} : {}", ex2, exsq, sumType),
+											   "var0");
 								const float n = std::max(lastDimF(*tt), 1.0f);
-								const float dof = static_cast<float>(tryEvalConst(inv.arguments[1].get(), argVals).value_or(0));
+								const float dof =
+										static_cast<float>(tryEvalConst(inv.arguments[1].get(), argVals).value_or(0));
 								if (dof == 0.0f)
 									return var0;
-								std::string corr = bindOp(
-										std::format("stablehlo.constant dense<{:.8e}> : tensor<f32>", n / std::max(n - dof, 1.0f)),
-										"bessel"
-								);
+								std::string corr =
+										bindOp(std::format(
+													   "stablehlo.constant dense<{:.8e}> : tensor<f32>",
+													   n / std::max(n - dof, 1.0f)
+											   ),
+											   "bessel");
 								std::string corrBc = broadcastTo(corr, mdl::PrimitiveType::float32, var0, sumDT);
-								return bindOp(std::format("stablehlo.multiply {}, {} : {}", var0, corrBc, sumType), "var");
+								return bindOp(
+										std::format("stablehlo.multiply {}, {} : {}", var0, corrBc, sumType), "var"
+								);
 							}
 
 							// ── unary ─────────────────────────────────────────────────────

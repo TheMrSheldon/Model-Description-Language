@@ -122,7 +122,10 @@ namespace mdl::kernels {
 		const int64_t b0 = rank >= 4 ? views.front().shape[rank - 4] : 1;
 		const int64_t b1 = rank >= 3 ? views.front().shape[rank - 3] : 1;
 		for (size_t t = 0; t < views.size(); ++t)
-			strides[t] = {at(views[t], rank - 4), at(views[t], rank - 3), views[t].strides[rank - 2], views[t].strides[rank - 1]};
+			strides[t] = {
+					at(views[t], rank - 4), at(views[t], rank - 3), views[t].strides[rank - 2],
+					views[t].strides[rank - 1]
+			};
 		std::vector<int64_t> index(static_cast<size_t>(outer), 0);
 		std::vector<int64_t> offsets(views.size());
 		while (true) {

@@ -90,6 +90,7 @@ include(${CPM_DOWNLOAD_LOCATION})
 message("Loaded CPM v${CURRENT_CPM_VERSION}")
 
 # Add Source code
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/ThirdParty.cmake") # mdl_third_party(): the licenses that the packages ship
 add_subdirectory(src)
 
 
@@ -123,3 +124,9 @@ endif()
 if (MDL_BUILD_DOCS)
 	include(Docs) # cmake/Docs.cmake
 endif()
+
+
+##########################################################################################
+# Packages
+##########################################################################################
+include(Packaging) # cmake/Packaging.cmake: `cpack` in the build directory

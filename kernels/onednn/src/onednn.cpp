@@ -22,12 +22,12 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
-#include <stdexcept>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -132,8 +132,9 @@ namespace {
 					_mm256_cvtps_ph(_mm256_loadu_ps(src + 8 * i), _MM_FROUND_TO_NEAREST_INT)
 			);
 		for (int64_t i = n / 8 * 8; i < n; ++i)
-			dst[i] = static_cast<uint16_t>(_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT)
-			));
+			dst[i] = static_cast<uint16_t>(
+					_mm_cvtsi128_si32(_mm_cvtps_ph(_mm_set_ss(src[i]), _MM_FROUND_TO_NEAREST_INT))
+			);
 	}
 
 	bool hasF16C() {
@@ -219,9 +220,13 @@ namespace {
 	void
 	matmul(dt t, void* dst, const void* A, const void* B, const void* bias, const View& a, const View& b, const View& d,
 		   const void* addend, int activation, float alpha) {
+		// The addend is the output itself when a gradient is accumulated (dst += ...): oneDNN's sum post-op does that. (A
+		// binary post-op may not read its second operand from the output buffer: the product is stored before it is
+		// read, which on some CPUs (aarch64) doubles the result.)
+		const bool inplace = addend != nullptr && addend == dst;
 		using Key = std::tuple<
 				int, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, memory::dims, bool, bool,
-				int, float>;
+				int, float, bool>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const memory::desc srcMd(a.dims, t, a.strides), wMd(b.dims, t, b.strides), dstMd(d.dims, t, d.strides);
 		const memory::dim N = d.dims.back();
@@ -232,7 +237,7 @@ namespace {
 
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), a.dims, a.strides, b.dims, b.strides, d.dims, d.strides, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, activation, alpha, inplace},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					if (alpha != 1.0f)
@@ -241,7 +246,9 @@ namespace {
 					dnnl::post_ops ops;
 					if (activation == 1)
 						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
-					if (addend != nullptr)
+					if (inplace)
+						ops.append_sum();
+					else if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
 					auto create = [&] {
@@ -272,7 +279,7 @@ namespace {
 		std::unordered_map<int, memory> args{{DNNL_ARG_SRC, src}, {DNNL_ARG_WEIGHTS, wei}, {DNNL_ARG_DST, out}};
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
-		if (addend != nullptr)
+		if (addend != nullptr && !inplace)
 			args.emplace(
 					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
@@ -308,13 +315,14 @@ namespace {
 		const memory::desc zerosMd({groups, N}, dt::u8, memory::format_tag::ab);
 		const memory::desc biasMd({1, N}, t, memory::format_tag::ab);
 
+		const bool inplace = addend != nullptr && addend == dst; // (see matmul)
 		using Key = std::tuple<
 				int, int, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool, bool, bool, int,
-				float>;
+				float, bool>;
 		static PrimitiveCache<Key, std::optional<dnnl::matmul>> cache;
 		const auto& prim = cache.get(
 				Key{static_cast<int>(t), format, group, M, K, N, aM, aK, dM, dN, zeros != nullptr, bias != nullptr,
-					addend != nullptr, activation, alpha},
+					addend != nullptr, activation, alpha, inplace},
 				[&]() -> std::optional<dnnl::matmul> {
 					dnnl::primitive_attr attr;
 					// Compute in the activations' type; apply_to_int: the integer weights are converted to it.
@@ -335,7 +343,9 @@ namespace {
 					dnnl::post_ops ops;
 					if (activation == 1)
 						ops.append_eltwise(dnnl::algorithm::eltwise_gelu_erf, 0.f, 0.f);
-					if (addend != nullptr)
+					if (inplace)
+						ops.append_sum();
+					else if (addend != nullptr)
 						ops.append_binary(dnnl::algorithm::binary_add, dstMd);
 					attr.set_post_ops(ops);
 					auto create = [&] {
@@ -396,7 +406,7 @@ namespace {
 			);
 		if (bias)
 			args.emplace(DNNL_ARG_BIAS, memory(biasMd, engine(), const_cast<void*>(bias)));
-		if (addend != nullptr)
+		if (addend != nullptr && !inplace)
 			args.emplace(
 					DNNL_ARG_ATTR_MULTIPLE_POST_OP(activation == 1 ? 1 : 0) | DNNL_ARG_SRC_1,
 					memory(dstMd, engine(), const_cast<void*>(addend))
@@ -577,10 +587,9 @@ namespace {
 
 namespace {
 	/** @brief The product of one Gemm (see mdl_strided.hpp) at the offsets of a slice. */
-	void gemm(
-			dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
-			int32_t activation, float alpha
-	) {
+	void
+	gemm(dt t, void* dst, const void* A, const void* B, const void* bias, mdl::kernels::Gemm g, const void* addend,
+		 int32_t activation, float alpha) {
 		// A column-major result (oneDNN's fast kernels write rows): the transposed product C^T = B^T A^T (not with a
 		// bias along N, or a broadcast B, which would become the left operand).
 		const bool broadcastB = (g.b0 > 1 && g.b_s0 == 0) || (g.b1 > 1 && g.b_s1 == 0);
@@ -636,15 +645,15 @@ namespace {
 	}                                                                                                                  \
 	extern "C" int mdl_matmul_q_##suffix(                                                                              \
 			type* out, const type* A, const int8_t* q, const type* scales, const int8_t* zeros, int32_t format,        \
-			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,     \
+			int64_t group, int64_t N, const type* bias, const type* addend, int64_t a_rank, const int64_t* a_shape,    \
 			const int64_t* a_strides, int64_t c_rank, const int64_t* c_shape, const int64_t* c_strides,                \
 			int32_t activation, float alpha                                                                            \
 	) {                                                                                                                \
 		return guarded([&] {                                                                                           \
 			/* W^T [K, N] (unused strides: the batch dimensions only need its rank). */                                \
-			const int64_t K = a_shape[a_rank - 1], wShape[2] = {K, N}, wStrides[2] = {1, K};                            \
+			const int64_t K = a_shape[a_rank - 1], wShape[2] = {K, N}, wStrides[2] = {1, K};                           \
 			const int r = mdl::kernels::forEachGemm(                                                                   \
-					{a_rank, a_shape, a_strides}, {2, wShape, wStrides}, {c_rank, c_shape, c_strides}, 0,             \
+					{a_rank, a_shape, a_strides}, {2, wShape, wStrides}, {c_rank, c_shape, c_strides}, 0,              \
 					[&](const mdl::kernels::Gemm& g, int64_t ao, int64_t, int64_t co) {                                \
 						matmulQuantized(                                                                               \
 								dtype, const_cast<char*>(at(out, co, dtype)), at(A, ao, dtype), q, scales, zeros,      \

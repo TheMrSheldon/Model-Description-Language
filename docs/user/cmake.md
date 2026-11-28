@@ -3,10 +3,14 @@
 `cmake/MDL.cmake` provides `mdl_add_model()`, which compiles a model into an object file and generates a C++ header
 for it:
 
+With an installed MDL (the SDK), `find_package(MDL)` provides it, together with the targets `mdl::runtime` and
+`mdl::profile` that compiled models link. Put the installation's prefix on `CMAKE_PREFIX_PATH` (or pass
+`-DMDL_DIR=<prefix>/lib/cmake/MDL`); the package finds `mdlc` and the kernel packages of the installation itself.
+
 <div class="lang-cmake">
 
 ```cmake
-include(MDL)  # with cmake/ on CMAKE_MODULE_PATH
+find_package(MDL REQUIRED)  # an installation; within this project's own build: include(MDL) with cmake/ on CMAKE_MODULE_PATH
 
 # Creates the library target `transformer` from model.dlm (hyperparameters in model.yml).
 mdl_add_model(transformer SOURCE model.dlm CONFIG model.yml)

@@ -1,0 +1,77 @@
+# The CMake package of an MDL installation: find_package(MDL).
+#
+# Defines
+#   mdl::runtime   the runtime that compiled models need (mdl/runtime.hpp, TVM's runtime libraries)
+#   mdl::profile   the profiling hooks of models compiled with `mdlc --profile`
+#   mdl::target_cuda  the runtime of CUDA targets (if the cuda component is installed)
+#   mdl_add_model(), mdl_kernel_package(): see MDL.cmake
+#   MDL_COMPILER, MDL_KERNELS  the commands mdlc and mdl-kernels (empty if the compiler is not installed; the SDK of
+#                  another platform can be installed on its own, e.g. to cross-compile)
+#
+# The package is relocatable: it locates everything relative to this file.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+get_filename_component(_MDL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/@MDL_CONFIG_TO_PREFIX@" ABSOLUTE)
+set(_MDL_LIBDIR "${_MDL_PREFIX}/@MDL_INSTALL_LIBDIR@")
+set(_MDL_THIRD_PARTY "${_MDL_PREFIX}/@MDL_INSTALL_THIRD_PARTY_INCLUDEDIR@")
+
+# The commands run on the host: never search them in the root path of a cross-compilation toolchain.
+find_program(MDL_COMPILER mdlc HINTS "${_MDL_PREFIX}/@CMAKE_INSTALL_BINDIR@" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+find_program(MDL_KERNELS mdl-kernels HINTS "${_MDL_PREFIX}/@CMAKE_INSTALL_BINDIR@" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+mark_as_advanced(MDL_COMPILER MDL_KERNELS)
+
+# Imported libraries: a function so that the lookup variables do not leak.
+function(_mdl_import_library target kind name)
+	if(NOT TARGET mdl::${target})
+		add_library(mdl::${target} ${kind} IMPORTED)
+		if(WIN32 AND kind STREQUAL "SHARED")
+			# The DLL is in bin, the import library in the library directory.
+			find_file(_mdl_dll_${name} NAMES ${name}.dll PATHS "${_MDL_PREFIX}/@CMAKE_INSTALL_BINDIR@" NO_DEFAULT_PATH)
+			find_library(_mdl_lib_${name} NAMES ${name} PATHS "${_MDL_LIBDIR}" NO_DEFAULT_PATH)
+			set_target_properties(mdl::${target} PROPERTIES IMPORTED_LOCATION "${_mdl_dll_${name}}"
+				IMPORTED_IMPLIB "${_mdl_lib_${name}}")
+		else()
+			find_library(_mdl_lib_${name} NAMES ${name} PATHS "${_MDL_LIBDIR}" NO_DEFAULT_PATH)
+			set_target_properties(mdl::${target} PROPERTIES IMPORTED_LOCATION "${_mdl_lib_${name}}")
+		endif()
+		mark_as_advanced(_mdl_dll_${name} _mdl_lib_${name})
+	endif()
+endfunction()
+
+_mdl_import_library(tvm_ffi SHARED tvm_ffi)
+_mdl_import_library(tvm_runtime SHARED tvm_runtime)
+set_property(TARGET mdl::tvm_runtime APPEND PROPERTY INTERFACE_LINK_LIBRARIES mdl::tvm_ffi Threads::Threads)
+_mdl_import_library(profile STATIC mdl_profile)
+
+# The runtime of CUDA targets (the optional cuda component): mdl_add_model(... TARGET cuda) links it.
+find_library(_mdl_cuda_runtime NAMES tvm_runtime_cuda PATHS "${_MDL_LIBDIR}" NO_DEFAULT_PATH)
+if(_mdl_cuda_runtime)
+	_mdl_import_library(tvm_runtime_cuda SHARED tvm_runtime_cuda)
+	set_property(TARGET mdl::tvm_runtime_cuda APPEND PROPERTY INTERFACE_LINK_LIBRARIES mdl::tvm_runtime)
+	add_library(mdl::target_cuda INTERFACE IMPORTED)
+	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+		# (It only registers itself when loaded, no symbols are referenced: keep it despite --as-needed.)
+		set_target_properties(mdl::target_cuda PROPERTIES INTERFACE_LINK_LIBRARIES
+			"-Wl,--push-state,--no-as-needed;mdl::tvm_runtime_cuda;-Wl,--pop-state")
+	else()
+		set_target_properties(mdl::target_cuda PROPERTIES INTERFACE_LINK_LIBRARIES mdl::tvm_runtime_cuda)
+	endif()
+endif()
+mark_as_advanced(_mdl_cuda_runtime)
+
+if(NOT TARGET mdl::runtime)
+	add_library(mdl::runtime INTERFACE IMPORTED)
+	set_target_properties(mdl::runtime PROPERTIES
+		INTERFACE_INCLUDE_DIRECTORIES "${_MDL_PREFIX}/@CMAKE_INSTALL_INCLUDEDIR@;${_MDL_THIRD_PARTY}"
+		INTERFACE_COMPILE_FEATURES cxx_std_20
+		INTERFACE_LINK_LIBRARIES mdl::tvm_runtime)
+endif()
+set_target_properties(mdl::profile PROPERTIES
+	INTERFACE_INCLUDE_DIRECTORIES "${_MDL_PREFIX}/@CMAKE_INSTALL_INCLUDEDIR@" INTERFACE_COMPILE_FEATURES cxx_std_20)
+
+set(MDL_INSTALLED TRUE) # MDL.cmake: the installed package (not this project's own build)
+include("${CMAKE_CURRENT_LIST_DIR}/MDL.cmake")
+check_required_components(MDL)

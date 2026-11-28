@@ -135,14 +135,16 @@ namespace mdl::backend::tvm {
 						break;
 					P *= static_cast<int64_t>(imm->value);
 					ffi::Array<PrimExpr> trailingVars(vars.begin() + static_cast<std::ptrdiff_t>(s), vars.end());
-					ffi::Array<PrimExpr> trailingExtents(extents.begin() + static_cast<std::ptrdiff_t>(s), extents.end());
+					ffi::Array<PrimExpr> trailingExtents(
+							extents.begin() + static_cast<std::ptrdiff_t>(s), extents.end()
+					);
 					suffixes.emplace_back(offsetOf(trailingVars, trailingExtents), P);
 				}
 			}
 
 			// The operands: each load becomes a load of a flat view at n (the result's layout) or n % P (a broadcast of
 			// trailing dimensions); loads that do not depend on the iterators stay.
-			PrimVar n("vn", DataType::Int(64)); // the block iterator of the flat loop
+			PrimVar n("vn", DataType::Int(64));			  // the block iterator of the flat loop
 			std::map<const void*, tirx::BufferVar> views; // by buffer
 			std::vector<std::pair<tirx::BufferVar, tirx::BufferVar>> declared;
 			auto viewOf = [&](const tirx::BufferVar& buffer, const PrimExpr& elements) {
@@ -168,56 +170,57 @@ namespace mdl::backend::tvm {
 			ffi::Array<::tvm::TensorRegion> reads, writes;
 			ffi::Array<tirx::Stmt> flatStores;
 			for (const auto* store : stores) {
-			PrimExpr value = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
-									 store->value,
-									 [&](const ::tvm::TensorLoad& load) -> ffi::UnchangedOr<ffi::Any> {
-										 auto buffer = load->source.as<tirx::BufferVar>();
-										 if (!buffer || !ok)
-											 return ffi::Unchanged();
-										 bool dependent = false;
-										 for (const auto& i : load->indices)
-											 dependent |= usesIterators(i);
-										 if (!dependent) {
-											 reads.push_back(tirx::BufferRegionFromPoint(*buffer, load->indices));
-											 return ffi::Unchanged();
+				PrimExpr value = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
+										 store->value,
+										 [&](const ::tvm::TensorLoad& load) -> ffi::UnchangedOr<ffi::Any> {
+											 auto buffer = load->source.as<tirx::BufferVar>();
+											 if (!buffer || !ok)
+												 return ffi::Unchanged();
+											 bool dependent = false;
+											 for (const auto& i : load->indices)
+												 dependent |= usesIterators(i);
+											 if (!dependent) {
+												 reads.push_back(tirx::BufferRegionFromPoint(*buffer, load->indices));
+												 return ffi::Unchanged();
+											 }
+											 if (!compact(*buffer)) {
+												 ok = false;
+												 return ffi::Unchanged();
+											 }
+											 const PrimExpr offset = offsetOf(load->indices, (*buffer)->shape);
+											 PrimExpr elements = ::tvm::IntImm(DataType::Int(64), 1);
+											 for (const auto& d : (*buffer)->shape)
+												 elements = elements * ::tvm::prim::cast(DataType::Int(64), d);
+											 std::optional<PrimExpr> index;
+											 if (analyzer->CanProveEqual(offset, resultOffset))
+												 index = n;
+											 for (const auto& [suffixOffset, P] : suffixes)
+												 if (!index && analyzer->CanProveEqual(offset, suffixOffset))
+													 index = ::tvm::floormod(n, ::tvm::IntImm(DataType::Int(64), P));
+											 if (!index) {
+												 ok = false;
+												 return ffi::Unchanged();
+											 }
+											 const auto view = viewOf(*buffer, elements);
+											 reads.push_back(tirx::BufferRegionFromPoint(view, {*index}));
+											 return ffi::Any(tirx::BufferLoad(view, {*index}));
 										 }
-										 if (!compact(*buffer)) {
-											 ok = false;
-											 return ffi::Unchanged();
-										 }
-										 const PrimExpr offset = offsetOf(load->indices, (*buffer)->shape);
-										 PrimExpr elements = ::tvm::IntImm(DataType::Int(64), 1);
-										 for (const auto& d : (*buffer)->shape)
-											 elements = elements * ::tvm::prim::cast(DataType::Int(64), d);
-										 std::optional<PrimExpr> index;
-										 if (analyzer->CanProveEqual(offset, resultOffset))
-											 index = n;
-										 for (const auto& [suffixOffset, P] : suffixes)
-											 if (!index && analyzer->CanProveEqual(offset, suffixOffset))
-												 index = ::tvm::floormod(n, ::tvm::IntImm(DataType::Int(64), P));
-										 if (!index) {
-											 ok = false;
-											 return ffi::Unchanged();
-										 }
-										 const auto view = viewOf(*buffer, elements);
-										 reads.push_back(tirx::BufferRegionFromPoint(view, {*index}));
-										 return ffi::Any(tirx::BufferLoad(view, {*index}));
-									 }
-							 )
-									 .cast<PrimExpr>();
-			if (!ok || usesIterators(value))
-				return std::nullopt;
-			// flat[n] = value
-			const auto out = viewOf(store->buffer, total);
-			writes.push_back(tirx::BufferRegionFromPoint(out, {n}));
-			flatStores.push_back(tirx::BufferStore(out, value, {n}));
+				).cast<PrimExpr>();
+				if (!ok || usesIterators(value))
+					return std::nullopt;
+				// flat[n] = value
+				const auto out = viewOf(store->buffer, total);
+				writes.push_back(tirx::BufferRegionFromPoint(out, {n}));
+				flatStores.push_back(tirx::BufferStore(out, value, {n}));
 			}
 
 			// for n in range(total): the stores
 			const PrimVar& vn = n;
 			const ffi::Array<::tvm::TensorRegion>& blockReads = reads;
 			const s_tir::SBlock flat(
-					{tirx::IterVar(::tvm::Range::FromMinExtent(::tvm::IntImm(DataType::Int(64), 0), total), vn, tirx::kDataPar)},
+					{tirx::IterVar(
+							::tvm::Range::FromMinExtent(::tvm::IntImm(DataType::Int(64), 0), total), vn, tirx::kDataPar
+					)},
 					blockReads, writes, block->name_hint,
 					flatStores.size() == 1 ? flatStores[0] : tirx::Stmt(tirx::SeqStmt(flatStores))
 			);

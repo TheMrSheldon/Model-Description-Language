@@ -38,7 +38,8 @@ namespace mdl::backend::tvm::gpu {
 		}
 
 		Array<::tvm::ffi::Optional<PrimExpr>> factors(std::optional<int64_t> outer, int64_t inner) {
-			return {outer ? ::tvm::ffi::Optional<PrimExpr>(::tvm::IntImm::Int32(*outer)) : ::tvm::ffi::Optional<PrimExpr>(),
+			return {outer ? ::tvm::ffi::Optional<PrimExpr>(::tvm::IntImm::Int32(*outer))
+						  : ::tvm::ffi::Optional<PrimExpr>(),
 					::tvm::IntImm::Int32(inner)};
 		}
 	} // namespace
@@ -166,10 +167,13 @@ namespace mdl::backend::tvm::gpu {
 		const int64_t rowsPerBlock = infos->size() == 1 ? kRowsPerBlock : 1; // (several epilogues: several blocks)
 		const SBlockRV last = infos->back().block_rv;
 		auto loops = sch->GetLoops(last);
-		const LoopRV row = sch->Fuse(Array<LoopRV>(loops.begin(), loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS)));
-		const LoopRV col = loops.size() - numLeadingS == 1
-								   ? loops.back()
-								   : sch->Fuse(Array<LoopRV>(loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS), loops.end()));
+		const LoopRV row =
+				sch->Fuse(Array<LoopRV>(loops.begin(), loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS)));
+		const LoopRV col =
+				loops.size() - numLeadingS == 1
+						? loops.back()
+						: sch->Fuse(Array<LoopRV>(loops.begin() + static_cast<std::ptrdiff_t>(numLeadingS), loops.end())
+						  );
 		LoopRV bx = row, at = row;
 		if (rowsPerBlock > 1) {
 			const auto split = sch->Split(row, factors(std::nullopt, rowsPerBlock));
@@ -194,7 +198,9 @@ namespace mdl::backend::tvm::gpu {
 				sch->SetScope(block, static_cast<int>(i), "shared");
 			sch->ComputeAt(block, at, /*preserve_unit_loops=*/true);
 			const auto blockLoops = sch->GetLoops(block);
-			const LoopRV r = sch->Fuse(Array<LoopRV>(blockLoops.end() - static_cast<std::ptrdiff_t>(numTrailingR), blockLoops.end()));
+			const LoopRV r = sch->Fuse(
+					Array<LoopRV>(blockLoops.end() - static_cast<std::ptrdiff_t>(numTrailingR), blockLoops.end())
+			);
 			const auto parts = sch->Split(r, factors(std::nullopt, kWarp));
 			sch->Reorder({parts[1], parts[0]});
 			sch->Bind(parts[1], "threadIdx.x");

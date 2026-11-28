@@ -7,7 +7,7 @@ artifacts:
   host:
     kind: static-library
     path: lib/libcompeting.placeholder
-    platform: { os: linux, arch: x86_64 }
+    platform: { os: @MDL_KERNEL_OS@, arch: @MDL_KERNEL_ARCH@ }
 
 patterns:
   scaled-add:   # 2 * x + y (two bindings)

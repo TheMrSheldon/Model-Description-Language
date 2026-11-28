@@ -17,7 +17,8 @@
             "hidden": true,
             "inherits": "conf-common",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INSTALL_LIBDIR": "lib"
             }
         },
         {

@@ -18,7 +18,7 @@ artifacts:
     path: $<TARGET_FILE:dnnl>
     platform: { os: @MDL_KERNEL_OS@, arch: @MDL_KERNEL_ARCH@, abi: @MDL_KERNEL_ABI@ }
     dependencies:
-      - { kind: runtime, name: openmp }
+      - { kind: runtime, name: openmp }@MDL_ONEDNN_DL_DEPENDENCY@
 
 patterns:
   softmax:   # softmax over the last axis

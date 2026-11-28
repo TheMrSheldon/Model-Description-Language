@@ -10,10 +10,10 @@
 #include <tvm/relax/expr.h>
 #include <tvm/relax/type.h>
 #include <tvm/relax/utils.h>
-#include <tvm/sym/analyzer.h>
 #include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/function.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 
 #include <algorithm>
@@ -33,7 +33,7 @@ namespace mdl::backend::tvm {
 		using ::tvm::PrimExpr;
 		using Shape = ffi::Array<PrimExpr>;
 
-		constexpr int kInjective = 2;  // (TVM's OpPatternKind)
+		constexpr int kInjective = 2; // (TVM's OpPatternKind)
 		constexpr int kCommReduce = 3;
 		constexpr size_t kMaxGroup = 16;
 
@@ -80,7 +80,9 @@ namespace mdl::backend::tvm {
 				for (const auto& [e, v] : dims)
 					if (ffi::StructuralEqual()(e, d))
 						return v;
-				const ::tvm::PrimVar v(d.as<::tvm::VarNode>() ? std::string(d.as<::tvm::VarNode>()->name) : "n", d.ty());
+				const ::tvm::PrimVar v(
+						d.as<::tvm::VarNode>() ? std::string(d.as<::tvm::VarNode>()->name) : "n", d.ty()
+				);
 				dims.emplace_back(d, v);
 				return v;
 			};
@@ -99,7 +101,10 @@ namespace mdl::backend::tvm {
 				const ::tvm::PrimVar l("i" + std::to_string(d), i64), v("v" + std::to_string(d), i64);
 				loops.push_back(l);
 				loopVars.push_back(l);
-				ivs.push_back(tirx::IterVar(::tvm::Range::FromMinExtent(::tvm::IntImm(i64, 0), ::tvm::prim::cast(i64, outShape[d])), v, tirx::kDataPar));
+				ivs.push_back(tirx::IterVar(
+						::tvm::Range::FromMinExtent(::tvm::IntImm(i64, 0), ::tvm::prim::cast(i64, outShape[d])), v,
+						tirx::kDataPar
+				));
 				outIdx.push_back(v);
 				if (!::tvm::prim::is_one(outShape[d]))
 					nonUnit.push_back(v);
@@ -113,7 +118,10 @@ namespace mdl::backend::tvm {
 			);
 			tirx::Stmt body = s_tir::SBlockRealize(loopVars, ::tvm::IntImm::Bool(true), block);
 			for (size_t d = outShape.size(); d-- > 0;)
-				body = tirx::For(loops[d], ::tvm::IntImm(i64, 0), ::tvm::prim::cast(i64, outShape[d]), tirx::ForKind::kSerial, body);
+				body = tirx::For(
+						loops[d], ::tvm::IntImm(i64, 0), ::tvm::prim::cast(i64, outShape[d]), tirx::ForKind::kSerial,
+						body
+				);
 			body = s_tir::SBlockRealize({}, ::tvm::IntImm::Bool(true), s_tir::SBlock({}, {}, {}, "root", body));
 			auto func = tirx::PrimFunc({A, B}, body, ::tvm::VoidType());
 			return ::tvm::WithAttr(std::move(func), "op_pattern", ::tvm::IntImm(::tvm::PrimType::Int(32), kInjective));
@@ -122,12 +130,14 @@ namespace mdl::backend::tvm {
 		class RowFuser {
 		public:
 			enum class Mode { rows, inlineShared };
-			RowFuser(::tvm::IRModule mod, Mode mode) : mod(mod), builder(relax::BlockBuilder::Create(mod)), mode(mode) {}
+			RowFuser(::tvm::IRModule mod, Mode mode)
+					: mod(mod), builder(relax::BlockBuilder::Create(mod)), mode(mode) {}
 
 			::tvm::IRModule run() {
 				std::vector<std::pair<::tvm::GlobalVar, relax::Function>> functions, updates;
 				for (const auto& [gv, f] : mod->functions)
-					if (const auto* fn = f.as<relax::FunctionNode>(); fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
+					if (const auto* fn = f.as<relax::FunctionNode>();
+						fn && !fn->HasNonzeroAttr(relax::attr::kPrimitive))
 						functions.emplace_back(gv, ffi::GetRef<relax::Function>(fn));
 				for (const auto& [gv, f] : functions)
 					if (auto changed = rewrite(f))
@@ -138,7 +148,8 @@ namespace mdl::backend::tvm {
 				if (mode == Mode::rows)
 					mdl::log::getLogger("compiler")->info("Fused {} group(s) of row kernels", groups);
 				else
-					mdl::log::getLogger("compiler")->info("Recomputed {} shared elementwise value(s) in their consumers", groups);
+					mdl::log::getLogger("compiler")
+							->info("Recomputed {} shared elementwise value(s) in their consumers", groups);
 				return mod;
 			}
 
@@ -149,7 +160,9 @@ namespace mdl::backend::tvm {
 			size_t groups = 0;
 
 			/** @brief A function of the module, also one added by this pass. */
-			::tvm::BaseFunc lookup(const ::tvm::GlobalVar& gv) const { return builder->GetContextIRModule()->Lookup(gv); }
+			::tvm::BaseFunc lookup(const ::tvm::GlobalVar& gv) const {
+				return builder->GetContextIRModule()->Lookup(gv);
+			}
 
 			static int patternOf(const ::tvm::BaseFunc& f) {
 				if (f->attrs.defined())
@@ -194,9 +207,8 @@ namespace mdl::backend::tvm {
 									return std::nullopt;
 								continue;
 							}
-							s.pattern = std::max(
-									s.pattern, patternOf(lookup(c->args[0].as_or_throw<::tvm::GlobalVar>()))
-							);
+							s.pattern =
+									std::max(s.pattern, patternOf(lookup(c->args[0].as_or_throw<::tvm::GlobalVar>())));
 						}
 					for (const auto& a : call->args)
 						s.args.push_back(a);
@@ -221,7 +233,8 @@ namespace mdl::backend::tvm {
 				for (const auto& shape : s.shapes) {
 					if (shape.size() <= s.shape.size())
 						continue;
-					if (!equal(Shape(shape.begin(), shape.begin() + static_cast<std::ptrdiff_t>(s.shape.size())), s.shape))
+					if (!equal(Shape(shape.begin(), shape.begin() + static_cast<std::ptrdiff_t>(s.shape.size())),
+							   s.shape))
 						continue;
 					return Shape(shape.begin() + static_cast<std::ptrdiff_t>(s.shape.size()), shape.end());
 				}
@@ -284,7 +297,8 @@ namespace mdl::backend::tvm {
 					bool ok = consumers.size() == u->second;
 					for (size_t j : consumers)
 						ok &= sites[j] && sites[j]->pattern <= kInjective && !reducedRow(*sites[j]) &&
-							  !producerOf.contains(j) && !producers.contains(j) && equal(sites[j]->shape, sites[i]->shape);
+							  !producerOf.contains(j) && !producers.contains(j) &&
+							  equal(sites[j]->shape, sites[i]->shape);
 					if (!ok)
 						continue;
 					producers.insert(i);
@@ -320,14 +334,16 @@ namespace mdl::backend::tvm {
 
 				std::vector<bool> taken(bindings.size(), false);
 				std::map<size_t, std::vector<size_t>> groupAt; // last member -> members
-				std::map<size_t, std::vector<size_t>> escapingAt; // last member -> further results (indices into members)
+				std::map<size_t, std::vector<size_t>>
+						escapingAt; // last member -> further results (indices into members)
 				for (size_t i = 0; i < bindings.size(); ++i) {
 					if (!sites[i] || taken[i])
 						continue;
 					const auto L = reducedRow(*sites[i]);
 					if (!L)
 						continue;
-					const Shape rows = sites[i]->shape, rowsU = withoutUnits(rows), fullU = withoutUnits(concat(rows, *L));
+					const Shape rows = sites[i]->shape, rowsU = withoutUnits(rows),
+								fullU = withoutUnits(concat(rows, *L));
 					std::vector<size_t> group{i};
 					std::unordered_set<const void*> outputs{bindings[i]->var.get()}, inputs;
 					for (const auto& a : sites[i]->args)
@@ -397,7 +413,9 @@ namespace mdl::backend::tvm {
 					for (size_t m : group)
 						taken[m] = true;
 					// (the per-row results first: the full-shape epilogue is the last block)
-					std::stable_sort(escaping->begin(), escaping->end(), [&](size_t a, size_t b) { return !full[a] && full[b]; });
+					std::stable_sort(escaping->begin(), escaping->end(), [&](size_t a, size_t b) {
+						return !full[a] && full[b];
+					});
 					escapingAt.emplace(group.back(), std::move(*escaping));
 					groupAt.emplace(group.back(), std::move(group));
 				}
@@ -420,10 +438,9 @@ namespace mdl::backend::tvm {
 			}
 
 			/** @brief One primitive function of the members, called in place of the last one. */
-			std::vector<relax::Binding> fuse(
-					const ffi::Array<relax::Binding>& bindings, const std::vector<size_t>& members,
-					const std::vector<size_t>& escaping
-			) {
+			std::vector<relax::Binding>
+			fuse(const ffi::Array<relax::Binding>& bindings, const std::vector<size_t>& members,
+				 const std::vector<size_t>& escaping) {
 				std::unordered_set<const void*> internal;
 				for (size_t m : members)
 					internal.insert(bindings[m]->var.get());
@@ -474,7 +491,9 @@ namespace mdl::backend::tvm {
 					Expr value;
 					if (const auto* gv = call->op.as<::tvm::GlobalVarNode>()) {
 						// A group of FuseOps: its bindings, with fresh variables (a function may be called twice).
-						auto callee = relax::CopyWithNewVars(lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as_or_throw<relax::Function>());
+						auto callee = relax::CopyWithNewVars(
+								lookup(ffi::GetRef<::tvm::GlobalVar>(gv)).as_or_throw<relax::Function>()
+						);
 						ffi::Map<::tvm::Var, Expr> inner;
 						for (size_t p = 0; p < callee->params.size(); ++p)
 							inner.Set(callee->params[p], argument(call->args[p]));
@@ -495,7 +514,8 @@ namespace mdl::backend::tvm {
 						static const auto& callTir = ::tvm::Op::Get("relax.call_tir");
 						const Expr arg = argument(call->args[1].as_or_throw<relax::Tuple>()->fields[0]);
 						const auto kernel = builder->AddFunction(
-								unitReshape(*knownShape(arg), *knownShape(vb->var), tensorInfo(vb->var)->dtype.value()), "reshape_units"
+								unitReshape(*knownShape(arg), *knownShape(vb->var), tensorInfo(vb->var)->dtype.value()),
+								"reshape_units"
 						);
 						value = ::tvm::Call(
 								::tvm::Type::Missing(), callTir, {kernel, relax::Tuple({arg})}, ::tvm::Attrs(),
@@ -505,7 +525,9 @@ namespace mdl::backend::tvm {
 						ffi::Array<Expr> fields;
 						for (const auto& a : call->args[1].as_or_throw<relax::Tuple>()->fields)
 							fields.push_back(argument(a));
-						value = ::tvm::Call(call->ty, call->op, {call->args[0], relax::Tuple(fields)}, call->attrs, call->ty_args);
+						value = ::tvm::Call(
+								call->ty, call->op, {call->args[0], relax::Tuple(fields)}, call->attrs, call->ty_args
+						);
 					}
 					if (!defining[k].defined())
 						defining[k] = value;
@@ -517,7 +539,9 @@ namespace mdl::backend::tvm {
 				}
 				results.push_back(last);
 				const auto block = bb->EndBlock();
-				const Expr body = bb->Normalize(relax::SeqExpr({block}, results.size() == 1 ? last : Expr(relax::Tuple(results))));
+				const Expr body =
+						bb->Normalize(relax::SeqExpr({block}, results.size() == 1 ? last : Expr(relax::Tuple(results)))
+						);
 				ffi::Map<ffi::String, ffi::Any> attrs;
 				attrs.Set(relax::attr::kPrimitive, true);
 				const relax::Function function(params, body, std::nullopt, true, ::tvm::DictAttrs(attrs));
@@ -525,7 +549,8 @@ namespace mdl::backend::tvm {
 				const auto& lastBinding = bindings[members.back()];
 				if (escaping.empty())
 					return {relax::VarBinding(
-							lastBinding->var, ::tvm::Call(relax::GetType(lastBinding->var), gv, args, ::tvm::Attrs(), {})
+							lastBinding->var,
+							::tvm::Call(relax::GetType(lastBinding->var), gv, args, ::tvm::Attrs(), {})
 					)};
 				ffi::Array<::tvm::Type> types;
 				std::vector<::tvm::Var> vars;
@@ -536,7 +561,9 @@ namespace mdl::backend::tvm {
 					types.push_back(relax::GetType(v));
 				const ::tvm::TupleType tupleType(types);
 				const ::tvm::Var tuple(relax::DataflowVar("fused_rows", tupleType));
-				std::vector<relax::Binding> out{relax::VarBinding(tuple, ::tvm::Call(tupleType, gv, args, ::tvm::Attrs(), {}))};
+				std::vector<relax::Binding> out{
+						relax::VarBinding(tuple, ::tvm::Call(tupleType, gv, args, ::tvm::Attrs(), {}))
+				};
 				for (size_t k = 0; k < vars.size(); ++k)
 					out.push_back(relax::VarBinding(vars[k], ::tvm::TupleGetItem(tuple, static_cast<int>(k))));
 				return out;
@@ -560,8 +587,8 @@ namespace mdl::backend::tvm {
 				[](::tvm::IRModule mod, ::tvm::transform::PassContext) {
 					mod = RowFuser(std::move(mod), RowFuser::Mode::inlineShared).run();
 					return RowFuser(std::move(mod), RowFuser::Mode::rows).run();
-				}, 0,
-				"mdl.FuseRows", {}
+				},
+				0, "mdl.FuseRows", {}
 		);
 	}
 

@@ -91,7 +91,9 @@ namespace mdl::backend::tvm {
 		/** @brief Adds an output (several: the call's result is a tuple); returns its pointer expression. */
 		Expr output(const Array<PrimExpr>& shape, ::tvm::PrimType dtype) {
 			outInfos.push_back(TensorType(ShapeExpr(shape), dtype));
-			auto ptr = buffer(shape, dtype, outInfos.size() == 1 ? "out" : "out" + std::to_string(outInfos.size() - 1), true);
+			auto ptr =
+					buffer(shape, dtype, outInfos.size() == 1 ? "out" : "out" + std::to_string(outInfos.size() - 1),
+						   true);
 			outputBuffers.push_back(params.back());
 			return ptr;
 		}
@@ -108,7 +110,8 @@ namespace mdl::backend::tvm {
 					tirx::BufferType("", i64, {n}, {}, ::tvm::IntImm(i64, 0), 0, 0)
 			);
 			prologue.push_back(tirx::DeclBuffer(
-					buffer, Call(::tvm::PointerType(i64), tirx::builtin::tvm_stack_alloca(), {::tvm::StringImm("shape"), n})
+					buffer,
+					Call(::tvm::PointerType(i64), tirx::builtin::tvm_stack_alloca(), {::tvm::StringImm("shape"), n})
 			));
 			for (size_t i = 0; i < values.size(); ++i)
 				prologue.push_back(tirx::BufferStore(
@@ -122,7 +125,9 @@ namespace mdl::backend::tvm {
 			// The parameters: the inputs, the unbound symbolic variables, then the output (destination passing style).
 			std::vector<::tvm::Var> ordered;
 			for (const auto& p : params)
-				if (std::none_of(outputBuffers.begin(), outputBuffers.end(), [&](const auto& o) { return o.same_as(p); }))
+				if (std::none_of(outputBuffers.begin(), outputBuffers.end(), [&](const auto& o) {
+						return o.same_as(p);
+					}))
 					ordered.push_back(p);
 			auto vars = unboundVars(shapes, scalars);
 			ordered.insert(ordered.end(), vars.begin(), vars.end());

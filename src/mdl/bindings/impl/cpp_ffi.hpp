@@ -195,9 +195,8 @@ namespace mdl::bindings::detail {
 	}
 
 	/** @param load the function that loads the object's system library (called before every compiled function). */
-	inline void generateCppModule(
-			std::ostream& out, const std::vector<const ExportedFunction*>& fns, const std::string& load
-	) {
+	inline void
+	generateCppModule(std::ostream& out, const std::vector<const ExportedFunction*>& fns, const std::string& load) {
 		const auto& module = fns.front()->module;
 		std::map<std::string, const TensorSignature*> sigs;
 		for (const auto* fn : fns)
@@ -306,7 +305,8 @@ namespace mdl::bindings::detail {
 					<< "    /// `device`: the device of the tensors that will be passed (the CPU by default).\n"
 					<< "    static Context " << context->name << "_alloc(" << dims << (dims.empty() ? "" : ", ")
 					<< "DLDevice device = {kDLCPU, 0}) {\n"
-					<< "        return mdl_detail::allocContext(" << context->name << "_size(" << dimArgs << "), device);\n"
+					<< "        return mdl_detail::allocContext(" << context->name << "_size(" << dimArgs
+					<< "), device);\n"
 					<< "    }\n"
 					<< "    static void " << context->name << "_free(Context& ctx) { mdl_detail::freeContext(ctx); }\n";
 			}
@@ -320,7 +320,8 @@ namespace mdl::bindings::detail {
 			out << "`\n"
 				<< "    /// Outputs must be preallocated by the caller (destination passing style). All tensors must "
 				   "be\n"
-				<< "    /// contiguous tensors of the declared type (float32, or int32 for `int`) on the device the model was\n"
+				<< "    /// contiguous tensors of the declared type (float32, or int32 for `int`) on the device the "
+				   "model was\n"
 				<< "    /// compiled for, whose data is aligned to 64 bytes (e.g. mdl::runtime::Tensor on the CPU).\n"
 				<< "    /// `B`/`Bi` mark the dimensions of `...`, which are only known at runtime (the same in all "
 				   "tensors).\n";
@@ -453,7 +454,8 @@ inline void mdl::bindings::CppFfiGenerator::generate(
 		<< "        // Host memory directly; device memory through the TVM runtime (which the model links anyway).\n"
 		<< "        ctx.data = device.device_type == kDLCPU\n"
 		<< "                       ? std::aligned_alloc(kTensorAlignment, size)\n"
-		<< "                       : TVMBackendAllocWorkspace(device.device_type, device.device_id, size, kDLUInt, 8);\n"
+		<< "                       : TVMBackendAllocWorkspace(device.device_type, device.device_id, size, kDLUInt, "
+		   "8);\n"
 		<< "        if (ctx.data == nullptr)\n"
 		<< "            throw std::bad_alloc();\n"
 		<< "        return ctx;\n"
