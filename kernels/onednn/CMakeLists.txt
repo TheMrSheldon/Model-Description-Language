@@ -36,6 +36,11 @@ target_link_libraries(mdl_onednn PUBLIC dnnl OpenMP::OpenMP_CXX)
 
 # In the build tree, the manifest refers to the built libraries; installed, the package is share/mdl/kernels/onednn
 # with the libraries in its lib directory.
+# The static oneDNN (ittnotify) calls dlopen/dlerror, which are in libdl before glibc 2.34 (manylinux_2_28).
+set(MDL_ONEDNN_DL_DEPENDENCY "")
+if(UNIX)
+	set(MDL_ONEDNN_DL_DEPENDENCY "\n      - { kind: system-library, name: dl }")
+endif()
 mdl_kernel_package(onednn MANIFEST package.yml.in TARGETS mdl_onednn)
 file(READ "${CMAKE_CURRENT_BINARY_DIR}/onednn.package.yml.in" manifest)
 string(REGEX REPLACE "\\$<TARGET_FILE:([a-z_]+)>" "lib/$<TARGET_FILE_NAME:\\1>" manifest "${manifest}")
